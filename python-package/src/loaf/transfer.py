@@ -45,9 +45,9 @@ TERMINAL_METADATA = "terminal.json"
 TERMINAL_KEY_STAGING = ".loaf-terminal-key-"
 IMAGES = ("local/ollama-online:latest", "local/ollama-offline:latest", "local/open-webui:latest")
 VOLUMES = {"ollama": "ollama", "open-webui": "webui"}
-# These labels identify workspace volumes from existing terminal images and backups.
-WORKSPACE_PROJECT_LABEL = "owo.tool-server.project"
-WORKSPACE_OWNER_LABEL = "owo.tool-server.workspace"
+# Match the ownership labels set by the terminal provisioner.
+WORKSPACE_PROJECT_LABEL = "loaf.tool-server.project"
+WORKSPACE_OWNER_LABEL = "loaf.tool-server.workspace"
 COPY_BUFFER = 1024 * 1024
 MANIFEST_LIST_TYPE = "application/vnd.ollama.manifest.list.v2+json"
 
@@ -498,7 +498,7 @@ def check_backup_modelfiles(project: Path, volumes: Path, staging: Path, namespa
 
 def workspace_prefix(namespace: str) -> str:
     project = sha256((namespace or "local-inference").encode()).hexdigest()[:16]
-    return f"owo-tools-{project}-"
+    return f"loaf-tools-{project}-"
 
 
 def validate_workspace_names(names, namespace: str) -> tuple[str, ...]:

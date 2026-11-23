@@ -1,11 +1,11 @@
 # Local AI Ferry
 
-[![CLI baseline · 2026-11-23 17:33:11 — 177/177 passed](docs/badges/cli.svg)](docs/verification-record.md#2026-11-23-173311-0100--test-badge-run)&nbsp;&nbsp;&nbsp; This is software not production-ready - use for testing only.
+[![CLI baseline · 2026-11-24 00:49:12 — 184/184 passed](docs/badges/cli.svg)](docs/verification-record.md#2026-11-24-004912-0100--test-badge-run)&nbsp;&nbsp;&nbsp; This is software not production-ready - use for testing only.
 
-[![Docker · 2026-11-23 — 30/30 passed](docs/badges/docker.svg)](docs/verification-record.md#2026-11-23-1031-cet--readme-test-badge-runs)
-[![Open Terminal · 2026-11-23 — 10/10 passed](docs/badges/open-terminal.svg)](docs/verification-record.md#2026-11-23-1031-cet--readme-test-badge-runs)
-[![GPU inference · 2026-11-22 — 6/6 passed](docs/badges/gpu.svg)](docs/verification-record.md#2026-11-22-1233-cet--independent-docker-checks-and-quieter-test-output)
-[![Model catalog · 2026-11-23 — 1/1 passed](docs/badges/catalog.svg)](docs/verification-record.md#2026-11-23-1031-cet--readme-test-badge-runs)
+[![Docker · 2026-11-24 00:30:09 — 30/30 passed](docs/badges/docker.svg)](docs/verification-record.md#2026-11-24-003009-0100--test-badge-run)
+[![Open Terminal · 2026-11-24 00:49:12 — 10/10 passed](docs/badges/open-terminal.svg)](docs/verification-record.md#2026-11-24-004912-0100--test-badge-run)
+[![GPU inference · 2026-11-24 00:30:09 — 6/6 passed](docs/badges/gpu.svg)](docs/verification-record.md#2026-11-24-003009-0100--test-badge-run)
+[![Model catalog · 2026-11-24 00:30:09 — 1/1 passed](docs/badges/catalog.svg)](docs/verification-record.md#2026-11-24-003009-0100--test-badge-run)
 
 Local AI Ferry prepares local AI deployments and transfers them to offline or
 air-gapped machines. Its `loaf` CLI runs Ollama and Open WebUI with Docker

@@ -7,6 +7,14 @@ Git milestones use commit timestamps. Working-tree milestones use the
 associated verification time where it was recorded.
 Earlier entries use the current names for commands, paths and artifacts.
 
+## 2026-11-24 00:43 CET — Open Terminal workspace labels
+
+- Adopted `loaf.*` Docker ownership labels and `loaf-tools-` resource names in
+  the provisioner and backup tooling. Documented the effect on workspaces
+  from earlier prerelease builds. [Terminal deployment](terminal-server.md#upgrade-an-existing-terminal-deployment)
+- The connected and offline fixtures use the backup volume inventory to check
+  that both account volumes are discoverable before and after restart.
+
 ## 2026-11-24 00:06 CET — Local network access guide
 
 - Added the operator responsibility warning and instructions for publishing

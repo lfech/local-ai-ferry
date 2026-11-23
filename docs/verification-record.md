@@ -4,6 +4,43 @@
 
 Older entries use the current command and project names in examples.
 
+## 2026-11-24 00:49:12 +0100 — Test badge run
+
+`loaf test --badges` passed on Linux with Python 3.13.2.
+Unittest reported 231 cases and 37 skips.
+Enabled test options were `RUN_TERMINAL_SERVER_TESTS=1`.
+
+| Group | Passed / executed |
+| --- | ---: |
+| CLI baseline | 184/184 |
+| Open Terminal | 10/10 |
+
+## 2026-11-24 00:43 CET — Open Terminal workspace labels
+
+- Reproduced both workspace failures on Debian 13.8 in WSL2. The fixtures
+  filtered by `loaf.*` and could not find the chat volumes labeled `owo.*`.
+- All four Open Terminal Docker cases passed on Engine 26.1.5 and Compose
+  2.26.1-4 with a disposable image containing the updated provisioner. The
+  connected and offline cases checked both accounts' volumes before and after
+  cold restart, and the test projects' workspace resources were removed.
+- The baseline passed 190 cases with 41 skips on Python 3.13.5. The six local
+  Open Terminal API checks ran. The skips were Docker, GPU, Open Terminal
+  Docker, and catalog cases that require opt-in. [Test commands](verification.md#terminal-server-checks)
+
+## 2026-11-24 00:30:09 +0100 — Test badge run
+
+`loaf test --badges` failed on Linux with Python 3.13.2.
+Unittest reported 231 cases and 6 skips.
+Enabled test options were `RUN_DOCKER_TESTS=1`, `RUN_GPU_TESTS=1`, `RUN_CATALOG_TESTS=1`, `RUN_TERMINAL_SERVER_TESTS=1`.
+
+| Group | Passed / executed |
+| --- | ---: |
+| CLI baseline | 184/184 |
+| Docker | 30/30 |
+| Open Terminal | 2/4 |
+| GPU inference | 6/6 |
+| Model catalog | 1/1 |
+
 ## 2026-11-24 00:06 CET — Local network access guide
 
 - All five documentation checks passed. Both WebUI INI examples loaded using

@@ -459,7 +459,8 @@ class TerminalServerDockerTests(unittest.TestCase):
     def check_profile(self, profile, webui, *, bridge_options):
         project = f"loaf-terminal-test-{uuid4().hex}"
         control = f"{project}_terminal-control"
-        label = f"label=loaf.tool-server.project={project}"
+        # The terminal image uses these persisted labels for workspace ownership.
+        label = f"label={transfer.WORKSPACE_PROJECT_LABEL}={project}"
         chat_label = f"label=loaf.terminal.chat-project={project}"
         with TemporaryDirectory() as temporary:
             folder = Path(temporary)
@@ -520,6 +521,7 @@ class TerminalServerDockerTests(unittest.TestCase):
                         self.assertEqual(ids, expected)
                         break
                     sleep(0.25)
+                self.assertEqual(len(transfer.list_terminal_workspaces(folder, project)), 2)
                 runners = command(["docker", "ps", "-q", "--filter", label]).split()
                 self.assertEqual(len(runners), 3 if retained else 2)
                 workspace_networks = command(["docker", "network", "ls", "-q", "--filter", label]).split()

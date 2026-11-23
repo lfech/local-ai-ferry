@@ -75,10 +75,14 @@ Direct Compose uses `LOAF_TERMINAL_SECRET_FILE` for a custom bearer key path.
 The supported section is now `[terminal_server]`. The launcher also reads any
 existing `[tool_server]` entries. When both sections specify the same key in
 one file, the current section wins. If the default `config/terminal-server.key`
-is missing, `loaf` uses `config/tool-server.key` when present. Existing workspace
-volumes keep their Docker names and ownership labels. Saved direct connections
-to `http://tool-server:8000` continue to resolve through a private network alias.
-Use `http://terminal-server:8000` for new connections.
+is missing, `loaf` uses `config/tool-server.key` when present. Saved direct
+connections to `http://tool-server:8000` continue to resolve through a private
+network alias. Use `http://terminal-server:8000` for new connections.
+
+Workspace resources use `loaf-tools-` Docker names and `loaf.*` ownership
+labels. The rebuilt provisioner starts with fresh workspaces when upgrading
+from a prerelease build that used `owo-tools-`. Keep the earlier build with
+its volumes and archives if you need to access that workspace data.
 
 ## Use the terminal from a model
 
@@ -220,7 +224,7 @@ names, ownership labels, and data. Restore the matching Open WebUI data so
 account IDs still match the volumes. List user volumes by Compose project.
 
 ```bash
-docker volume ls --filter label=owo.tool-server.project=local-inference
+docker volume ls --filter label=loaf.tool-server.project=local-inference
 ```
 
 `loaf stop` stops the provisioner and its runners and removes the Compose

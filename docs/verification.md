@@ -193,7 +193,8 @@ Cleanup targets the generated projects and their disposable resources.
 
 The optional [terminal server Docker checks](terminal-server.md#acceptance-checks) use
 `RUN_TERMINAL_SERVER_TESTS=1`, Docker Engine 26+, and locally built
-`local/open-webui:latest` and `local/open-terminal:latest` images.
+`local/open-webui:latest` and `local/open-terminal:latest` images from the current
+checkout. Rebuild the terminal image after changes to the provisioner.
 Run it on native Debian and Debian in WSL2 with the same local images
 before and after host disconnection. The serving cases drive
 Open WebUI's terminal proxy with two authorized accounts and a denied

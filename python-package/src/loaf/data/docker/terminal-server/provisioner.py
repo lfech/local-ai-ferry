@@ -21,13 +21,12 @@ from yarl import URL
 
 
 LOG = logging.getLogger(__name__)
-# Existing workspace volumes are found by these persisted Docker labels.
-# Preserve Docker ownership labels for existing workspace data.
-PROJECT = "owo.tool-server.project"
-OWNER = "owo.tool-server.workspace"
-CHAT_PROJECT = "owo.terminal.chat-project"
-CHAT_ID = "owo.terminal.chat-id"
-CHAT_OWNER = "owo.terminal.chat-owner"
+# Workspace ownership is persisted in Docker labels.
+PROJECT = "loaf.tool-server.project"
+OWNER = "loaf.tool-server.workspace"
+CHAT_PROJECT = "loaf.terminal.chat-project"
+CHAT_ID = "loaf.terminal.chat-id"
+CHAT_OWNER = "loaf.terminal.chat-owner"
 GATEWAY = "com.docker.network.bridge.gateway_mode_ipv4"
 INHIBIT_IPV4 = "com.docker.network.bridge.inhibit_ipv4"
 BRIDGE_NAME = "com.docker.network.bridge.name"
@@ -124,7 +123,7 @@ class Policy:
 
     def asset_name(self, key):
         project = hashlib.sha256(self.project.encode()).hexdigest()[:16]
-        return f"owo-tools-{project}-{key}"
+        return f"loaf-tools-{project}-{key}"
 
     def labels(self, key):
         return {PROJECT: self.project, OWNER: key}
