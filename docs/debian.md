@@ -156,6 +156,7 @@ ssh -N -L 3001:127.0.0.1:3000 user@debian-host
 ```
 
 Keep that terminal open and browse to **http://localhost:3001**. Use a free local port for the forward.
+To publish WebUI directly to the LAN, follow the [local network guide](local-network.md).
 
 ## Prepare models directly on online Debian
 

@@ -7,6 +7,13 @@ Git milestones use commit timestamps. Working-tree milestones use the
 associated verification time where it was recorded.
 Earlier entries use the current names for commands, paths and artifacts.
 
+## 2026-11-24 00:06 CET — Local network access guide
+
+- Added the operator responsibility warning and instructions for publishing
+  and removing WebUI access on native Debian and on Windows with WSL 2.
+  The WSL guide covers NAT port forwarding, mirrored networking and reversal.
+  [Local network access](local-network.md)
+
 ## 2026-11-23 22:51 CET — Clean the current installer layout
 
 - Limited `loaf clean --full` to current installation and build paths.

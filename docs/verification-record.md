@@ -4,6 +4,15 @@
 
 Older entries use the current command and project names in examples.
 
+## 2026-11-24 00:06 CET — Local network access guide
+
+- All five documentation checks passed. Both WebUI INI examples loaded using
+  the launcher configuration parser.
+- Windows PowerShell parsed all ten examples and confirmed the firewall
+  parameters against the installed cmdlets. In-memory fixtures checked the
+  NAT IPv4 lookup and the mirrored-to-NAT configuration edit. Verification
+  covered configuration, command syntax and string handling.
+
 ## 2026-11-23 22:51 CET — Cleanup and GitHub Verify checks
 
 - Reproduced the CI cleanup failure locally. The fixture expected Git-visible

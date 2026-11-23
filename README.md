@@ -209,6 +209,7 @@ See [configuration and offline behavior](docs/configuration.md).
 | [Installation](docs/installation.md) | Installation steps |
 | [Open WebUI Tether](docs/tether.md) | Desktop installation and connection to a running deployment |
 | [Debian](docs/debian.md) | Native Docker/NVIDIA setup, startup and SSH browser access |
+| [Local network access](docs/local-network.md) | Publish or remove LAN access on native Debian and Debian in WSL 2 |
 | [CLI overview](docs/cli.md) | Find commands and help |
 | [CLI reference](docs/cli-help.md) | Every command and its flags |
 | [Launcher](docs/launcher.md) | Installation, model selection, serving and failure handling |

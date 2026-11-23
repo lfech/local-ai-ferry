@@ -190,6 +190,7 @@ localhost publishing. The default host binding is `127.0.0.1:3000` and the
 container port is `8080`. Set `[webui]` `bind_address` to an IP address on
 the host and `port` to a free port. For remote access through the default
 binding, use an [SSH forward](debian.md#verify-and-open-webui).
+For direct access from other devices, see the [local network guide](local-network.md).
 
 WebUI's offline settings suppress automatic downloads and update checks.
 Both serving profiles inherit the image defaults that disable OpenAI connections
