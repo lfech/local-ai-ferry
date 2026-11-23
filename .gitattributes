@@ -1,0 +1,18 @@
+# .gitattributes - Keep portable source files in LF form across Windows/Linux.
+# Linux shebangs require LF. Dockerfile rules without slashes match every subdir.
+
+# --- Container definitions and repository settings ---
+Dockerfile text eol=lf
+.gitattributes text eol=lf
+.gitignore text eol=lf
+.dockerignore text eol=lf
+# --- Scripts, configuration and documentation ---
+# Docker builds also strip CRLF from helpers copied without a Git checkout.
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.ini text eol=lf
+*.md text eol=lf
+*.py text eol=lf
+*.txt text eol=lf
+*.toml text eol=lf

@@ -1,0 +1,6 @@
+# .dockerignore - Offline image needs only its Dockerfile and startup wrapper.
+# Start excluded; later ! rules re-include the exact build inputs.
+# --- Minimal build context ---
+*
+!Dockerfile
+!start-ollama-offline.sh

@@ -1,0 +1,187 @@
+# loaf command reference
+
+[CLI overview](cli.md) · [Project overview](../README.md)
+
+```text
+loaf [GLOBAL OPTIONS] COMMAND [OPTIONS]
+```
+
+`loaf --help` lists commands and global flags. `loaf COMMAND --help` shows the
+flags for that command. Flags can appear before or after the command. Relative
+paths given on the command line start at the shell's current directory.
+
+## Global flags
+
+| Flag | Effect |
+| --- | --- |
+| `-h`, `--help` | Print help for `loaf`, a command, or an integration and exit. |
+| `--project-dir PATH` | Select the checkout or deployment. Defaults to the current directory. |
+| `-v`, `--verbose` | Show external commands where available. With `test`, show individual test names. |
+
+The standalone executable also accepts `./loaf --license` to print its
+bundled license notices and source locations. [Standalone license](releases.md#standalone-license)
+
+## Shared command flags
+
+Each command lists the shared flags it uses.
+
+| Flag | Effect |
+| --- | --- |
+| `--config-dir PATH` | Override the project's `config/` directory. Packaged defaults supply unset values. |
+| `--version VERSION` | Select a separate deployment namespace. Use `--version=` to clear the configured value. [Versioned deployments](launcher.md#run-a-versioned-deployment) |
+| `--dry-run` | Preview the operation without invoking Docker or taking a project lock. Add `-v` to see planned Compose commands. |
+| `-a`, `--attach` | Follow new Compose logs after a successful operation. Press Ctrl+C to leave the log view with services still running. |
+| `--wait-timeout SECONDS` | Override the readiness wait for service startup. The packaged default is 300 seconds. |
+| `--models-file PATH` | Select a model INI for this run. It overrides `[launcher] models_file`. [Model selection](launcher.md#select-models) |
+| `--backup-dir PATH` | Override `[transfer] backup_dir`. The packaged default is `backup/` relative to the project. Use either `--backup-dir` or `--archive`. |
+| `--archive PATH` | Select an explicit archive or backup folder, as specified by the command. |
+
+## Commands
+
+### setup
+
+Prepare configuration and link the Docker project with the standalone
+executable, or install `loaf` in the checkout's virtualenv and prepare the
+installer cache from source. [Installation](installation.md)
+
+Uses `--config-dir PATH` and `--dry-run`.
+
+- `--with-docker-deps` caches Docker Engine, Compose and Buildx packages on Debian 13 and installs them as needed.
+- `--archive PATH` selects a backup folder or its archive when running standalone setup. With `--with-docker-deps`, setup can recover the matching installers from that backup.
+
+### install
+
+Alias for [`setup`](#setup) with the same flags.
+
+### binary
+
+Build or replace `dist/loaf` from the working source checkout. Uses
+`--dry-run`. [Local binary build](releases.md#build-and-check-locally)
+
+### clean
+
+Remove the runtime cache and recognized generated temporary files. Uses
+`--dry-run`. [Cleanup and preserved files](launcher.md#clean-generated-files)
+
+- `--full` also removes generated installation files, including the install cache and project virtualenv, when eligible for cleanup.
+
+### link-docker-project
+
+Create the `docker-project` symlink to the packaged Compose project. Uses
+`--dry-run`. [Direct Compose use](launcher.md#link-the-docker-project)
+
+### build
+
+Build the local Ollama and WebUI images and the terminal image when enabled.
+Uses `--config-dir PATH`, `--version VERSION`, `--dry-run`, and `-a` or
+`--attach`.
+
+### upgrade
+
+Pull updated upstream base images and rebuild the same local images as
+`build`. Uses `--config-dir PATH`, `--version VERSION`, `--dry-run`, and `-a`
+or `--attach`.
+
+### download
+
+Start the downloader and pull the selected models into the shared Ollama
+store. Uses `--models-file PATH`, `--config-dir PATH`, `--version VERSION`,
+`--dry-run`, `--wait-timeout SECONDS`, and `-a` or `--attach`.
+
+### online
+
+Start Ollama and WebUI on the connected profile. Uses `--config-dir PATH`,
+`--version VERSION`, `--dry-run`, `--wait-timeout SECONDS`, and `-a` or
+`--attach`.
+
+- `--cpu` selects CPU inference. The default uses NVIDIA GPU acceleration.
+
+### offline
+
+Start Ollama and WebUI with the offline profile and the saved model store.
+Uses `--config-dir PATH`, `--version VERSION`, `--dry-run`,
+`--wait-timeout SECONDS`, and `-a` or `--attach`.
+
+- `--cpu` selects CPU inference. The default uses NVIDIA GPU acceleration.
+
+### status
+
+Check serving readiness and list containers across the selected deployment's
+profiles. Uses `--config-dir PATH`, `--version VERSION`, `--dry-run`, and `-a`
+or `--attach`. [Readiness checks](launcher.md#check-readiness-with-status)
+
+- `--cpu` checks CPU serving readiness and skips the NVIDIA probe.
+
+### stop
+
+Stop the selected deployment's services and remove their containers. Uses
+`--config-dir PATH`, `--version VERSION`, `--dry-run`, and `-a` or `--attach`.
+[Container removal](launcher.md#stop-and-remove-containers)
+
+- `--remove-containers` explicitly enables container removal, the default.
+- `-n`, `--no-remove-containers` keep the stopped containers and their logs.
+
+### export
+
+Save the Ollama store to a model-only archive. Uses `--config-dir PATH`,
+`--version VERSION`, and `--dry-run`. `--archive PATH` writes to a specific
+file. `--backup-dir PATH` writes the automatically named archive in that
+directory. [Model transfer](transfer.md#transfer-models-between-existing-deployments)
+
+### import
+
+Merge a model-only archive into the Ollama store. Uses `--config-dir PATH`,
+`--version VERSION`, and `--dry-run`. `--archive PATH` reads a specific file.
+`--backup-dir PATH` selects the newest model archive in that directory.
+
+- `--delete` mirrors the archive by removing destination-only blobs, manifests and Modelfiles.
+
+### backup
+
+Create a dated backup folder containing the archive, verification manifest
+and standalone executable. Uses `--config-dir PATH`, `--version VERSION`,
+`--dry-run`, and `--backup-dir PATH`. Use `-a` or `--attach` when creating a
+backup. [Backup contents](transfer.md#archive-contents)
+
+- `--verify` checks an existing backup's hashes and reports its image platforms without Docker.
+- `--archive PATH` selects a specific backup folder or archive with `--verify`.
+- `--no-terminal-server` skips the Open Terminal image. Backup includes the matching local image by default when it exists. Terminal workspaces and the bearer key follow `[terminal_server] include_in_backup`.
+- `--export`, `--no-export` enable or disable refreshing selected Modelfiles from cached models before backup. The default comes from `[transfer] export_models`.
+- `--models-file PATH`, `--wait-timeout SECONDS` apply when refreshing Modelfiles.
+
+### restore
+
+Restore a full backup into new or empty volumes. Uses `--config-dir PATH`,
+`--version VERSION`, `--dry-run`, and `-a` or `--attach`. `--archive PATH`
+selects a specific backup folder or archive. `--backup-dir PATH` selects the
+newest full backup for the deployment in that directory. A selected backup
+folder supplies its saved deployment version. [Restore behavior](transfer.md#restore-behavior)
+
+- `--import`, `--no-import` enable or disable starting offline GPU Ollama to apply saved Modelfiles after restore. The default comes from `[transfer] import_models`.
+- `--wait-timeout SECONDS` applies when starting Ollama to import Modelfiles.
+
+### integration
+
+Choose an integration to print. `loaf integration --help` lists the names.
+
+#### integration systemd
+
+Print a systemd unit for offline serving. Uses `--config-dir PATH` and
+`--version VERSION`. [Systemd setup](installation.md#systemd)
+
+#### integration continue
+
+Print Continue YAML for the selected models. Uses `--config-dir PATH` and
+`--models-file PATH`. [Continue setup](installation.md#continue-for-vs-code)
+
+#### integration tether
+
+Print Open WebUI Tether installation instructions. Takes the global flags.
+[Tether setup](tether.md)
+
+### test
+
+Run the checkout's unittest suite. Uses `--config-dir PATH` to select the
+test settings. Use `-v` for individual case names. [Verification guide](verification.md)
+
+- `--badges` records the run and refreshes badges for the groups that ran.

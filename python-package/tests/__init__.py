@@ -1,0 +1,10 @@
+# tests/__init__.py - Package marker for standard-library unittest discovery.
+# Test groups and opt-in environment flags are documented in docs/verification.md.
+"""Unit and explicitly enabled Docker integration tests."""
+
+from pathlib import Path
+
+# --- Fixture paths belong to the checkout, independently of the CLI's cwd ---
+TESTS_DIR = Path(__file__).resolve().parent
+ROOT = TESTS_DIR.parent.parent
+DATA = ROOT / "python-package/src/loaf/data"

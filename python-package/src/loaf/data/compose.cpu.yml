@@ -1,0 +1,21 @@
+# Compose 2.26 requires !reset tags to be set directly on each service.
+x-cpu-environment: &cpu-environment
+  # Hide CUDA devices even if Docker uses the NVIDIA runtime by default.
+  CUDA_VISIBLE_DEVICES: "-1"
+  NVIDIA_VISIBLE_DEVICES: void
+
+services:
+  ollama-offline:
+    gpus: !reset []
+    deploy:
+      resources:
+        reservations:
+          devices: !reset []
+    environment: *cpu-environment
+  ollama-connected:
+    gpus: !reset []
+    deploy:
+      resources:
+        reservations:
+          devices: !reset []
+    environment: *cpu-environment

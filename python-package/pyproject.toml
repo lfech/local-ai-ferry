@@ -1,0 +1,45 @@
+# pyproject.toml - Installable launcher and its deployment data.
+# Editable installation keeps the command linked to python-package/src/loaf.
+
+# --- Standard PEP 517/660 build backend (build-time dependency only) ---
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+# --- Distribution metadata and command registration ---
+[project]
+name = "local-ai-ferry"
+version = "0.1.0"
+description = "Local AI Ferry prepares, transfers and runs offline Ollama and Open WebUI deployments"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "BSD-3-Clause"
+license-files = ["LICENSE.txt", "THIRD_PARTY_NOTICES.txt"]
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/lfech/local-ai-ferry"
+Issues = "https://github.com/lfech/local-ai-ferry/issues"
+
+[project.scripts]
+loaf = "loaf.cli:main"
+
+# --- Include the launcher and its deployment tree in the wheel ---
+[tool.setuptools]
+include-package-data = false
+
+[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = false
+
+[tool.setuptools.package-data]
+loaf = [
+    "data/compose.yml",
+    "data/compose.cpu.yml",
+    "data/config/*.ini",
+    "data/docker/*/Dockerfile",
+    "data/docker/*/.dockerignore",
+    "data/docker/*/*.sh",
+    "data/docker/terminal-server/*.py",
+    "data/docker/terminal-server/*.list",
+]

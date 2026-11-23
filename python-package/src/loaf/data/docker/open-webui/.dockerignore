@@ -1,0 +1,5 @@
+# .dockerignore - WebUI customization is entirely defined by its Dockerfile.
+# Keep local files out of build contexts; the upstream image supplies the app.
+# --- Minimal build context ---
+*
+!Dockerfile

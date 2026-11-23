@@ -1,0 +1,24 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: https://github.com/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Build and check release assets
+        run: bash scripts/build-release.sh "$GITHUB_REF_NAME" "$RUNNER_TEMP/loaf-release-$GITHUB_RUN_ID"
+      - name: Attach assets to a draft release
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+        run: python3 scripts/gitea-release.py "$GITHUB_REF_NAME" "$RUNNER_TEMP/loaf-release-$GITHUB_RUN_ID"

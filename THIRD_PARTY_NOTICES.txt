@@ -1,0 +1,42 @@
+Third-party notices
+===================
+
+These components carry their upstream license terms. See LICENSE.txt for
+the BSD 3-Clause terms for this project.
+
+- Ollama — MIT
+  https://github.com/ollama/ollama/blob/main/LICENSE
+- Open WebUI — Open WebUI License (includes branding terms)
+  https://github.com/open-webui/open-webui/blob/main/LICENSE
+- Open Terminal 0.17.20 — MIT
+  https://github.com/open-webui/open-terminal/blob/v0.17.20/LICENSE
+- NVIDIA Container Toolkit and libnvidia-container — Apache-2.0
+  https://github.com/NVIDIA/nvidia-container-toolkit/blob/main/LICENSE
+  https://github.com/NVIDIA/libnvidia-container/blob/main/LICENSE
+- Docker Compose and Buildx — Apache-2.0
+  https://github.com/docker/compose/blob/main/LICENSE
+  https://github.com/docker/buildx/blob/master/LICENSE
+- Setuptools (build backend) — MIT
+  https://github.com/pypa/setuptools/blob/main/LICENSE
+- Continue (optional IDE integration) — Apache-2.0
+  https://github.com/continuedev/continue/blob/main/LICENSE
+- Open WebUI Tether (optional desktop app) — Open WebUI Enterprise
+  License with a personal-use exception
+  https://github.com/open-webui/tether/blob/main/LICENSE
+- Ministral 3 3B Reasoning 2512 GGUF — Apache-2.0
+  https://huggingface.co/mistralai/Ministral-3-3B-Reasoning-2512-GGUF
+- Qwen3 4B and 14B GGUF examples — Apache-2.0
+  https://huggingface.co/Qwen/Qwen3-4B-GGUF/blob/main/LICENSE
+  https://huggingface.co/Qwen/Qwen3-14B-GGUF/blob/main/LICENSE
+- Qwen2.5-Coder 7B and 14B Instruct GGUF examples — Apache-2.0
+  https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/blob/main/LICENSE
+  https://huggingface.co/Qwen/Qwen2.5-Coder-14B-Instruct-GGUF/blob/main/LICENSE
+
+Base images, system packages and replacement components carry
+the notices supplied with their respective distributions.
+
+The standalone executable includes CPython from Python Build Standalone and
+its redistribution notices. On Linux, CPython's _dbm extension links against
+Berkeley DB under the Sleepycat license. The build combines the full notices
+and matching source locations in the accompanying LICENSE.txt. Run the
+standalone executable with --license to read its embedded copy.
