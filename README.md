@@ -1,6 +1,6 @@
 # Local AI Ferry
 
-[![CLI baseline · 2026-11-23 17:33:11 — 177/177 passed](docs/badges/cli.svg)](docs/verification-record.md#2026-11-23-173311-0100--test-badge-run)
+[![CLI baseline · 2026-11-23 17:33:11 — 177/177 passed](docs/badges/cli.svg)](docs/verification-record.md#2026-11-23-173311-0100--test-badge-run)&nbsp;&nbsp;&nbsp; This is software not production-ready - use for testing only.
 
 [![Docker · 2026-11-23 — 30/30 passed](docs/badges/docker.svg)](docs/verification-record.md#2026-11-23-1031-cet--readme-test-badge-runs)
 [![Open Terminal · 2026-11-23 — 10/10 passed](docs/badges/open-terminal.svg)](docs/verification-record.md#2026-11-23-1031-cet--readme-test-badge-runs)
