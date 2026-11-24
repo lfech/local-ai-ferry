@@ -7,10 +7,11 @@
 [![GPU inference · 2026-11-24 00:30:09 — 6/6 passed](docs/badges/gpu.svg)](docs/verification-record.md#2026-11-24-003009-0100--test-badge-run)
 [![Model catalog · 2026-11-24 00:30:09 — 1/1 passed](docs/badges/catalog.svg)](docs/verification-record.md#2026-11-24-003009-0100--test-badge-run)
 
-Local AI Ferry prepares local AI deployments and transfers them to offline or
-air-gapped machines. Its `loaf` CLI runs Ollama and Open WebUI with Docker
-Compose on Debian or Debian in WSL2. It uses NVIDIA acceleration by default
-and also supports CPU inference.
+Local AI Ferry prepares and runs local AI deployments and transfers them to
+offline or air-gapped machines (web-connected usage is also supported). 
+Its `loaf` CLI runs Ollama and Open WebUI with Docker Compose on Debian or
+Debian in WSL2. It uses NVIDIA acceleration by default and also supports CPU
+inference.
 
 On the connected machine, run `loaf setup`, `loaf build`, and `loaf download`
 to prepare the deployment. Run `loaf online` to test it. Use
