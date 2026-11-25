@@ -29,8 +29,8 @@ Codex in VS Code assisted with implementation and verification. The author
 guided the system design and reviewed the functional behavior of the Docker
 Compose deployment and the `loaf` CLI.
 
-- Development used GPT‑6.2 Sol with Extra High reasoning effort.
-- Final verification used GPT‑6.2 Sol with Max reasoning effort.
+- Development used GPT‑6.2 Sol with 'Extra High' reasoning effort.
+- Final verification used GPT‑6.2 Sol with 'Max' reasoning effort.
 
 ## Quick Setup
 
