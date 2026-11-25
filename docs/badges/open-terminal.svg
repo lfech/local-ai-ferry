@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="220" height="32" viewBox="0 0 220 32" role="img" aria-labelledby="title">
-  <title id="title">Open Terminal · 2026-11-24 00:49:12 — 10/10 passed</title>
+  <title id="title">Open Terminal · 2026-11-25 23:28:20 — 12/12 passed</title>
   <clipPath id="badge"><rect width="220" height="32" rx="3"/></clipPath>
   <g clip-path="url(#badge)">
     <rect width="220" height="32" fill="#424a53"/>
@@ -7,7 +7,7 @@
   </g>
   <g fill="#fff" font-family="Verdana, Arial, sans-serif" font-size="11" text-anchor="middle">
     <text x="63" y="13">Open Terminal</text>
-    <text x="63" y="25" font-size="9.5" fill="#e5e7eb">2026-11-24 00:49:12</text>
-    <text x="173" y="20">10/10 passed</text>
+    <text x="63" y="25" font-size="9.5" fill="#e5e7eb">2026-11-25 23:28:20</text>
+    <text x="173" y="20">12/12 passed</text>
   </g>
 </svg>

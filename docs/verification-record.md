@@ -4,6 +4,31 @@
 
 Older entries use the current command and project names in examples.
 
+## 2026-11-25 23:28:20 +0100 — Test badge run
+
+`loaf test --badges` passed on Linux with Python 3.13.2.
+Unittest reported 255 cases and 39 skips.
+Enabled test options were `RUN_TERMINAL_SERVER_TESTS=1`.
+
+| Group | Passed / executed |
+| --- | ---: |
+| CLI baseline | 204/204 |
+| Open Terminal | 12/12 |
+
+## 2026-11-25 23:20:36 +0100 — Test badge run
+
+`loaf test --badges` passed on Linux with Python 3.13.2.
+Unittest reported 255 cases and 7 skips.
+Enabled test options were `RUN_DOCKER_TESTS=1`, `RUN_GPU_TESTS=1`, `RUN_CATALOG_TESTS=1`, `RUN_TERMINAL_SERVER_TESTS=1`.
+
+| Group | Passed / executed |
+| --- | ---: |
+| CLI baseline | 204/204 |
+| Docker | 32/32 |
+| Open Terminal | 5/5 |
+| GPU inference | 6/6 |
+| Model catalog | 1/1 |
+
 ## 2026-11-25 22:17:33 +0100 — Bundled Ollama build recipes
 
 - On Debian 13.8 in WSL2 with Docker Engine 26.1.5 and Compose 2.26.1-4,
