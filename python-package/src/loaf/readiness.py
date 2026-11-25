@@ -206,8 +206,10 @@ def check(compose: Compose, *, cpu: bool = False) -> bool:
             return "valid"
 
         report("Terminal server key file", terminal_secret)
-        if compose.settings.terminal_server_runtime_apt_source_file is not None:
-            report("Terminal runtime APT source file", compose.terminal_runtime_source_file)
+        if (apt_source := compose.settings.terminal_server_apt_source_file) is not None:
+            report("Terminal server APT source file", lambda: compose.terminal_apt_source_file(apt_source))
+            if compose.settings.terminal_server_apt_repository_dir is not None:
+                report("Terminal server APT repository directory", compose.terminal_apt_repository_dir)
     if services is None:
         return False
     try:

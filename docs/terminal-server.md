@@ -104,7 +104,8 @@ breadcrumb in Files lets you browse both folders.
 
 The Files tab and model commands share the chat's working directory. Use
 `/home/chat` for files to remove with the chat and `/home/user` for files to keep.
-Open the matching folder in Files to see files the model puts there.
+Both volumes are mounted. A model can write to the other folder using an
+explicit path. Open the matching folder in Files to see where it wrote a file.
 [Open WebUI file browser root](https://docs.openwebui.com/features/open-terminal/terminals/orchestration/file-browser-home-boundary/)
 
 The provisioner uses the bundled Open WebUI deployment's SQLite database
@@ -134,8 +135,8 @@ All settings below belong to `[terminal_server]` in `config/config.ini`.
 | `enabled` | `false` | Start the provisioner with `loaf online` and `loaf offline`. |
 | `include_in_backup` | `false` | Include persistent user volumes and the bearer key in `loaf backup`. |
 | `secret_file` | `config/terminal-server.key` | Source for the Compose bearer secret. |
-| `apt_source_file` | blank | Replace the base image's APT sources during the terminal build. [Package mirror](#package-mirror-for-image-builds) |
-| `runtime_apt_source_file` | blank | Mount a host APT source into workspaces read-only when starting Open Terminal. [Runtime APT source](#edit-an-apt-source-on-the-offline-host) |
+| `apt_source_file` | blank | Use this APT source for terminal image builds and per-chat package installs. [Package mirror](#package-mirror-for-image-builds) |
+| `apt_repository_dir` | blank | Host directory for a `file:` repository mounted in the package installer. [Chat packages](#install-packages-for-a-chat) |
 | `cpus` | `2` | CPU limit per runner. |
 | `memory_mib` | `2048` | Memory limit per runner. |
 | `max_workspaces` | `4` | Limit on simultaneously allocated runners. |
@@ -180,8 +181,7 @@ deb http://apt-mirror.lan/debian trixie main
 
 Run `loaf build` while the mirror is reachable, then transfer the image to the
 offline host. The installed commands run inside the isolated workspaces.
-Package installation happens during the image build. The deployed terminal
-does not need access to the original source file.
+Packages installed during the build are available to all chats.
 
 ## Edit an APT source on the offline host
 
@@ -191,21 +191,56 @@ path in the project configuration. For example, place the file at
 
 ```ini
 [terminal_server]
-runtime_apt_source_file = config/offline-mirror.sources
+apt_source_file = config/offline-mirror.sources
 ```
 
 Run `loaf offline` using the updated launcher and the loaded Open Terminal
 image. Loaf mounts the file read-only at
-`/etc/apt/sources.list.d/loaf-runtime.sources` in the provisioner and its
+`/etc/apt/sources.list.d/loaf-terminal.sources` in the provisioner and its
 workspaces. A `.list` file gets the corresponding `.list` destination.
 The file is visible to workspace users. Keep it free of mirror credentials.
 
 Edit the source on the host. In-place writes are visible through the mount.
 Run `loaf offline` again after saving through an editor that replaces the
 file. On that run, Loaf recreates the terminal containers if the source changed.
-This supplies an APT source file at runtime. The workspace root filesystem
-is read-only and package installation for the image happens during a build.
+The workspace root filesystem is read-only. Chat package installs use the
+same configured source through a separate installer.
 [Docker bind mounts](https://docs.docker.com/engine/storage/bind-mounts/)
+
+## Install packages for a chat
+
+With `apt_source_file` set, `loaf offline` enables the `install_chat_packages`
+tool on the Open Terminal connection. Ask the model to install an APT package
+for the current chat. Loaf runs APT against the configured mirror, including
+dependency resolution and package setup. The terminal restarts after a
+successful install. Its files and working-directory selection are retained.
+The packages are available from both `user` and `chat` for that chat.
+Every new chat starts with the base image's packages.
+
+For an HTTP or HTTPS source, make the mirror reachable from the Docker
+host's bridge network. For a mirror stored on the offline host, set
+`apt_repository_dir` to the repository root and use a source URI rooted at
+`file:/run/loaf-apt/repository`. Relative paths in `config.ini` start at the
+project directory. For example, after loading the base terminal image, use
+the following settings and a flat repository's `.list` source.
+
+```ini
+[terminal_server]
+apt_source_file = config/offline-mirror.list
+apt_repository_dir = /media/transfer/apt-mirror
+```
+
+```text
+deb file:/run/loaf-apt/repository ./
+```
+
+Use a signed repository with its trusted key available to APT. The `file:`
+repository is mounted read-only in a network-disabled installer. The
+terminal's local base image supplies the starting filesystem.
+
+Saved chat images persist on this Docker host across `loaf stop` and are
+removed when their chat is deleted. Temporary chat images expire with the
+workspace. Deployment image backups carry the shared terminal base image.
 
 ## Offline transfer and shutdown
 

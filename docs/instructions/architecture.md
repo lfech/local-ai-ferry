@@ -104,12 +104,20 @@ corresponding runner. [Terminal connection](../terminal-server.md#enable-and-con
 Compose mounts the Docker socket in the provisioner so it can create a
 container and internal bridge for each workspace. Draft requests use the
 account's runner. Each chat session has a separate runner for that account.
-Runners use the same image as the provisioner, run as an unprivileged user
-and have a read-only root filesystem, a bounded temporary filesystem at
+Runners start from the provisioner's image or the current chat's locally
+derived package image. They run as an unprivileged user and have a
+read-only root filesystem, a bounded temporary filesystem at
 `/tmp`, and CPU and memory limits. Each runner's API stays on its own bridge.
 Docker Engine 26 and 27 use `inhibit_ipv4` to keep an IPv4 address off the
 host bridge. Docker Engine 28 and newer use the `isolated` gateway mode.
 [Workspace isolation and limits](../terminal-server.md#workspace-policy)
+
+With a configured APT source, Open WebUI can request packages for an
+authenticated chat. The provisioner runs APT in a disposable installer
+from that chat's image with access to the configured mirror and without
+the runner's data volumes or credentials. It publishes an image for the
+chat after APT succeeds. The new runner uses that image with either
+working directory. [Chat packages](../terminal-server.md#install-packages-for-a-chat)
 
 | Folder | Storage and lifetime |
 | --- | --- |
@@ -126,7 +134,7 @@ history. [Files and working directory](../terminal-server.md#use-the-terminal-fr
 The bundled deployment mounts the existing `open-webui` volume read-only in
 the provisioner. It checks saved chat ownership and existence in the WebUI
 SQLite database. After WebUI deletes a chat, the next successful cleanup pass
-removes its runner, network and chat volume. Idle cleanup and provisioner
+removes its runner, network, chat volume and package image. Idle cleanup and provisioner
 shutdown remove runners and their networks while preserving named volumes.
 [Workspace lifecycle](../terminal-server.md#workspace-policy)
 

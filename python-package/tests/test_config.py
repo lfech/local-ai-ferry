@@ -76,7 +76,7 @@ class ConfigTests(unittest.TestCase):
                 self.path.write_text(source)
                 config.load(self.config_dir)
 
-    def test_terminal_apt_source_file_applies_only_to_builds(self):
+    def test_terminal_apt_source_file_supplies_build_arguments(self):
         step = cli.Step(("terminal",), ("build", "terminal-server"))
         defaults = cli.Compose(self.project, settings=config.load(self.config_dir))
         self.assertNotIn("LOAF_TERMINAL_APT_SOURCE_FILE", defaults.variables(step))
@@ -99,7 +99,8 @@ class ConfigTests(unittest.TestCase):
             config.load(self.config_dir)
 
     def test_runtime_apt_source_changes_the_terminal_start_without_a_build(self):
-        self.path.write_text("[terminal_server]\nenabled = true\nruntime_apt_source_file = config/offline.sources\n")
+        self.path.write_text("[terminal_server]\nenabled = true\napt_source_file = config/offline.sources\n"
+                             "apt_repository_dir = mirror\n")
         compose = cli.Compose(self.project, settings=config.load(self.config_dir))
         start = cli.Step(("terminal",), ("up", "--no-build", "--pull", "never", "terminal-server"))
         stop = cli.Step(("terminal",), ("stop", "terminal-server"))
@@ -108,17 +109,23 @@ class ConfigTests(unittest.TestCase):
         self.assertIn(overlay, compose.command(start))
         for step in (stop, build):
             self.assertNotIn(overlay, compose.command(step))
-            self.assertNotIn("LOAF_TERMINAL_RUNTIME_APT_SOURCE_FILE", compose.variables(step))
-        with self.assertRaisesRegex(FileNotFoundError, "runtime APT source file is missing"):
+        self.assertNotIn("LOAF_TERMINAL_APT_SOURCE_FILE", compose.variables(stop))
+        with self.assertRaisesRegex(FileNotFoundError, "APT source file is missing"):
             compose.variables(start)
         source = self.config_dir / "offline.sources"
         source.write_text("first source\n")
+        with self.assertRaisesRegex(FileNotFoundError, "APT repository directory is missing"):
+            compose.variables(start)
+        repository = self.project / "mirror"
+        repository.mkdir()
         before = compose.variables(start)
-        self.assertEqual(before["LOAF_TERMINAL_RUNTIME_APT_SOURCE_FILE"], str(source))
-        self.assertEqual(before["LOAF_TERMINAL_RUNTIME_APT_SOURCE_FORMAT"], "sources")
+        self.assertEqual(before["LOAF_TERMINAL_APT_SOURCE_FILE"], str(source))
+        self.assertEqual(before["LOAF_TERMINAL_APT_SOURCE_FORMAT"], "sources")
+        self.assertEqual(before["LOAF_TERMINAL_APT_REPOSITORY_DIR"], str(repository))
+        self.assertNotIn("LOAF_TERMINAL_APT_REPOSITORY_DIR", compose.variables(build))
         source.write_text("second source\n")
-        self.assertNotEqual(before["LOAF_TERMINAL_RUNTIME_APT_SOURCE_HASH"],
-                            compose.variables(start)["LOAF_TERMINAL_RUNTIME_APT_SOURCE_HASH"])
+        self.assertNotEqual(before["LOAF_TERMINAL_APT_SOURCE_HASH"],
+                            compose.variables(start)["LOAF_TERMINAL_APT_SOURCE_HASH"])
 
     def test_local_model_selection_uses_packaged_files_only_when_missing_locally(self):
         data = self.project / "python-package/src/loaf/data"

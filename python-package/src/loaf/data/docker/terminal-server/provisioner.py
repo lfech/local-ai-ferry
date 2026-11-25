@@ -30,6 +30,13 @@ CHAT_PROJECT = "loaf.terminal.chat-project"
 CHAT_ID = "loaf.terminal.chat-id"
 CHAT_OWNER = "loaf.terminal.chat-owner"
 RUNTIME_MOUNTS = "loaf.terminal.runtime-mounts"
+APT_PROJECT = "loaf.terminal.apt-project"
+APT_WORKSPACE = "loaf.terminal.apt-workspace"
+APT_TEMPORARY = "loaf.terminal.apt-temporary"
+APT_IMAGE_REPOSITORY = "local/loaf-terminal-chat"
+APT_REPOSITORY = "/run/loaf-apt/repository"
+APT_INSTALL_PATH = "/packages/install"
+APT_PACKAGE = re.compile(r"[a-z0-9][a-z0-9+.-]+(?::[a-z0-9-]+)?(?:=[a-zA-Z0-9.+:~\-]+)?")
 GATEWAY = "com.docker.network.bridge.gateway_mode_ipv4"
 INHIBIT_IPV4 = "com.docker.network.bridge.inhibit_ipv4"
 BRIDGE_NAME = "com.docker.network.bridge.name"
@@ -64,13 +71,18 @@ class Docker:
     def __init__(self, session):
         self.session = session
 
-    async def call(self, method, path, *, body=None, params=None, missing=False):
-        async with self.session.request(method, "http://docker" + path, json=body, params=params) as response:
+    async def call(self, method, path, *, body=None, params=None, missing=False, timeout=None, text=False):
+        options = {} if timeout is None else {"timeout": ClientTimeout(total=timeout)}
+        async with self.session.request(method, "http://docker" + path, json=body, params=params, **options) as response:
             if response.status == 404 and missing:
                 return None
             if response.status >= 300:
                 # Docker's error body can contain private configuration.
-                raise DockerError(response.status, path.split("/")[1])
+                parts = path.split("/")
+                operation = f"{method} {parts[1]}" + (f" {parts[-1]}" if len(parts) > 3 else "")
+                raise DockerError(response.status, operation)
+            if text:
+                return (await response.content.read(8192)).decode(errors="replace").strip()
             payload = await response.read()
             if payload:
                 return json.loads(payload)
@@ -139,6 +151,102 @@ class Policy:
         return {CHAT_PROJECT: self.project, CHAT_ID: chat, CHAT_OWNER: owner_key}
 
 
+class ChatPackages:
+    def __init__(self, policy, docker, source=None, repository=None):
+        self.policy = policy
+        self.docker = docker
+        self.source = source
+        self.repository = repository
+
+    def tag(self, key):
+        return self.policy.asset_name(key)
+
+    def labels(self, key):
+        return {APT_PROJECT: self.policy.project, APT_WORKSPACE: key}
+
+    async def image(self, key):
+        name = f"{APT_IMAGE_REPOSITORY}:{self.tag(key)}"
+        details = await self.docker.call("GET", f"/images/{name}/json", missing=True)
+        if details is not None:
+            labels = details["Config"].get("Labels") or {}
+            if any(labels.get(field) != value for field, value in self.labels(key).items()):
+                raise RuntimeError("Chat package image ownership mismatch")
+        return details
+
+    async def remove(self, key):
+        if await self.image(key):
+            name = f"{APT_IMAGE_REPOSITORY}:{self.tag(key)}"
+            await self.docker.call("DELETE", f"/images/{name}", missing=True)
+
+    async def clear_installers(self):
+        filters = json.dumps({"label": [f"{APT_PROJECT}={self.policy.project}"]})
+        containers = await self.docker.call("GET", "/containers/json", params={"all": "true", "filters": filters})
+        for container in containers:
+            key = container["Labels"].get(APT_WORKSPACE, "")
+            if re.fullmatch(r"[0-9a-f]{64}", key) and f"/{self.tag(key)}-apt" in container["Names"]:
+                await self.docker.call("DELETE", f"/containers/{container['Id']}", params={"force": "true"}, missing=True)
+
+    async def temporary_images(self):
+        filters = json.dumps({"label": [f"{APT_PROJECT}={self.policy.project}", f"{APT_TEMPORARY}=true"]})
+        images = await self.docker.call("GET", "/images/json", params={"filters": filters})
+        for image in images:
+            key = (image["Labels"] or {}).get(APT_WORKSPACE, "")
+            if re.fullmatch(r"[0-9a-f]{64}", key):
+                if f"{APT_IMAGE_REPOSITORY}:{self.tag(key)}" in (image["RepoTags"] or ()):
+                    yield key
+
+    @asynccontextmanager
+    async def install(self, key, image, packages):
+        mounts = [self.source]
+        if self.repository:
+            mounts.append({"Type": "bind", "Source": self.repository, "Target": APT_REPOSITORY, "ReadOnly": True})
+        script = """\
+export DEBIAN_FRONTEND=noninteractive
+source_file=$1
+shift
+apt_local() {
+    apt-get -o Dir::Etc::sourcelist="$source_file" -o Dir::Etc::sourceparts=- "$@"
+}
+apt_local -o APT::Update::Error-Mode=any update
+apt_local -y --no-remove install -- "$@"
+apt_local clean
+rm -rf /var/lib/apt/lists/*
+"""
+        created = await self.docker.call("POST", "/containers/create", params={"name": self.tag(key) + "-apt"}, body={
+            "Image": image, "Labels": self.labels(key), "User": "0:0", "WorkingDir": "/",
+            "Entrypoint": ["/bin/sh", "-ec", script, "loaf-apt"], "Cmd": [self.source["Target"], *packages],
+            "Tty": True, "Healthcheck": {"Test": ["NONE"]},
+            "HostConfig": {
+                "NetworkMode": "none" if self.repository else "bridge", "Mounts": mounts,
+                "SecurityOpt": ["no-new-privileges:true"], "PidsLimit": 256,
+                "NanoCpus": self.policy.cpus * 1_000_000_000,
+                "Memory": self.policy.memory_mib * 1024 * 1024,
+                "MemorySwap": self.policy.memory_mib * 1024 * 1024,
+                "LogConfig": {"Type": "local", "Config": {"max-size": "1m", "max-file": "2"}},
+            },
+        })
+        container = created["Id"]
+        path = f"/containers/{container}"
+        try:
+            await self.docker.call("POST", f"{path}/start")
+            result = await self.docker.call("POST", f"{path}/wait", timeout=self.policy.command_seconds)
+            if result["StatusCode"]:
+                log = await self.docker.call("GET", f"{path}/logs", text=True,
+                                             params={"stdout": "true", "stderr": "true", "tail": "20"})
+                raise web.HTTPUnprocessableEntity(text=log or "APT failed against the configured mirror.")
+            yield container
+        finally:
+            await self.docker.call("DELETE", path, params={"force": "true"}, missing=True)
+
+    async def publish(self, key, container, base_image, *, saved):
+        base = await self.docker.call("GET", f"/images/{base_image}/json")
+        config = base["Config"]
+        config["Labels"] = {**(config.get("Labels") or {}), **self.labels(key), APT_TEMPORARY: str(not saved).lower()}
+        await self.docker.call("POST", "/commit", body=config, timeout=self.policy.command_seconds, params={
+            "container": container, "repo": APT_IMAGE_REPOSITORY, "tag": self.tag(key), "pause": "false",
+        })
+
+
 @dataclass
 class Workspace:
     container: str
@@ -157,7 +265,8 @@ class Workspace:
 
 
 class Workspaces:
-    def __init__(self, policy, docker, client, provisioner, image_id, chats, *, runtime_mounts=(), runtime_revision=None):
+    def __init__(self, policy, docker, client, provisioner, image_id, chats, *, runtime_mounts=(), runtime_revision=None,
+                 packages=None):
         self.policy = policy
         self.docker = docker
         self.client = client
@@ -166,10 +275,17 @@ class Workspaces:
         self.chats = chats
         self.runtime_mounts = runtime_mounts
         self.runtime_revision = runtime_revision
+        self.packages = packages
+        self.installing = set()
+        self.temporary_packages = {}
+        self.directories = {}
         self.active = {}
         self.lock = asyncio.Lock()
 
     async def initialize(self):
+        if self.packages:
+            await self.packages.clear_installers()
+            self.temporary_packages.update({key: monotonic() async for key in self.packages.temporary_images()})
         filters = json.dumps({"label": [f"{PROJECT}={self.policy.project}"]})
         records = await self.docker.call("GET", "/containers/json", params={
             "all": "true", "filters": filters,
@@ -179,7 +295,8 @@ class Workspaces:
             if not re.fullmatch(r"[0-9a-f]{64}", key) or "/" + self.policy.asset_name(key) not in record["Names"]:
                 continue
             container = await self.docker.call("GET", f"/containers/{record['Id']}/json")
-            if (container["State"]["Running"] and container["Image"] == self.image_id
+            image = await self.workspace_image(key)
+            if (container["State"]["Running"] and container["Image"] == image
                     and container["Config"]["Labels"].get(RUNTIME_MOUNTS) == self.runtime_revision
                     and len(self.active) < self.policy.maximum):
                 self.active[key] = await self.recover(key, container)
@@ -227,6 +344,11 @@ class Workspaces:
                 or (volume["Options"] or {}) != self.policy.volume_options):
             raise RuntimeError("Workspace volume ownership or storage policy mismatch")
 
+    async def workspace_image(self, key):
+        if self.packages and (image := await self.packages.image(key)):
+            return image["Id"]
+        return self.image_id
+
     async def create(self, key, owner_key, session, *, saved):
         name = self.policy.asset_name(key)
         labels = self.policy.labels(key)
@@ -250,7 +372,8 @@ class Workspaces:
             created = await self.docker.call(
                 "POST", "/containers/create", params={"name": name},
                 body=self.container_spec(name, labels, credential, home_volume,
-                                         chat_volume=chat_volume, temporary=bool(session) and not saved),
+                                         chat_volume=chat_volume, temporary=bool(session) and not saved,
+                                         image=await self.workspace_image(key)),
             )
             container = created["Id"]
             await self.docker.call("POST", f"/containers/{container}/start")
@@ -262,7 +385,7 @@ class Workspaces:
             await self.remove(container, name)
             raise
 
-    def container_spec(self, name, labels, credential, home_volume, *, chat_volume=None, temporary=False):
+    def container_spec(self, name, labels, credential, home_volume, *, chat_volume=None, temporary=False, image=None):
         mounts = [{"Type": "volume", "Source": home_volume, "Target": WORKSPACE_HOME}]
         runner = "/opt/loaf-terminal/runner.py"
         if self.runtime_mounts:
@@ -276,7 +399,7 @@ class Workspaces:
             tmpfs[CHAT_HOME] = "rw,nosuid,nodev,mode=0700,uid=1000,gid=1000,size=256m"
         return {
             # Open Terminal uses the process working directory as its single-user home.
-            "Image": self.image_id, "Labels": labels, "User": "1000:1000", "WorkingDir": WORKSPACE_HOME,
+            "Image": image or self.image_id, "Labels": labels, "User": "1000:1000", "WorkingDir": WORKSPACE_HOME,
             "Entrypoint": ["/usr/local/bin/python", runner],
             "Cmd": [],
             "Env": [
@@ -314,14 +437,67 @@ class Workspaces:
         if details:
             await self.docker.call("DELETE", f"/networks/{network}", missing=True)
 
+    async def check_chat(self, user, session, saved):
+        if saved and (await self.chats.owners((session,))).get(session) != user:
+            raise web.HTTPNotFound(text="This saved chat is unavailable.")
+
+    async def install_packages(self, user, session, names):
+        if not session or session.startswith("channel:"):
+            raise web.HTTPBadRequest(text="Open a chat before installing packages.")
+        saved = not session.startswith(NON_SAVED_PREFIXES)
+        owner_key = hashlib.sha256(user.encode()).hexdigest()
+        key = workspace_key(owner_key, session)
+        async with self.lock:
+            await self.check_chat(user, session, saved)
+            if key in self.installing or len(self.installing) >= self.policy.maximum:
+                raise web.HTTPConflict(text="Package installation is busy. Try again later.")
+            image = await self.workspace_image(key)
+            if saved:
+                await self.ensure_volume(self.policy.chat_volume(key), self.policy.chat_labels(session, owner_key))
+            self.installing.add(key)
+        try:
+            async with self.packages.install(key, image, names) as installer:
+                async with self.lock:
+                    await self.check_chat(user, session, saved)
+                    if (workspace := self.active.get(key)) is not None:
+                        await self.remember_directory(key, workspace, user, session)
+                        await self.remove(workspace.container, workspace.network)
+                        del self.active[key]
+                await self.packages.publish(key, installer, image, saved=saved)
+                if not saved:
+                    self.temporary_packages[key] = monotonic()
+        finally:
+            self.installing.discard(key)
+
+    async def remember_directory(self, key, workspace, user, session):
+        headers = workspace.headers(user, {"X-Session-Id": session})
+        with suppress(ClientError, TimeoutError, ValueError):
+            async with self.client.get(workspace.url("/files/cwd"), headers=headers, timeout=ClientTimeout(total=3),
+                                       allow_redirects=False) as response:
+                if response.status == 200:
+                    directory = (await response.json()).get("cwd")
+                    if isinstance(directory, str):
+                        self.directories[key] = directory
+
+    async def restore_directory(self, key, workspace, user, session):
+        async with self.lock:
+            if (directory := self.directories.pop(key, None)) is None:
+                return
+            headers = workspace.headers(user, {"X-Session-Id": session})
+            with suppress(ClientError, TimeoutError):
+                async with self.client.post(workspace.url("/files/cwd"), headers=headers, json={"path": directory},
+                                            timeout=ClientTimeout(total=3), allow_redirects=False):
+                    pass
+
     @asynccontextmanager
     async def lease(self, user, session=""):
         owner_key = hashlib.sha256(user.encode()).hexdigest()
         key = workspace_key(owner_key, session)
         saved = bool(session) and not session.startswith(NON_SAVED_PREFIXES)
         async with self.lock:
-            if saved and (await self.chats.owners((session,))).get(session) != user:
-                raise web.HTTPNotFound(text="This saved chat is unavailable.")
+            await self.check_chat(user, session, saved)
+            if key in self.installing:
+                raise web.HTTPServiceUnavailable(text="The chat is installing packages. Try again shortly.")
             workspace = self.active.get(key)
             if workspace is None:
                 if len(self.active) >= self.policy.maximum:
@@ -345,6 +521,8 @@ class Workspaces:
                 await asyncio.sleep(0.25)
             else:
                 raise web.HTTPServiceUnavailable(text="Workspace is unavailable. Try again.")
+            if key in self.directories:
+                await self.restore_directory(key, workspace, user, session)
             yield workspace
         finally:
             workspace.active -= 1
@@ -358,6 +536,12 @@ class Workspaces:
     async def reap_idle(self):
         async with self.lock:
             await self.reclaim_idle()
+            for key, installed in list(self.temporary_packages.items()):
+                if key in self.active or key in self.installing or monotonic() - installed < self.policy.idle_seconds:
+                    continue
+                await self.packages.remove(key)
+                del self.temporary_packages[key]
+                self.directories.pop(key, None)
 
     async def reap_deleted_chats(self):
         async with self.lock:
@@ -378,13 +562,16 @@ class Workspaces:
                 return
             owners = await self.chats.owners({chat for chat, _, _ in chat_volumes})
             for chat, key, volume in chat_volumes:
-                if chat in owners:
+                if chat in owners or key in self.installing:
                     continue
                 try:
                     workspace = self.active.get(key)
                     if workspace:
                         await self.remove(workspace.container, workspace.network)
                         del self.active[key]
+                    if self.packages:
+                        await self.packages.remove(key)
+                    self.directories.pop(key, None)
                     await self.docker.call("DELETE", f"/volumes/{volume}", missing=True)
                 except (RuntimeError, ClientError, TimeoutError):
                     LOG.warning("Could not remove a deleted chat's terminal workspace")
@@ -392,7 +579,7 @@ class Workspaces:
     async def reclaim_idle(self, *, one=False):
         # The caller holds the lock so a runner cannot be leased during removal.
         for key, workspace in list(self.active.items()):
-            if workspace.active or monotonic() - workspace.used < self.policy.idle_seconds:
+            if key in self.installing or workspace.active or monotonic() - workspace.used < self.policy.idle_seconds:
                 continue
             processes = await self.docker.call("GET", f"/containers/{workspace.container}/top",
                                                params={"ps_args": "-eo pid"}, missing=True)
@@ -423,6 +610,11 @@ class Workspaces:
         )
         if any(isinstance(result, BaseException) for result in results):
             LOG.warning("Some terminal workspaces will need reconciliation after restart")
+        if self.temporary_packages:
+            results = await asyncio.gather(*(self.packages.remove(key) for key in self.temporary_packages),
+                                           return_exceptions=True)
+            if any(isinstance(result, BaseException) for result in results):
+                LOG.warning("Some temporary chat package images will need cleanup after restart")
 
 
 def same_secret(received, secret):
@@ -552,6 +744,20 @@ def application(workspaces, secret, metadata, control_network=None):
     config["features"]["agents"] = False
     schema = metadata["schema"]
     schema["paths"] = {path: info for path, info in schema["paths"].items() if permitted_path(path)}
+    install_enabled = workspaces.packages is not None and workspaces.packages.source is not None
+    if install_enabled:
+        schema["paths"][APT_INSTALL_PATH] = {"post": {
+            "operationId": "install_chat_packages", "summary": "Install APT packages for the current chat",
+            "description": "Install packages from the configured APT mirror for this chat only. "
+                           "Use this before running the installed tools. Installation restarts the chat's terminal.",
+            "requestBody": {"required": True, "content": {"application/json": {"schema": {
+                "type": "object", "required": ["packages"], "properties": {"packages": {
+                    "type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 32,
+                    "description": "Debian package names, optionally with an architecture or version.",
+                }},
+            }}}},
+            "responses": {"200": {"description": "Packages installed"}},
+        }}
 
     async def dispatch(request):
         if control_network is not None and (
@@ -564,6 +770,26 @@ def application(workspaces, secret, metadata, control_network=None):
         if request.method == "GET" and path in ("/api/config", "/openapi.json"):
             authenticate_http(request, secret)
             return web.json_response(config if path == "/api/config" else schema)
+        if path == APT_INSTALL_PATH and request.method == "POST" and install_enabled:
+            authenticate_http(request, secret)
+            user, session = owner(request), terminal_session(request)
+            try:
+                body = await request.json()
+            except ValueError as error:
+                raise web.HTTPBadRequest(text="Expected a JSON object with package names.") from error
+            names = body.get("packages") if isinstance(body, dict) else None
+            if not isinstance(names, list) or not 1 <= len(names) <= 32 or any(
+                not isinstance(name, str) or len(name) > 128 or not APT_PACKAGE.fullmatch(name) for name in names
+            ):
+                raise web.HTTPBadRequest(text="Supply 1 to 32 Debian package names.")
+            names = list(dict.fromkeys(names))
+            try:
+                await workspaces.install_packages(user, session, names)
+            except (ClientError, RuntimeError, TimeoutError, sqlite3.Error) as error:
+                detail = str(error) if isinstance(error, DockerError) else type(error).__name__
+                LOG.warning("Chat package installation failed (%s)", detail)
+                raise web.HTTPServiceUnavailable(text="Chat package installation could not finish.") from error
+            return web.json_response({"installed": names})
         if not permitted_path(path):
             raise web.HTTPNotFound()
         downstream = web.WebSocketResponse(heartbeat=30, max_msg_size=4 * 1024 * 1024)
@@ -606,7 +832,7 @@ def application(workspaces, secret, metadata, control_network=None):
 def workspace_runtime_mounts(container, source_format):
     if source_format not in ("list", "sources"):
         raise ValueError("Use a .list or .sources file for the runtime APT source.")
-    targets = (f"/etc/apt/sources.list.d/loaf-runtime.{source_format}", RUNTIME_RUNNER)
+    targets = (f"/etc/apt/sources.list.d/loaf-terminal.{source_format}", RUNTIME_RUNNER)
     actual = {mount["Destination"]: mount for mount in container["Mounts"]}
     mounts = []
     revision = hashlib.sha256()
@@ -689,8 +915,10 @@ async def serve(*, allow_legacy_bridge=False):
         network = ipaddress.IPv4Network((address, endpoint["IPPrefixLen"]), strict=False)
         policy = Policy.load(project, os.environ, bridge_options=bridge_options)
         mounts, revision = workspace_runtime_mounts(control, source_format) if source_format else ((), None)
+        repository = os.environ.get("LOAF_TERMINAL_APT_REPOSITORY_DIR") or None
+        packages = ChatPackages(policy, docker, mounts[0] if mounts else None, repository)
         workspaces = Workspaces(policy, docker, runners, control["Id"], control["Image"], Chats(CHAT_DB),
-                                runtime_mounts=mounts, runtime_revision=revision)
+                                runtime_mounts=mounts, runtime_revision=revision, packages=packages)
         await workspaces.initialize()
         runner = web.AppRunner(application(workspaces, secret, metadata, network), access_log=None, shutdown_timeout=5)
         stop = asyncio.Event()

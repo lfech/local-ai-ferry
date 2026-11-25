@@ -7,6 +7,19 @@ Git milestones use commit timestamps. Working-tree milestones use the
 associated verification time where it was recorded.
 Earlier entries use the current names for commands, paths and artifacts.
 
+## 2026-11-25 16:55 CET — Chat-scoped APT packages
+
+- Added the `install_chat_packages` Open Terminal tool. It runs APT in a
+  disposable installer and publishes the successful result as a local
+  image for the authenticated chat. Both working directories use that
+  image. A new chat starts from the shared base image.
+- Consolidated terminal builds and runtime package installs under
+  `apt_source_file`. A repository on disk can use `apt_repository_dir`
+  and a network-disabled installer.
+- Saved chat images survive terminal restarts and are removed when the
+  chat is deleted. Temporary chat images follow workspace cleanup.
+  [Chat packages](terminal-server.md#install-packages-for-a-chat)
+
 ## 2026-11-25 15:52 CET — Edit terminal APT sources at runtime
 
 - Added an optional host APT source file that Open Terminal workspaces

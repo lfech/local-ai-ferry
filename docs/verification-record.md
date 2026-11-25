@@ -4,6 +4,24 @@
 
 Older entries use the current command and project names in examples.
 
+## 2026-11-25 16:55:23 +0100 — Chat-scoped APT packages
+
+- The regular Docker suite passed 231 of 250 cases. Its 19 skips covered
+  CPU/GPU model inference, catalog, Open Terminal opt-ins and API
+  dependencies, and the host rsync fixture. The Docker-free run passed
+  199 of 250 cases with 51 skips.
+- Two focused tests passed on Debian WSL2 with Docker Engine 26.1.5 and
+  Compose 2.26.1-4. They used the loaded terminal image and a local
+  repository with the installer network disabled. The package test
+  verified a real dependency and post-install script, use from both
+  working directories, a failed install, chat ownership, saved and
+  temporary chat isolation, restart persistence, and deletion cleanup.
+  The other test verified the read-only mount and source edits.
+- All five provisioner tests passed inside the loaded image with
+  networking disabled. All 24 focused configuration, readiness, terminal
+  settings, and documentation checks passed. The five standalone
+  documentation checks also passed.
+
 ## 2026-11-25 15:52:12 +0100 — Runtime terminal APT source
 
 - On Debian 13.8 in WSL2 with Python 3.13.5, the installed CLI suite

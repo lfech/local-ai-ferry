@@ -222,6 +222,9 @@ model commands.
 They also check chat isolation and volume removal after chat deletion.
 The suite includes a Docker backup round trip for a versioned terminal image,
 a workspace file with its ownership, and an owner-only bearer key.
+The local APT case uses `dpkg-deb` to create a disposable repository. It checks
+dependency installation, availability in both working directories, isolation
+from a second chat, restart persistence, and package image cleanup.
 
 The serving cases exercise production isolation by default and use `iproute2` on
 the local Docker host to inspect the bridge. It checks that the host bridge

@@ -9,7 +9,6 @@ import argparse
 from configparser import ConfigParser, Error as INIError
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from hashlib import sha256
 import os
 from pathlib import Path
 import re
@@ -298,39 +297,42 @@ class Compose:
             variables["CUDA_VISIBLE_DEVICES"] = self.settings.cuda_visible_devices
         if self.settings.terminal_server_enabled:
             variables["LOAF_TERMINAL_SECRET_FILE"] = str(self.terminal_secret_file())
-        if step is not None and self.uses_terminal_runtime_source(step):
-            source = self.terminal_runtime_source_file()
-            variables.update(
-                LOAF_TERMINAL_RUNTIME_DIR=str(assets.DATA_DIR / "docker/terminal-server"),
-                LOAF_TERMINAL_RUNTIME_APT_SOURCE_FILE=str(source),
-                LOAF_TERMINAL_RUNTIME_APT_SOURCE_FORMAT=self.settings.terminal_server_runtime_apt_source_file.suffix[1:],
-                LOAF_TERMINAL_RUNTIME_APT_SOURCE_HASH=setup.file_digest(source),
-            )
         apt_source = self.settings.terminal_server_apt_source_file
-        if apt_source is not None and step is not None and step.arguments[0] == "build" and "terminal-server" in step.arguments:
-            path = (self.project_dir / apt_source.expanduser()).resolve()
-            if not path.is_file():
-                raise FileNotFoundError(f"Terminal server APT source file is missing: {path}")
-            digest = sha256()
-            with path.open("rb") as source:
-                while block := source.read(65536):
-                    digest.update(block)
-            variables.update(LOAF_TERMINAL_APT_SOURCE_FILE=str(path), LOAF_TERMINAL_APT_SOURCE_FORMAT=apt_source.suffix[1:],
-                             LOAF_TERMINAL_APT_SOURCE_HASH=digest.hexdigest())
+        if apt_source is not None and step is not None and "terminal-server" in step.arguments:
+            runtime = self.uses_terminal_runtime_source(step)
+            if runtime or step.arguments[0] == "build":
+                path = self.terminal_apt_source_file(apt_source)
+                variables.update(LOAF_TERMINAL_APT_SOURCE_FILE=str(path),
+                                 LOAF_TERMINAL_APT_SOURCE_FORMAT=apt_source.suffix[1:],
+                                 LOAF_TERMINAL_APT_SOURCE_HASH=setup.file_digest(path))
+            if runtime:
+                variables["LOAF_TERMINAL_RUNTIME_DIR"] = str(assets.DATA_DIR / "docker/terminal-server")
+                repository = self.terminal_apt_repository_dir()
+                if repository is not None:
+                    variables["LOAF_TERMINAL_APT_REPOSITORY_DIR"] = str(repository)
         return variables
 
     def terminal_secret_file(self) -> Path:
         return config.terminal_secret_path(self.project_dir, self.settings.terminal_server_secret_file)
 
     def uses_terminal_runtime_source(self, step: Step) -> bool:
-        return (self.settings.terminal_server_enabled and self.settings.terminal_server_runtime_apt_source_file is not None
+        return (self.settings.terminal_server_enabled and self.settings.terminal_server_apt_source_file is not None
                 and step.arguments[0] == "up" and "terminal-server" in step.arguments)
 
-    def terminal_runtime_source_file(self) -> Path:
-        source = (self.project_dir / self.settings.terminal_server_runtime_apt_source_file.expanduser()).resolve()
+    def terminal_apt_source_file(self, configured: Path) -> Path:
+        source = (self.project_dir / configured.expanduser()).resolve()
         if not source.is_file():
-            raise FileNotFoundError(f"Terminal server runtime APT source file is missing: {source}")
+            raise FileNotFoundError(f"Terminal server APT source file is missing: {source}")
         return source
+
+    def terminal_apt_repository_dir(self) -> Path | None:
+        configured = self.settings.terminal_server_apt_repository_dir
+        if configured is None:
+            return None
+        directory = (self.project_dir / configured.expanduser()).resolve()
+        if not directory.is_dir():
+            raise FileNotFoundError(f"Terminal server APT repository directory is missing: {directory}")
+        return directory
 
     def environment(self, variables: dict[str, str]) -> dict[str, str]:
         return {**os.environ, **variables}
@@ -881,8 +883,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         compose = Compose(project_dir, files=compose_files, namespace=namespace, settings=settings, verbose=args.verbose)
         if settings.terminal_server_enabled and args.mode in ("online", "offline") and not args.dry_run:
             config.read_terminal_secret(compose.terminal_secret_file())
-            if settings.terminal_server_runtime_apt_source_file is not None:
-                compose.terminal_runtime_source_file()
+            if settings.terminal_server_apt_source_file is not None:
+                compose.terminal_apt_source_file(settings.terminal_server_apt_source_file)
+                compose.terminal_apt_repository_dir()
         if args.mode in TRANSFER_MODES or models_only:
             backup = args.mode in ("backup", "export") and not args.verify
             with (nullcontext() if args.dry_run or args.verify else project_lock(lock_path)):

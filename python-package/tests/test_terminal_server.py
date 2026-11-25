@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import lzma
 import os
 from pathlib import Path
 import secrets
@@ -109,11 +110,11 @@ class TerminalServerSettingsTests(unittest.TestCase):
             (project / "config").mkdir()
             (project / config.TERMINAL_SECRET).write_text("a" * 32)
             (project / "config/config.ini").write_text(
-                "[terminal_server]\nenabled=true\nruntime_apt_source_file=config/missing.list\n",
+                "[terminal_server]\nenabled=true\napt_source_file=config/missing.list\n",
             )
             with patch.object(cli.Compose, "execute") as execute, redirect_stderr(io.StringIO()) as errors:
                 self.assertEqual(cli.main(["offline", "--project-dir", folder]), 1)
-            self.assertIn("runtime APT source file is missing", errors.getvalue())
+            self.assertIn("APT source file is missing", errors.getvalue())
             execute.assert_not_called()
 
 
@@ -150,6 +151,7 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
         async with TestServer(upstream) as runner, ClientSession() as proxy_client:
             class Workspaces:
                 client = proxy_client
+                packages = None
                 users = []
 
                 @asynccontextmanager
@@ -343,6 +345,148 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
 class TerminalServerDockerTests(unittest.TestCase):
     image = os.environ.get("LOAF_TEST_TERMINAL_IMAGE", "local/open-terminal:latest")
 
+    def test_chat_packages_use_the_local_mirror_and_survive_restart(self):
+        self.bridge_options()
+        if not shutil.which("dpkg-deb"):
+            self.skipTest("dpkg-deb is required to create the local APT fixture.")
+        project_name = f"loaf-terminal-apt-{uuid4().hex}"
+        control = f"{project_name}_terminal-control"
+        image = f"local/open-terminal:{project_name}"
+        webui = f"{project_name}-open-webui"
+        command(["docker", "image", "tag", self.image, image])
+        self.addCleanup(command, ["docker", "image", "rm", image])
+        with TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            key = project / "terminal-server.key"
+            key.write_text(secrets.token_urlsafe(32), encoding="utf-8")
+            key.chmod(0o600)
+            repository = project / "mirror"
+            repository.mkdir()
+            source = project / "offline.sources"
+            source.write_text("Types: deb\nURIs: file:/run/loaf-apt/repository\nSuites: ./\nTrusted: yes\n")
+            self.create_apt_repository(project, repository)
+            compose = cli.Compose(project, files=[DATA / "compose.yml"], namespace=project_name,
+                                  settings=config.Settings(terminal_server_enabled=True,
+                                                           terminal_server_secret_file=key,
+                                                           terminal_server_apt_source_file=source,
+                                                           terminal_server_apt_repository_dir=repository))
+
+            def invoke(*arguments):
+                return compose_command(compose, cli.Step(("terminal",), arguments))
+
+            def seed_database(statement):
+                command(["docker", "run", "--rm", "-i", "--pull", "never", "--network", "none",
+                         "--mount", f"type=volume,source={webui},target=/db", "--entrypoint", "/usr/bin/python3",
+                         image, "-"], input="import sqlite3\nwith sqlite3.connect('/db/webui.db') as db:\n"
+                         f"    db.executescript({statement!r})\n")
+
+            def check(script):
+                command(["docker", "run", "--rm", "-i", "--pull", "never", "--network", control,
+                         "--mount", f"type=bind,source={key},target=/test.key,readonly",
+                         "--entrypoint", "/usr/bin/python3", image, "-"], input="""\
+import json
+from pathlib import Path
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+
+def request(path, body=None, *, chat='first', user='alice', status=200):
+    req = Request('http://terminal-server:8000' + path,
+                  data=json.dumps(body).encode() if body is not None else None,
+                  headers={'Authorization': 'Bearer ' + Path('/test.key').read_text(),
+                           'X-User-Id': user, 'X-Session-Id': chat, 'Content-Type': 'application/json'})
+    try:
+        with urlopen(req, timeout=90) as response:
+            assert response.status == status, (path, response.status)
+            return json.load(response)
+    except HTTPError as error:
+        assert error.code == status, (path, error.code, error.read().decode())
+
+def run(command, *, chat='first'):
+    result = request('/execute?wait=15', {'command': command}, chat=chat)
+    assert result['exit_code'] == 0, result
+""" + script)
+
+            apps = f"label=loaf.terminal.apt-project={project_name}"
+            saved_chats = f"label=loaf.terminal.chat-project={project_name}"
+            workspace = f"label={transfer.WORKSPACE_PROJECT_LABEL}={project_name}"
+            start = ("up", "-d", "--no-build", "--pull", "never", "--wait", "--wait-timeout", "60", "terminal-server")
+            try:
+                invoke("create", "--no-build", "terminal-server")
+                seed_database("CREATE TABLE chat (id TEXT PRIMARY KEY, user_id TEXT);"
+                              "INSERT INTO chat VALUES ('first', 'alice'), ('second', 'alice');")
+                invoke(*start)
+                check("""\
+operation = request('/openapi.json')['paths']['/packages/install']['post']
+assert operation['operationId'] == 'install_chat_packages'
+request('/files/cwd', {'path': '/home/chat'})
+run('echo chat > kept.txt && echo personal > /home/user/shared.txt')
+request('/packages/install', {'packages': ['loaf-chat-demo']}, chat='', status=400)
+request('/packages/install', {'packages': ['loaf-chat-demo']}, user='bob', status=404)
+request('/packages/install', {'packages': ['--allow-unauthenticated']}, status=400)
+assert request('/packages/install', {'packages': ['loaf-chat-demo']}) == {'installed': ['loaf-chat-demo']}
+assert request('/files/cwd')['cwd'] == '/home/chat'
+run('test "$(id -u)" = 1000 && test -f kept.txt && test "$(loaf-chat-demo)" = configured')
+request('/files/cwd', {'path': '/home/user'})
+run('test -f shared.txt && test "$(loaf-chat-demo)" = configured')
+request('/packages/install', {'packages': ['loaf-unavailable-package']}, status=422)
+run('test "$(loaf-chat-demo)" = configured')
+run('test -f /home/user/shared.txt && ! command -v loaf-chat-demo', chat='second')
+request('/packages/install', {'packages': ['loaf-chat-demo']}, chat='temporary:first')
+run('test "$(loaf-chat-demo)" = configured', chat='temporary:first')
+run('! command -v loaf-chat-demo', chat='temporary:second')
+""")
+                invoke("stop", "--timeout", "45", "terminal-server")
+                invoke(*start)
+                check("run('test \"$(loaf-chat-demo)\" = configured')\n"
+                      "run('! command -v loaf-chat-demo', chat='second')\n"
+                      "run('! command -v loaf-chat-demo', chat='temporary:first')\n")
+                seed_database("DELETE FROM chat WHERE id = 'first';")
+                deadline = monotonic() + 20
+                while command(["docker", "image", "ls", "-q", "--filter", apps]).strip():
+                    self.assertLess(monotonic(), deadline, "Deleted chat's image was not removed")
+                    sleep(1)
+            except AssertionError:
+                print(invoke("logs", "--no-color", "terminal-server"))
+                raise
+            finally:
+                invoke("down", "--volumes", "--timeout", "45")
+                for label in (workspace, saved_chats):
+                    volumes = command(["docker", "volume", "ls", "-q", "--filter", label]).split()
+                    if volumes:
+                        command(["docker", "volume", "rm", *volumes])
+                images = command(["docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}",
+                                  "--filter", apps]).split()
+                for tag in images:
+                    if tag.startswith("local/loaf-terminal-chat:loaf-tools-"):
+                        command(["docker", "image", "rm", tag])
+
+    @staticmethod
+    def create_apt_repository(project, repository):
+        index = []
+        for name in ("loaf-chat-dependency", "loaf-chat-demo"):
+            root = project / name
+            control = root / "DEBIAN"
+            control.mkdir(parents=True)
+            metadata = f"Package: {name}\nVersion: 1.0\nArchitecture: all\nMaintainer: Loaf tests\nDescription: Fixture\n"
+            if name == "loaf-chat-demo":
+                metadata += "Depends: loaf-chat-dependency\n"
+                executable = root / "usr/bin" / name
+                executable.parent.mkdir(parents=True)
+                executable.write_text("#!/bin/sh\ncat /usr/share/loaf-chat-fixture/marker\n")
+                executable.chmod(0o755)
+            else:
+                postinst = control / "postinst"
+                postinst.write_text("#!/bin/sh\nset -e\nmkdir -p /usr/share/loaf-chat-fixture\n"
+                                    "printf 'configured\\n' > /usr/share/loaf-chat-fixture/marker\n")
+                postinst.chmod(0o755)
+            (control / "control").write_text(metadata)
+            deb = repository / f"{name}_1.0_all.deb"
+            command(["dpkg-deb", "--build", "--root-owner-group", str(root), str(deb)])
+            payload = deb.read_bytes()
+            index.append(metadata + f"Filename: ./{deb.name}\nSize: {len(payload)}\n"
+                         f"SHA256: {hashlib.sha256(payload).hexdigest()}\n\n")
+        (repository / "Packages.xz").write_bytes(lzma.compress("".join(index).encode()))
+
     def test_runtime_apt_source_is_read_only_and_updates_on_recreate(self):
         self.bridge_options()
         project_name = f"loaf-terminal-runtime-{uuid4().hex}"
@@ -360,8 +504,8 @@ class TerminalServerDockerTests(unittest.TestCase):
             compose = cli.Compose(project, files=[DATA / "compose.yml"], namespace=project_name,
                                   settings=config.Settings(terminal_server_enabled=True,
                                                            terminal_server_secret_file=key,
-                                                           terminal_server_runtime_apt_source_file=source))
-            apt_target = "/etc/apt/sources.list.d/loaf-runtime.sources"
+                                                           terminal_server_apt_source_file=source))
+            apt_target = "/etc/apt/sources.list.d/loaf-terminal.sources"
 
             def invoke(*arguments):
                 return compose_command(compose, cli.Step(("terminal",), arguments))

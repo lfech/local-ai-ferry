@@ -73,12 +73,11 @@ Use `[terminal_server]` for the optional Open Terminal service. Its
 the standard backup. Backup includes the matching local terminal image when
 available. Use `loaf backup --no-terminal-server` to skip that image.
 Set `[images] terminal_server_image` to override its
-base image. Configure a custom Debian package mirror
-for the terminal image build with `[terminal_server] apt_source_file`.
-Set `runtime_apt_source_file` in the same section to mount a host APT source
-read-only in the provisioner and its workspaces using the loaded image.
+base image. Set `[terminal_server] apt_source_file` for the terminal image
+build and per-chat package installation. Set `apt_repository_dir` for a
+repository stored on the Docker host.
 [Terminal server setup](terminal-server.md#enable-and-connect) · [Package mirror](terminal-server.md#package-mirror-for-image-builds)
-[Runtime APT source](terminal-server.md#edit-an-apt-source-on-the-offline-host)
+[Chat packages](terminal-server.md#install-packages-for-a-chat)
 
 ### Overrides
 

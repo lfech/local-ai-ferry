@@ -4,13 +4,14 @@ services:
     tmpfs:
       - "/tmp:rw,nosuid,nodev,mode=1777,size=32m"
     environment:
-      LOAF_TERMINAL_RUNTIME_APT_SOURCE_FORMAT: ${LOAF_TERMINAL_RUNTIME_APT_SOURCE_FORMAT:?}
+      LOAF_TERMINAL_RUNTIME_APT_SOURCE_FORMAT: ${LOAF_TERMINAL_APT_SOURCE_FORMAT:?}
+      LOAF_TERMINAL_APT_REPOSITORY_DIR: ${LOAF_TERMINAL_APT_REPOSITORY_DIR:-}
     labels:
-      loaf.terminal.runtime-apt-source: ${LOAF_TERMINAL_RUNTIME_APT_SOURCE_HASH:?}
+      loaf.terminal.runtime-apt-source: ${LOAF_TERMINAL_APT_SOURCE_HASH:?}
     volumes:
       - type: bind
-        source: ${LOAF_TERMINAL_RUNTIME_APT_SOURCE_FILE:?}
-        target: /etc/apt/sources.list.d/loaf-runtime.${LOAF_TERMINAL_RUNTIME_APT_SOURCE_FORMAT:?}
+        source: ${LOAF_TERMINAL_APT_SOURCE_FILE:?}
+        target: /etc/apt/sources.list.d/loaf-terminal.${LOAF_TERMINAL_APT_SOURCE_FORMAT:?}
         read_only: true
         bind:
           create_host_path: false
