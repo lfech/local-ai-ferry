@@ -168,7 +168,7 @@ INI with `--models-file` or select another settings directory with `--config-dir
 | --- | --- | --- |
 | [16 GB VRAM](config/model-examples/models.16gb.ini) | GPUs with about 16 GB of VRAM | Qwen3-14B, Coder-14B, Ministral-3B |
 | [8 GB VRAM](config/model-examples/models.8gb.ini) | GPUs with about 8 GB of VRAM | Qwen3-4B, Coder-7B, Ministral-3B |
-| [6 GB VRAM](config/model.6gb.ini) | GPUs with about 6 GB of VRAM | Ministral-3B |
+| [6 GB VRAM](config/model-examples/models.6gb.ini) | GPUs with about 6 GB of VRAM | Ministral-3B |
 
 Pass the model file to `loaf download`. [Example commands and hardware estimates](docs/models.md)
 

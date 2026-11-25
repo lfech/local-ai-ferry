@@ -9,7 +9,7 @@ an 88 MB chat model. [Published GGUF](https://huggingface.co/bartowski/SmolLM2-1
 
 The [16 GB VRAM selection](../config/model-examples/models.16gb.ini),
 [8 GB VRAM selection](../config/model-examples/models.8gb.ini) and
-[6 GB VRAM selection](../config/model.6gb.ini) are ready to use. Each
+[6 GB VRAM selection](../config/model-examples/models.6gb.ini) are ready to use. Each
 selected model is downloaded in turn.
 
 ```bash
