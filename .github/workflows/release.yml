@@ -29,6 +29,7 @@ jobs:
       - name: Attach assets to a draft release
         env:
           GH_TOKEN: ${{ github.token }}
+          BUILDX_BAKE_ENTITLEMENTS_FS: "0"
         run: |
           cd "$RUNNER_TEMP/loaf-release"
           if draft=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft); then
