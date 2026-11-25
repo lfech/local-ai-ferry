@@ -4,9 +4,13 @@
 
 Run these examples from the checkout.
 
-The [16 GB VRAM selection](../config/model-examples/models.16gb.ini) and
-[8 GB VRAM selection](../config/model-examples/models.8gb.ini) are ready to use.
-Each selected model is downloaded in turn.
+The default `config/models.ini` selects SmolLM2-135M-Instruct in Q2_K,
+an 88 MB chat model. [Published GGUF](https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/blob/main/SmolLM2-135M-Instruct-Q2_K.gguf)
+
+The [16 GB VRAM selection](../config/model-examples/models.16gb.ini),
+[8 GB VRAM selection](../config/model-examples/models.8gb.ini) and
+[6 GB VRAM selection](../config/model.6gb.ini) are ready to use. Each
+selected model is downloaded in turn.
 
 ```bash
 loaf build
@@ -14,8 +18,8 @@ loaf download --models-file config/model-examples/models.16gb.ini
 loaf offline
 ```
 
-The default selection is Ministral. Edit `config/models.ini` to change it.
-Switching selection files changes future downloads. The models already in
+Edit `config/models.ini` to change the default selection. Switching
+selection files changes future downloads. The models already in
 the shared Ollama volume remain available. Select the configured Ollama aliases
 in WebUI. The Coder entries use exact merged GGUF filename tags.
 [Selection syntax](launcher.md#select-models)
@@ -60,6 +64,21 @@ when reasoning/output is also required.
 Use an up-to-date driver that supports the RTX 5060 and a current Ollama image.
 [Ollama lists the RTX 5060 as supported NVIDIA hardware](https://docs.ollama.com/gpu).
 The 8 GB VRAM selections are estimates.
+
+## 6 GB VRAM hardware profile
+
+The single-model profile selects Ministral-3B-Reasoning in Q4_K_M. In
+the checkout, use `loaf download --models-file config/model.6gb.ini`.
+To select it persistently, set `models_file = model.6gb.ini` under
+`[launcher]` in `config/config.ini`. The launcher can also find the INI
+in the packaged configuration directory.
+
+Ministral's weights and vision projector total about 3 GB. For one
+request at 16,384 tokens, the default 16-bit KV cache adds about 1.7 GB
+before compute buffers. The 6 GB VRAM profile is an estimate for one
+active model. [Published weights](https://huggingface.co/mistralai/Ministral-3-3B-Reasoning-2512-GGUF/tree/main) ·
+[Model dimensions](https://huggingface.co/mistralai/Ministral-3-3B-Reasoning-2512/raw/main/config.json) ·
+[Ollama KV cache](https://docs.ollama.com/faq#how-can-i-set-the-quantization-type-for-the-kv-cache)
 
 ## Using the hardware well
 

@@ -304,7 +304,7 @@ python3 python-package/tests/release_handoff.py dist/loaf \
 ## Check the model example specifiers
 
 This network test requests small public Ollama manifests for the distinct
-specifiers in the packaged `models.ini` and example INIs.
+specifiers in the packaged model INIs and checkout examples.
 
 ```bash
 RUN_CATALOG_TESTS=1 .venv/bin/loaf test -v
@@ -318,10 +318,12 @@ RUN_DOCKER_TESTS=1 RUN_GPU_TESTS=1 RUN_TERMINAL_SERVER_TESTS=1 RUN_CATALOG_TESTS
 
 ## Coverage limits
 
-The CPU and GPU suites download and test Ministral. Catalog checks cover the other
-example specifiers, whose hardware fits are estimates. Native Debian GPU
-inference, the 8 GB hardware profile, interactive browser login, vision input,
-and Tether desktop installation and sign-in are outside direct test coverage.
+The full CPU and GPU suites download and test Ministral. The compact handoff
+tests the same SmolLM2 quantization as the default selection. Catalog checks
+verify the model references. Hardware fits for the example profiles are
+estimates. Native Debian GPU inference, interactive browser login, vision
+input, and Tether desktop installation and sign-in are outside direct test
+coverage.
 
 Docker logs can contain invalid UTF-8. Regression tests cover strict decoding
 for structured data and replacement characters for diagnostic output.

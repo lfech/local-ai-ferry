@@ -84,7 +84,7 @@ the model selection.
 
 Open the printed WebUI address, which defaults to **http://localhost:3000**.
 With the default settings, create the first admin account and send a test
-message to **Ministral-3B-Reasoning**. [WebUI settings](docs/configuration.md#webui-settings)
+message to **SmolLM2-135M-Instruct**. [WebUI settings](docs/configuration.md#webui-settings)
 
 Once the test succeeds, create the transfer archive.
 
@@ -157,8 +157,8 @@ separate. [Versioned deployments](docs/launcher.md#run-a-versioned-deployment)
 
 ## Choose models and context
 
-The default INI section `[models.default]` selects the tested Ministral 3 3B
-Reasoning model in Q4_K_M. Add a `[models.<name>]` section with a `model` value
+The default INI section `[models.default]` selects SmolLM2-135M-Instruct in
+Q2_K, an 88 MB chat model. Add a `[models.<name>]` section with a `model` value
 for each model you want to use. Those sections replace the default selection.
 Add `name` to give WebUI a readable Ollama alias. Choose a different
 INI with `--models-file` or select another settings directory with `--config-dir`.
@@ -168,6 +168,7 @@ INI with `--models-file` or select another settings directory with `--config-dir
 | --- | --- | --- |
 | [16 GB VRAM](config/model-examples/models.16gb.ini) | GPUs with about 16 GB of VRAM | Qwen3-14B, Coder-14B, Ministral-3B |
 | [8 GB VRAM](config/model-examples/models.8gb.ini) | GPUs with about 8 GB of VRAM | Qwen3-4B, Coder-7B, Ministral-3B |
+| [6 GB VRAM](config/model.6gb.ini) | GPUs with about 6 GB of VRAM | Ministral-3B |
 
 Pass the model file to `loaf download`. [Example commands and hardware estimates](docs/models.md)
 

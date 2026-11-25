@@ -16,7 +16,10 @@ from tests import DATA, ROOT
 @unittest.skipUnless(os.environ.get('RUN_CATALOG_TESTS') == '1', 'Set RUN_CATALOG_TESTS=1 for public Hugging Face manifest checks.')
 class CatalogTests(unittest.TestCase):
     def test_every_example_resolves_to_an_ollama_model_manifest(self):
-        paths = [DATA / 'config/models.ini', *sorted((ROOT / 'config/model-examples').glob('*.ini'))]
+        paths = [
+            *sorted((DATA / 'config').glob('model*.ini')),
+            *sorted((ROOT / 'config/model-examples').glob('*.ini')),
+        ]
         # dict preserves first occurrence, so a shared model gets one request.
         models = list(dict.fromkeys(model.source for path in paths for model in cli.read_models(path)))
         for model in models:
