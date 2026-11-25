@@ -86,32 +86,35 @@ class TerminalServerSettingsTests(unittest.TestCase):
                 cli.main(["online", "--project-dir", folder])
             self.assertIn("auth = true", errors.getvalue())
 
-    def test_legacy_settings_and_default_key_survive_rename(self):
+    def test_terminal_key_uses_the_current_path_and_validates_its_maximum_size(self):
         with TemporaryDirectory() as folder:
             project = Path(folder)
             settings = project / "config"
             settings.mkdir()
-            (settings / "config.ini").write_text(
-                "[terminal_server]\ncpus=3\n"
-                "[tool_server]\nenabled=true\ncpus=5\n"
-                "[tests]\nrun_tool_server_tests=true\nrun_terminal_server_tests=false\nallow_legacy_tool_bridge=true\n"
-            )
-            legacy = project / config.LEGACY_TERMINAL_SECRET
-            legacy.write_text("a" * 32 + "\n")
-            loaded = config.load(DATA / "config", settings)
-            self.assertTrue(loaded.terminal_server_enabled)
-            self.assertEqual(loaded.terminal_server_cpus, 3)
-            self.assertFalse(loaded.run_terminal_server_tests)
-            self.assertTrue(loaded.allow_legacy_terminal_bridge)
-            compose = cli.Compose(project, settings=loaded)
-            self.assertEqual(compose.terminal_secret_file(), legacy)
+            (settings / "tool-server.key").write_text("a" * 32 + "\n")
             current = project / config.TERMINAL_SECRET
+            self.assertEqual(cli.Compose(project).terminal_secret_file(), current)
+            with self.assertRaises(FileNotFoundError):
+                config.read_terminal_secret(current)
             current.write_bytes(b"a" * 512 + b"\r\n")
-            self.assertEqual(compose.terminal_secret_file(), current)
             config.read_terminal_secret(current)
             current.write_bytes(b"a" * 512 + b"\r\n\n")
             with self.assertRaises(config.ConfigError):
                 config.read_terminal_secret(current)
+
+    def test_missing_runtime_apt_source_fails_before_changing_services(self):
+        with TemporaryDirectory() as folder:
+            project = Path(folder)
+            (project / "docker-project").symlink_to(DATA, target_is_directory=True)
+            (project / "config").mkdir()
+            (project / config.TERMINAL_SECRET).write_text("a" * 32)
+            (project / "config/config.ini").write_text(
+                "[terminal_server]\nenabled=true\nruntime_apt_source_file=config/missing.list\n",
+            )
+            with patch.object(cli.Compose, "execute") as execute, redirect_stderr(io.StringIO()) as errors:
+                self.assertEqual(cli.main(["offline", "--project-dir", folder]), 1)
+            self.assertIn("runtime APT source file is missing", errors.getvalue())
+            execute.assert_not_called()
 
 
 @unittest.skipUnless(ClientSession, "Install aiohttp to run the Docker-free provisioner tests.")
@@ -338,6 +341,76 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(os.environ.get("RUN_TERMINAL_SERVER_TESTS") == "1", "Set RUN_TERMINAL_SERVER_TESTS=1 for terminal-server Docker tests.")
 class TerminalServerDockerTests(unittest.TestCase):
+    image = os.environ.get("LOAF_TEST_TERMINAL_IMAGE", "local/open-terminal:latest")
+
+    def test_runtime_apt_source_is_read_only_and_updates_on_recreate(self):
+        self.bridge_options()
+        project_name = f"loaf-terminal-runtime-{uuid4().hex}"
+        control = f"{project_name}_terminal-control"
+        image = f"local/open-terminal:{project_name}"
+        command(["docker", "image", "tag", self.image, image])
+        self.addCleanup(command, ["docker", "image", "rm", image])
+        with TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            key = project / "terminal-server.key"
+            key.write_text(secrets.token_urlsafe(32), encoding="utf-8")
+            key.chmod(0o600)
+            source = project / "offline mirror.sources"
+            source.write_text("Types: deb\nURIs: http://first.invalid/debian\nSuites: trixie\nComponents: main\n")
+            compose = cli.Compose(project, files=[DATA / "compose.yml"], namespace=project_name,
+                                  settings=config.Settings(terminal_server_enabled=True,
+                                                           terminal_server_secret_file=key,
+                                                           terminal_server_runtime_apt_source_file=source))
+            apt_target = "/etc/apt/sources.list.d/loaf-runtime.sources"
+
+            def invoke(*arguments):
+                return compose_command(compose, cli.Step(("terminal",), arguments))
+
+            def check_workspace():
+                command([
+                    "docker", "run", "--rm", "--pull", "never", "--network", control, "-i",
+                    "--mount", f"type=bind,source={key},target=/test.key,readonly",
+                    "--entrypoint", "/usr/bin/python3", image, "-",
+                ], input="""\
+from pathlib import Path
+from urllib.request import Request, urlopen
+
+key = Path("/test.key").read_text()
+request = Request("http://terminal-server:8000/files/cwd", headers={
+    "Authorization": "Bearer " + key, "X-User-Id": "runtime-mirror-test",
+})
+with urlopen(request, timeout=45) as response:
+    assert response.status == 200
+""")
+                runner, = command(["docker", "ps", "-q", "--filter",
+                                   f"label={transfer.WORKSPACE_PROJECT_LABEL}={project_name}"]).split()
+                details, = json.loads(command(["docker", "inspect", runner]))
+                mounts = {mount["Destination"]: mount for mount in details["Mounts"]}
+                self.assertEqual(mounts[apt_target]["Source"], str(source))
+                self.assertFalse(mounts[apt_target]["RW"])
+                self.assertTrue(details["HostConfig"]["ReadonlyRootfs"])
+                self.assertEqual(details["Config"]["User"], "1000:1000")
+                self.assertEqual(command(["docker", "exec", runner, "/bin/cat", apt_target]), source.read_text())
+                return runner
+
+            try:
+                start = ("up", "-d", "--no-build", "--pull", "never", "--wait", "--wait-timeout", "60", "terminal-server")
+                invoke(*start)
+                first = check_workspace()
+                source.write_text(source.read_text().replace("first.invalid", "live-edit.invalid"))
+                self.assertEqual(command(["docker", "exec", first, "/bin/cat", apt_target]), source.read_text())
+                replacement = source.with_name("replace.sources")
+                replacement.write_text(source.read_text().replace("live-edit.invalid", "second.invalid"))
+                replacement.replace(source)
+                invoke(*start)
+                self.assertNotEqual(check_workspace(), first)
+            finally:
+                invoke("down", "--volumes", "--timeout", "45")
+                volumes = command(["docker", "volume", "ls", "-q", "--filter",
+                                   f"label={transfer.WORKSPACE_PROJECT_LABEL}={project_name}"]).split()
+                if volumes:
+                    command(["docker", "volume", "rm", *volumes])
+
     def test_terminal_backup_restores_image_home_and_key(self):
         if not shutil.which("git"):
             self.skipTest("Git is required for full backups.")
@@ -349,7 +422,7 @@ class TerminalServerDockerTests(unittest.TestCase):
             self.addCleanup(subprocess.run, ["docker", resource, "rm", *names],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for tag in tags:
-            command(["docker", "image", "tag", "local/open-terminal:latest", tag])
+            command(["docker", "image", "tag", self.image, tag])
 
         def workspace_shell(script):
             return command([
@@ -381,6 +454,16 @@ class TerminalServerDockerTests(unittest.TestCase):
                              "persistent work 1000:1000")
             details, = json.loads(command(["docker", "volume", "inspect", workspace]))
             self.assertEqual(details["Labels"], transfer.workspace_labels(namespace, workspace))
+            volume_archive = archive.with_name("volumes-only.tar.gz")
+            transfer.backup(project, volume_archive, lambda: None, namespace=namespace, components=("volumes",),
+                            exclude_project_file=target, include_terminal=True)
+            command(["docker", "volume", "rm", *volumes])
+            target.unlink()
+            restored = transfer.restore(project, volume_archive, namespace=namespace, terminal_key=target)
+            self.assertEqual(restored.components, {"volumes"})
+            self.assertEqual(target.read_bytes(), secret)
+            self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(workspace_shell("cat /workspace/code.c"), "persistent work")
 
     def test_offline_workspaces_survive_a_cold_restart(self):
         self.check_profile("offline", "open-webui", bridge_options=self.bridge_options())
@@ -410,52 +493,6 @@ class TerminalServerDockerTests(unittest.TestCase):
         step = cli.Step(profiles, ("config", "--format", "json"))
         return key, json.loads(compose_command(packaged, step, env=env))
 
-    def test_legacy_terminal_blocks_migration_until_launcher_stops_it(self):
-        self.bridge_options()  # Applies the same Engine prerequisite to the provisioner.
-        temporary = TemporaryDirectory(prefix="loaf-terminal-migration-")
-        self.addCleanup(temporary.cleanup)
-        folder = Path(temporary.name)
-        version = f"loaf-terminal-migration-{uuid4().hex}"
-        project = config.namespace(version)
-        profiles = ("terminal",)
-        _, original = self.render_with_key(folder, project, profiles)
-        terminal = original["services"]["terminal-server"]
-        # Use a normal checkout layout for the real stop command.
-        (folder / "docker").symlink_to(DATA / "docker", target_is_directory=True)
-        (folder / "compose.yml").write_text(json.dumps({
-            "services": {"terminal-server": terminal},
-            "networks": {"terminal-control": original["networks"]["terminal-control"]},
-            "volumes": {"open-webui": {"name": f"{project}-open-webui"}},
-            "secrets": original["secrets"],
-        }), encoding="utf-8")
-        compose = cli.Compose(folder, namespace=project)
-        self.addCleanup(compose_command, compose, cli.Step(profiles, ("down", "--volumes")), timeout=90)
-
-        def legacy_container(owner):
-            container = command([
-                "docker", "run", "-d", "--init", "--pull", "never", "--network", "none",
-                "--label", f"com.docker.compose.project={owner}",
-                "--label", "com.docker.compose.service=tool-server",
-                "--entrypoint", "/bin/sleep", terminal["image"], "180",
-            ]).strip()
-            self.addCleanup(command, ["docker", "rm", "-f", container])
-            return container
-
-        legacy = legacy_container(project)
-        unrelated = legacy_container(f"{project}-unrelated")
-        with self.assertRaisesRegex(AssertionError, "previous terminal server is still running"):
-            compose_command(compose, cli.Step(profiles, ("run", "--rm", "--no-deps", "-T", "terminal-server")))
-        command([sys.executable, "-m", "loaf", "--version", version, "stop", "-n"], cwd=folder)
-        for container, running in ((legacy, "false"), (unrelated, "true")):
-            with self.subTest(container=container):
-                self.assertEqual(
-                    command(["docker", "inspect", "-f", "{{.State.Running}}", container]).strip(),
-                    running,
-                )
-        compose_command(compose, cli.Step(
-            profiles, ("up", "-d", "--no-build", "--pull", "never", "--wait", "--wait-timeout", "45", "terminal-server"),
-        ))
-
     def check_profile(self, profile, webui, *, bridge_options):
         project = f"loaf-terminal-test-{uuid4().hex}"
         control = f"{project}_terminal-control"
@@ -470,8 +507,9 @@ class TerminalServerDockerTests(unittest.TestCase):
             # Use the packaged services with disposable data and a closed network.
             # This test exercises the WebUI connection without starting inference.
             services = {name: original["services"][name] for name in (webui, "terminal-server")}
+            services["terminal-server"]["image"] = self.image
             if not bridge_options:
-                services["terminal-server"]["working_dir"] = "/opt/owo-terminal"
+                services["terminal-server"]["working_dir"] = "/opt/loaf-terminal"
                 services["terminal-server"]["entrypoint"] = [
                     "/usr/bin/python3", "-c",
                     "import asyncio; from provisioner import serve; asyncio.run(serve(allow_legacy_bridge=True))",

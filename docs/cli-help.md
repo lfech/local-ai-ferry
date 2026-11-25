@@ -42,12 +42,15 @@ Each command lists the shared flags it uses.
 
 Prepare configuration and link the Docker project with the standalone
 executable, or install `loaf` in the checkout's virtualenv and prepare the
-installer cache from source. [Installation](installation.md)
+installer cache from source. Setup also creates the configured terminal
+server key when it is missing. [Installation](installation.md)
 
 Uses `--config-dir PATH` and `--dry-run`.
 
 - `--with-docker-deps` caches Docker Engine, Compose and Buildx packages on Debian 13 and installs them as needed.
 - `--archive PATH` selects a backup folder or its archive when running standalone setup. With `--with-docker-deps`, setup can recover the matching installers from that backup.
+- `--terminal-server-key` creates the configured key only, with owner-only permissions. It preserves an existing key.
+- `--all` restores the archived source checkout and Docker data in the copied backup folder. The backup must contain the source files. [Full checkout recovery](transfer.md#debian-restore)
 
 ### install
 
@@ -139,25 +142,32 @@ Merge a model-only archive into the Ollama store. Uses `--config-dir PATH`,
 ### backup
 
 Create a dated backup folder containing the archive, verification manifest
-and standalone executable. Uses `--config-dir PATH`, `--version VERSION`,
+and standalone executable. List `images`, `volumes` and `project` in any
+combination, or omit them to save all three. Uses `--config-dir PATH`, `--version VERSION`,
 `--dry-run`, and `--backup-dir PATH`. Use `-a` or `--attach` when creating a
 backup. [Backup contents](transfer.md#archive-contents)
 
-- `--verify` checks an existing backup's hashes and reports its image platforms without Docker.
-- `--archive PATH` selects a specific backup folder or archive with `--verify`.
+- `--verify` checks the whole deployment backup, lists its components and reports any image platforms without Docker.
+- `--models-only` saves the Ollama store as a model-store archive. Use it with `volumes` or omit the component name.
+- `--archive PATH` selects an input for `--verify` or an output file for `--models-only`.
 - `--no-terminal-server` skips the Open Terminal image. Backup includes the matching local image by default when it exists. Terminal workspaces and the bearer key follow `[terminal_server] include_in_backup`.
-- `--export`, `--no-export` enable or disable refreshing selected Modelfiles from cached models before backup. The default comes from `[transfer] export_models`.
+- `--export`, `--no-export` enable or disable refreshing selected Modelfiles from cached models before backing up volumes. The default comes from `[transfer] export_models`.
 - `--models-file PATH`, `--wait-timeout SECONDS` apply when refreshing Modelfiles.
 
 ### restore
 
-Restore a full backup into new or empty volumes. Uses `--config-dir PATH`,
+Restore any combination of `images`, `volumes` and `project` from a verified
+backup. Omit the names to restore every available component. Deployment volume
+restore requires new or empty volumes. Uses `--config-dir PATH`,
 `--version VERSION`, `--dry-run`, and `-a` or `--attach`. `--archive PATH`
 selects a specific backup folder or archive. `--backup-dir PATH` selects the
-newest full backup for the deployment in that directory. A selected backup
+newest backup for the deployment in that directory. A selected backup
 folder supplies its saved deployment version. [Restore behavior](transfer.md#restore-behavior)
 
-- `--import`, `--no-import` enable or disable starting offline GPU Ollama to apply saved Modelfiles after restore. The default comes from `[transfer] import_models`.
+- `--models-only` merges a model-store archive into the existing Ollama store. Use it with `volumes` or omit the component name.
+- `--delete` mirrors the Ollama store when using `--models-only`.
+- `--import`, `--no-import` enable or disable starting offline Ollama to apply saved Modelfiles after restoring volumes. The default comes from `[transfer] import_models`.
+- `--cpu` uses CPU inference when starting Ollama to apply Modelfiles.
 - `--wait-timeout SECONDS` applies when starting Ollama to import Modelfiles.
 
 ### integration
@@ -185,3 +195,4 @@ Run the checkout's unittest suite. Uses `--config-dir PATH` to select the
 test settings. Use `-v` for individual case names. [Verification guide](verification.md)
 
 - `--badges` records the run and refreshes badges for the groups that ran.
+- `--cpu` enables Docker checks and runs the model workflows with CPU inference.

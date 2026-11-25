@@ -13,6 +13,8 @@ import re
 import secrets
 import signal
 import sqlite3
+import subprocess
+from tempfile import TemporaryDirectory
 from time import monotonic
 from urllib.parse import quote
 
@@ -27,11 +29,13 @@ OWNER = "loaf.tool-server.workspace"
 CHAT_PROJECT = "loaf.terminal.chat-project"
 CHAT_ID = "loaf.terminal.chat-id"
 CHAT_OWNER = "loaf.terminal.chat-owner"
+RUNTIME_MOUNTS = "loaf.terminal.runtime-mounts"
 GATEWAY = "com.docker.network.bridge.gateway_mode_ipv4"
 INHIBIT_IPV4 = "com.docker.network.bridge.inhibit_ipv4"
 BRIDGE_NAME = "com.docker.network.bridge.name"
 KEY_FILE = Path("/run/secrets/terminal-server-key")
-CHAT_DB = Path("/var/lib/owo-webui/webui.db")
+CHAT_DB = Path("/var/lib/loaf-webui/webui.db")
+RUNTIME_RUNNER = "/run/loaf-terminal/runner.py"
 WORKSPACE_ROOT = "/home"
 WORKSPACE_HOME = "/home/user"
 CHAT_HOME = "/home/chat"
@@ -111,15 +115,15 @@ class Policy:
     @classmethod
     def load(cls, project, env, *, bridge_options):
         numbers = [
-            int(env["OWO_TERMINAL_" + name]) for name in
+            int(env["LOAF_TERMINAL_" + name]) for name in
             ("CPUS", "MEMORY_MIB", "MAX_WORKSPACES", "IDLE_SECONDS", "COMMAND_SECONDS")
         ]
         if min(numbers) < 1:
             raise ValueError("Terminal server limits must be positive.")
-        options = json.loads(env.get("OWO_TERMINAL_VOLUME_OPTIONS") or "{}")
+        options = json.loads(env.get("LOAF_TERMINAL_VOLUME_OPTIONS") or "{}")
         if not isinstance(options, dict) or any(not isinstance(value, str) for value in options.values()):
             raise ValueError("Terminal server volume options must be an object of strings.")
-        return cls(project, *numbers, env["OWO_TERMINAL_VOLUME_DRIVER"], options, bridge_options)
+        return cls(project, *numbers, env["LOAF_TERMINAL_VOLUME_DRIVER"], options, bridge_options)
 
     def asset_name(self, key):
         project = hashlib.sha256(self.project.encode()).hexdigest()[:16]
@@ -153,13 +157,15 @@ class Workspace:
 
 
 class Workspaces:
-    def __init__(self, policy, docker, client, provisioner, image_id, chats):
+    def __init__(self, policy, docker, client, provisioner, image_id, chats, *, runtime_mounts=(), runtime_revision=None):
         self.policy = policy
         self.docker = docker
         self.client = client
         self.provisioner = provisioner
         self.image_id = image_id
         self.chats = chats
+        self.runtime_mounts = runtime_mounts
+        self.runtime_revision = runtime_revision
         self.active = {}
         self.lock = asyncio.Lock()
 
@@ -174,6 +180,7 @@ class Workspaces:
                 continue
             container = await self.docker.call("GET", f"/containers/{record['Id']}/json")
             if (container["State"]["Running"] and container["Image"] == self.image_id
+                    and container["Config"]["Labels"].get(RUNTIME_MOUNTS) == self.runtime_revision
                     and len(self.active) < self.policy.maximum):
                 self.active[key] = await self.recover(key, container)
             else:
@@ -257,6 +264,11 @@ class Workspaces:
 
     def container_spec(self, name, labels, credential, home_volume, *, chat_volume=None, temporary=False):
         mounts = [{"Type": "volume", "Source": home_volume, "Target": WORKSPACE_HOME}]
+        runner = "/opt/loaf-terminal/runner.py"
+        if self.runtime_mounts:
+            mounts.extend(self.runtime_mounts)
+            labels = {**labels, RUNTIME_MOUNTS: self.runtime_revision}
+            runner = RUNTIME_RUNNER
         tmpfs = {"/tmp": "rw,nosuid,nodev,mode=1777,size=256m"}
         if chat_volume:
             mounts.append({"Type": "volume", "Source": chat_volume, "Target": CHAT_HOME})
@@ -265,7 +277,7 @@ class Workspaces:
         return {
             # Open Terminal uses the process working directory as its single-user home.
             "Image": self.image_id, "Labels": labels, "User": "1000:1000", "WorkingDir": WORKSPACE_HOME,
-            "Entrypoint": ["/usr/local/bin/python", "/opt/owo-terminal/runner.py"],
+            "Entrypoint": ["/usr/local/bin/python", runner],
             "Cmd": [],
             "Env": [
                 f"HOME={WORKSPACE_HOME}", f"OPEN_TERMINAL_START_DIR={WORKSPACE_HOME}",
@@ -591,13 +603,60 @@ def application(workspaces, secret, metadata, control_network=None):
     return app
 
 
+def workspace_runtime_mounts(container, source_format):
+    if source_format not in ("list", "sources"):
+        raise ValueError("Use a .list or .sources file for the runtime APT source.")
+    targets = (f"/etc/apt/sources.list.d/loaf-runtime.{source_format}", RUNTIME_RUNNER)
+    actual = {mount["Destination"]: mount for mount in container["Mounts"]}
+    mounts = []
+    revision = hashlib.sha256()
+    for target in targets:
+        mount = actual.get(target, {})
+        source = mount.get("Source", "")
+        if mount.get("Type") != "bind" or mount.get("RW") is not False or not Path(source).is_absolute():
+            raise ValueError(f"Expected a read-only runtime bind mount at {target}.")
+        revision.update(os.fsencode(source) + b"\0" + os.fsencode(target) + b"\0")
+        content = hashlib.sha256()
+        with Path(target).open("rb") as payload:
+            for block in iter(lambda: payload.read(65536), b""):
+                content.update(block)
+        revision.update(content.digest())
+        mounts.append({"Type": "bind", "Source": source, "Target": target, "ReadOnly": True})
+    return tuple(mounts), revision.hexdigest()
+
+
+def read_metadata(*, runtime):
+    baked = Path("/opt/loaf-terminal/metadata.json")
+    if not runtime or baked.is_file():
+        return json.loads(baked.read_text())
+    # A runtime overlay can use an already-loaded image that supplies Open Terminal.
+    with TemporaryDirectory() as folder:
+        metadata = Path(folder) / "metadata.json"
+        subprocess.run([
+            "/usr/local/bin/python", "-c", """\
+import asyncio
+import json
+import sys
+
+from open_terminal.main import app, get_config
+
+with open(sys.argv[1], "w", encoding="utf-8") as output:
+    json.dump({"config": asyncio.run(get_config()), "schema": app.openapi()}, output)
+""",
+            str(metadata),
+        ], env={**os.environ, "HOME": folder, "OPEN_TERMINAL_API_KEY": "metadata-only"},
+            stdout=subprocess.DEVNULL, check=True, timeout=30)
+        return json.loads(metadata.read_text())
+
+
 async def serve(*, allow_legacy_bridge=False):
     with KEY_FILE.open("rb") as source:
         key = source.read(515)
     if not re.fullmatch(rb"[!-~]{32,512}(?:\r?\n)?", key):
         raise ValueError("The terminal server secret must be 32–512 printable ASCII characters without spaces.")
     secret = key.rstrip(b"\r\n").decode("ascii")
-    metadata = json.loads(Path("/opt/owo-terminal/metadata.json").read_text())
+    source_format = os.environ.get("LOAF_TERMINAL_RUNTIME_APT_SOURCE_FORMAT")
+    metadata = read_metadata(runtime=bool(source_format))
 
     async def reject_redirect(*_):
         raise ClientError("Workspace redirects are disabled")
@@ -625,14 +684,13 @@ async def serve(*, allow_legacy_bridge=False):
             bridge_options = {INHIBIT_IPV4: "true"}
         control = await docker.call("GET", f"/containers/{os.environ['HOSTNAME']}/json")
         project = control["Config"]["Labels"]["com.docker.compose.project"]
-        old_service = {"label": [f"com.docker.compose.project={project}", "com.docker.compose.service=tool-server"]}
-        if await docker.call("GET", "/containers/json", params={"filters": json.dumps(old_service)}):
-            raise RuntimeError("The previous terminal server is still running. Stop it before starting terminal-server.")
         endpoint = control["NetworkSettings"]["Networks"][project + "_terminal-control"]
         address = ipaddress.IPv4Address(endpoint["IPAddress"])
         network = ipaddress.IPv4Network((address, endpoint["IPPrefixLen"]), strict=False)
         policy = Policy.load(project, os.environ, bridge_options=bridge_options)
-        workspaces = Workspaces(policy, docker, runners, control["Id"], control["Image"], Chats(CHAT_DB))
+        mounts, revision = workspace_runtime_mounts(control, source_format) if source_format else ((), None)
+        workspaces = Workspaces(policy, docker, runners, control["Id"], control["Image"], Chats(CHAT_DB),
+                                runtime_mounts=mounts, runtime_revision=revision)
         await workspaces.initialize()
         runner = web.AppRunner(application(workspaces, secret, metadata, network), access_log=None, shutdown_timeout=5)
         stop = asyncio.Event()
@@ -651,6 +709,6 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     try:
         asyncio.run(serve())
-    except (KeyError, OSError, ValueError, RuntimeError, ClientError, TimeoutError) as error:
+    except (KeyError, OSError, ValueError, RuntimeError, ClientError, TimeoutError, subprocess.SubprocessError) as error:
         LOG.error("Terminal server startup failed: %s", error)
         raise SystemExit(1)

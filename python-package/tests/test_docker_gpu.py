@@ -1,4 +1,4 @@
-"""Exercise model deployment and transfer with isolated GPU Compose projects."""
+"""Exercise model deployment and transfer with isolated Compose projects."""
 
 from copy import deepcopy
 import json
@@ -10,7 +10,7 @@ import urllib.request
 from uuid import uuid4
 
 from loaf import cli, transfer
-from tests.docker_support import GPU_TESTS, command, compose_command, compose_config
+from tests.docker_support import CPU_TESTS, GPU_TESTS, command, compose_command, compose_config
 
 
 CACHED_MODEL = "hf.co/mistralai/Ministral-3-3B-Reasoning-2512-GGUF:Q4_K_M"
@@ -28,22 +28,24 @@ OLLAMA_REQUEST = dedent("""\
 """)
 
 
-@unittest.skipUnless(GPU_TESTS, "Set RUN_DOCKER_TESTS=1 and RUN_GPU_TESTS=1 for GPU tests.")
-class GpuWorkflowTests(unittest.TestCase):
+@unittest.skipUnless(CPU_TESTS or GPU_TESTS, "Enable the CPU or GPU Docker model workflow.")
+class ModelWorkflowTests(unittest.TestCase):
+    cpu = CPU_TESTS
+
     @classmethod
     def setUpClass(cls):
-        cls.template = compose_config()
+        cls.template = compose_config(cpu=cls.cpu)
         for service in cls.template["services"].values():
             if "container_name" in service or any(
                 mount["type"] != "volume" or mount["source"] not in cls.template["volumes"]
                 for mount in service.get("volumes", ())
             ):
-                raise AssertionError("GPU fixtures require project-local containers and named volumes.")
+                raise AssertionError("Model fixtures require project-local containers and named volumes.")
             service["restart"] = "no"
         for name in ("open-webui", "open-webui-online"):
             port, = cls.template["services"][name]["ports"]
             if port["host_ip"] != "127.0.0.1":
-                raise AssertionError("GPU fixtures require loopback WebUI ports.")
+                raise AssertionError("Model fixtures require loopback WebUI ports.")
             port["published"] = "0"
 
         # Download once. Each workflow gets its own copy of the stopped model store.
@@ -56,12 +58,12 @@ class GpuWorkflowTests(unittest.TestCase):
     @classmethod
     def create_project(cls, add_cleanup):
         config = deepcopy(cls.template)
-        project = f"loaf-gpu-test-{uuid4().hex}"
+        project = f"loaf-model-test-{uuid4().hex}"
         config["name"] = project
         for kind in ("networks", "volumes"):
             for key, resource in config[kind].items():
                 resource["name"] = f"{project}-{key}"
-        folder = tempfile.TemporaryDirectory(prefix="loaf-gpu-")
+        folder = tempfile.TemporaryDirectory(prefix="loaf-model-")
         add_cleanup(folder.cleanup)
         root = Path(folder.name)
         compose_file = root / "compose.json"
@@ -99,9 +101,9 @@ class GpuWorkflowTests(unittest.TestCase):
         ])
         return compose
 
-    @staticmethod
-    def workflow(compose, mode, models=(), **options):
-        for step in cli.plan(mode, models, **options):
+    @classmethod
+    def workflow(cls, compose, mode, models=(), **options):
+        for step in cli.plan(mode, models, cpu=cls.cpu, **options):
             # The pull can take much longer than the Compose readiness wait.
             compose_command(compose, step, timeout=1800)
 
@@ -156,28 +158,34 @@ class GpuWorkflowTests(unittest.TestCase):
         """, readonly=True)
         self.assertCountEqual(json.loads(output), [f"{CACHED_MODEL}.model", f"{DISPLAY_NAME}.model"])
 
-    def test_offline_inference_uses_full_gpu_at_default_context(self):
+    def test_offline_inference_uses_the_selected_device_at_default_context(self):
         compose = self.new_deployment()
         self.workflow(compose, "offline")
         self.assert_webui_healthy(compose, "offline")
         self.assertIn(DISPLAY_NAME, self.model_names(compose, "offline"))
-        # Omit num_ctx to exercise the configured server default with real inference.
+        # Keep the long prompt for the GPU context regression check.
+        prompt = "Reply with a short greeting."
+        if not self.cpu:
+            prompt += " Ignore " + ("padding " * 7600)
         payload = {
             "model": CACHED_MODEL,
             "messages": [
-                {"role": "system", "content": "Reply with a short greeting. Ignore " + ("padding " * 7600)},
+                {"role": "system", "content": prompt},
                 {"role": "user", "content": "hello :)"},
             ],
             "stream": False,
-            "options": {"temperature": 0.7, "num_predict": 2048},
+            "options": {"temperature": 0.7, "num_predict": 128 if self.cpu else 2048},
             "keep_alive": "1m",
         }
         response = self.webui_request(compose, "offline", "chat", payload)
-        self.assertGreater(response["prompt_eval_count"], 7008)
-        self.assertEqual(response["done_reason"], "stop")
-        self.assertTrue(response["message"]["content"].strip())
+        if self.cpu:
+            self.assertGreater(response["eval_count"], 0)
+        else:
+            self.assertGreater(response["prompt_eval_count"], 7008)
+            self.assertEqual(response["done_reason"], "stop")
+            self.assertTrue(response["message"]["content"].strip())
         placement = self.invoke(compose, "offline", "exec", "-T", "ollama-offline", "ollama", "ps")
-        self.assertIn("100% GPU", placement)
+        self.assertIn("100% CPU" if self.cpu else "100% GPU", placement)
         self.assertIn("16384", placement)
 
     def test_import_only_rebuilds_a_missing_manifest_without_starting_webui(self):

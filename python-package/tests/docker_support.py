@@ -9,7 +9,8 @@ from tests import DATA, ROOT
 
 
 DOCKER_TESTS = os.environ.get("RUN_DOCKER_TESTS") == "1"
-GPU_TESTS = DOCKER_TESTS and os.environ.get("RUN_GPU_TESTS") == "1"
+CPU_TESTS = DOCKER_TESTS and os.environ.get("RUN_CPU_TESTS") == "1"
+GPU_TESTS = DOCKER_TESTS and not CPU_TESTS and os.environ.get("RUN_GPU_TESTS") == "1"
 
 
 def command(args, *, input=None, timeout=180, decode_errors="strict", env=None, cwd=None):

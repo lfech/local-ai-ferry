@@ -5,20 +5,23 @@
 Run `loaf backup` on the source and copy the entire dated backup folder to the
 destination. The folder supplies the standalone Linux amd64 launcher. Run
 `./loaf setup` and `./loaf restore` inside the folder.
+Use `./loaf setup --all` to recover the full checkout and any included Docker data from a
+backup made from source. [Debian restore](#debian-restore)
 
 ## Transfer models between existing deployments
 
-Use `loaf export` on the source and `loaf import` on the destination.
+Use `--models-only` on the source and destination. The `loaf export` and
+`loaf import` commands use the same model-store workflow.
 Both commands stop the selected deployment's downloader. The online or
 offline serving profile can stay running if its Ollama container is the only
 running consumer of the volume. Use `--version` to select the deployment volume.
 
 ```bash
-loaf export --archive /media/transfer/models.tar.gz
+loaf backup volumes --models-only --archive /media/transfer/models.tar.gz
 ```
 
 ```bash
-loaf import --archive /media/transfer/models.tar.gz
+loaf restore volumes --models-only --archive /media/transfer/models.tar.gz
 ```
 
 Without `--archive`, export writes `backup/YYYYMMDD-HHMM_loaf-volumes.tar.gz`
@@ -43,17 +46,36 @@ by avoiding model pulls, creation and deletion through the Ollama API.
 
 Import copies missing blobs first and updates matching manifests and
 Modelfiles. It preserves destination-only data by default. Use
-`loaf import --delete --archive PATH` to remove blobs, manifests and Modelfiles
+`loaf restore volumes --models-only --delete --archive PATH` to remove blobs, manifests and Modelfiles
 absent from the archive. This can remove models currently in use. Use
 `--dry-run` to check which deployment and archive you selected. To avoid
 interrupting requests for removed models, stop inference before mirroring
 a store. Start the same serving profile again after the copy.
 
+## Select deployment components
+
+Use any combination of `images`, `volumes` and `project` after `backup` or
+`restore`. With no component names, backup saves all three and restore
+recovers everything present in the archive.
+
+```bash
+loaf backup images project
+loaf restore images project --archive /media/transfer/YYYYMMDD-HHMM_local-ai-ferry
+```
+
+Restore verifies every payload before applying the selected components.
+It reports any explicitly requested component missing from the archive.
+Only a backup that includes `volumes` stops the project services. Restoring
+volumes without images requires the matching local `local/ollama-online`
+helper image. Restoring `project` recovers settings and Modelfiles. Use
+`./loaf setup --all` for the source checkout from a bundle containing
+`project`. [Debian restore](#debian-restore)
+
 ## Archive contents
 
-Each full backup is a folder named `YYYYMMDD-HHMM_local-ai-ferry`.
-Existing full backups and model archives from earlier releases remain
-readable with `loaf restore`, `loaf backup --verify`, and `loaf import`.
+Each deployment backup is a folder named `YYYYMMDD-HHMM_local-ai-ferry`.
+Deployment backups and model-store archives use separate formats and are selected by
+timestamp. Use `--archive PATH` to select a specific backup folder or archive.
 
 ```text
 backup/YYYYMMDD-HHMM_local-ai-ferry/
@@ -73,7 +95,7 @@ binary that launched it. [Local binary build](releases.md#build-and-check-locall
 | `volumes.tar` | Ollama and Open WebUI volumes, plus the selected deployment's terminal workspace volumes when included. |
 | `images.tar` | The three core Docker images and the matching Open Terminal image when available locally. |
 | `project.tar` | Saved configuration, Modelfiles and available installer files. Backups made from a source checkout also include its working files, Git history and virtualenv. |
-| `terminal.json` | Optional terminal workspace inventory and bearer key. |
+| `terminal.json` | Optional terminal workspace inventory and bearer key included with `volumes`. |
 | `sha256.json` | SHA-256 digests of all payloads. |
 
 The default directory is `backup/` in the project. Set `[transfer]`
@@ -91,10 +113,10 @@ back up its configuration and cached installers directly. The release
 executable supplies the packaged defaults and Docker files. Copy required
 `.env` settings and other external data separately.
 
-Backup includes the Open Terminal image tagged for the selected deployment
+The images component includes the Open Terminal image tagged for the selected deployment
 when it is available locally. Use `loaf backup --no-terminal-server` to skip
 that image. Set `[terminal_server] include_in_backup = true` to add per-account
-`user` volumes and the bearer key independently of the image. Move any
+`user` volumes and the bearer key when backing up volumes. Move any
 chat files you want to transfer into `/home/user` before backing up.
 `loaf restore` reads the archive to decide which assets to restore. The
 checkout payload excludes the configured terminal key file. Open WebUI's
@@ -133,12 +155,13 @@ an image export or pauses its stream, the meter shows `waiting for Docker`.
 loaf backup --verify --archive /media/transfer/YYYYMMDD-HHMM_local-ai-ferry
 ```
 
-Verification checks the bundled executable and each archive payload by SHA-256 and reports the
-operating system and architecture of each saved image. It performs no Docker
-operations. Allow temporary disk space for `images.tar`. Without `--archive`,
+Verification checks the bundled executable and each archive payload by SHA-256,
+lists the available components, and reports the operating system and
+architecture of any saved images. It performs no Docker operations. Allow
+temporary disk space when the archive contains `images.tar`. Without `--archive`,
 it checks the newest backup in the configured directory. Select the backup's
-namespace with `--version` when applicable. Older archives without recorded
-hashes remain restorable and return a verification error.
+namespace with `--version` when applicable. Verification and restore both
+require the SHA-256 manifest in the archive.
 
 ## Versioned transfers
 
@@ -204,25 +227,55 @@ chmod +x loaf
 ./loaf offline
 ```
 
+To recover the source checkout and Docker data together, enter the copied
+folder from a source checkout backup and run `./loaf setup --all`. The
+command recovers the archived files, including `python-package/`, `docs/`,
+Git history and cached installers. As with a minimal restore, Docker
+volumes must be new or empty. The archived virtualenv retains references to
+the source machine. Use `./loaf` as the launcher on the destination.
+
+After an in-place restore, the backup archive, launcher copy and manifest
+are in `backup/`. The root launcher points to `dist/loaf` in both restore
+modes. A full checkout restore also adds the source files shown below.
+
+```text
+YYYYMMDD-HHMM_local-ai-ferry/
+  backup/
+    YYYYMMDD-HHMM_local-ai-ferry.tar.gz
+    loaf
+    backup.json
+  loaf -> dist/loaf
+  dist/
+    loaf
+  python-package/
+  docs/
+```
+
+Use `./loaf backup --verify --archive ./backup` to verify the retained
+bundle. The destination `backup/` and `dist/loaf` paths must be available
+before the in-place restore.
+
 To restore from read-only media, run the backup's `loaf` by its full path
 from a separate writable project directory. The executable locates the
-archive beside itself.
+archive beside itself and leaves the original bundle on the media.
 
 ## Restore behavior
 
 Restore discovers the archive and executable from the backup folder and checks
 their presence, the executable hash, the archive structure and the recorded
-payload hashes before calling Docker. Restore also checks volume paths and
-archive links before extracting them. Stop containers that use the destination
-volumes before restoring. Restore loads images and extracts volume data into
-new or empty volumes. It then writes the saved settings and Modelfiles to
-`config/`. The bundled executable supplies the launcher and deployment files.
+payload hashes before calling Docker. Restore checks volume paths and
+archive links before extracting selected volumes. Stop containers that use
+the destination volumes before restoring them. Restore loads selected images,
+extracts selected volumes into new or empty volumes, and writes saved settings
+and Modelfiles to `config/` when restoring the project. The bundled executable
+supplies the launcher and deployment files.
 Restore leaves services stopped by default. Run `loaf offline` and open the
 printed address to sign in or create the first account.
 
 Add `--import` or set `import_models = true` under `[transfer]` to start offline
-GPU Ollama and import all saved Modelfiles after restoring the images and volumes.
-This step requires working NVIDIA container access and leaves WebUI stopped. Run
+Ollama and import all saved Modelfiles after restoring volumes.
+The default uses NVIDIA container access. Add `--cpu` to run the import on CPU.
+This step leaves WebUI stopped. Run
 `loaf offline` to start WebUI. If import fails, the restored data remains in
 place. Fix the problem and start the desired serving mode. Use `--no-import`
 to skip a configured import.

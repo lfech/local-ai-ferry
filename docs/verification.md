@@ -51,8 +51,8 @@ previous badge and link. Plain `loaf test` and `loaf test -v` report to the term
 
 | Badge | What counts |
 | --- | --- |
-| CLI baseline | Core tests with the four `RUN_*_TESTS` opt-ins disabled, including CLI, configuration, setup, transfers, and documentation. The local rsync check needs `rsync` on `PATH`. |
-| Docker | Compose configuration, image contracts, shell helpers, volume transfer and container lifecycle. |
+| CLI baseline | Core tests with the `RUN_*_TESTS` opt-ins disabled, including CLI, configuration, setup, transfers, and documentation. The local rsync check needs `rsync` on `PATH`. |
+| Docker | Compose configuration, image contracts, shell helpers, volume transfer, container lifecycle, and model workflows run on CPU. |
 | Open Terminal | The provisioner and runner API tests and the opt-in Open WebUI workspace tests. |
 | GPU inference | The real Ollama GPU workflows, including inference and model transfer. |
 | Model catalog | One test with subtests for each distinct Hugging Face model reference. |
@@ -62,7 +62,7 @@ on optional packages and count toward the Open Terminal badge if they run.
 
 ```bash
 RUN_DOCKER_TESTS=0 RUN_GPU_TESTS=0 RUN_TERMINAL_SERVER_TESTS=0 \
-    RUN_CATALOG_TESTS=0 .venv/bin/loaf test --badges
+    RUN_CPU_TESTS=0 RUN_CATALOG_TESTS=0 .venv/bin/loaf test --badges
 ```
 
 Use the following selectors from `python-package/` to count each advanced
@@ -75,6 +75,7 @@ RUN_DOCKER_TESTS=1 ../.venv/bin/python -m unittest -bv \
     tests.test_docker.ComposeContractTests tests.test_docker.BuiltImageTests \
     tests.test_docker.ShellHelperTests tests.test_docker.DockerTests
 RUN_DOCKER_TESTS=1 RUN_GPU_TESTS=1 ../.venv/bin/python -m unittest -bv tests.test_docker_gpu
+RUN_DOCKER_TESTS=1 RUN_CPU_TESTS=1 ../.venv/bin/python -m unittest -bv tests.test_docker_gpu
 RUN_TERMINAL_SERVER_TESTS=1 ../.venv/bin/python -m unittest -bv \
     tests.test_terminal_server.TerminalServerDockerTests
 ../.venv/bin/python -m unittest -bv \
@@ -95,13 +96,13 @@ or override them for a run with the flags below. Transfer tests require Git.
 | Host setup | Checks APT-managed and pyenv interpreters, wheel reuse and refresh, virtualenv recovery, setup diagnostics, and the NVIDIA toolkit cache. Also checks that Docker setup is opt-in and uses only the prepared APT source when the cache is present. |
 | Configuration | Checks packaged defaults, local overrides, model file selection, INI validation, and resolved Compose settings. |
 | Host integrations | Checks the generated systemd unit and Continue YAML against project paths, deployment version, WebUI settings and model selection. Checks that the Tether command prints installation steps and the official downloads link. |
-| Transfer | Uses real project files and archives with simulated Docker calls. Checks the standalone handoff folder, path and payload verification, minimal setup, recovery of saved configuration and cached installers, and image and volume transfer. Also checks Modelfile replay and v2 model archives. With rsync, checks the model archive merge and deletion scripts. |
+| Transfer | Uses real project files and archives with simulated Docker calls. Checks all seven deployment component combinations, verification, recovery of saved configuration and cached installers, and repeated component restores from a retained bundle. Also checks Modelfile replay and v2 model archives. The Docker suite checks the model-only merge and mirror commands against disposable Ollama volumes. |
 | Readiness | Checks Docker and Compose version reporting, Open Terminal image and key reporting, GPU and volume probes, recognition of the deployment's WebUI port, and relative Ollama v2 manifest links. |
 | Open WebUI tool history | Checks the optional compatibility filter for interrupted Ollama tool turns, including provider selection, preserved tool results, and repeated requests. |
 | Documentation | Checks local links, heading anchors and guide navigation. Parses Bash examples. |
 | Release tagging | Uses temporary Git repositories to check version selection, annotated tags, previews, and tag-only pushes and retries. Requires Python 3.11 or newer. |
 | Docker | Checks resolved Compose profiles, CPU and GPU device settings, and image settings. Tests each export and startup shell scenario, verifies container removal and the stop opt-out, and runs a two-volume archive round trip. |
-| GPU | Checks downloaded model exports, offline Ministral inference, startup failure and recovery, explicit Modelfile replay, and model archive mirroring with the connected services running. |
+| CPU and GPU model workflows | Check downloaded model exports, offline Ministral inference, startup failure and recovery, explicit Modelfile replay, and model archive mirroring with the connected services running. |
 | Terminal server | Checks credential validation, HTTP and WebSocket proxying, account and chat storage, file browsing and chat deletion, development tools through Open WebUI, and backup and restore of the image, user volumes and key. Transfer tests also cover automatic image inclusion and `--no-terminal-server`. Docker-backed workflows are opt-in. |
 | Model catalog | Checks that the example/default model specifiers resolve to Ollama-compatible manifests. |
 
@@ -189,12 +190,23 @@ alias disappears and both connected containers keep their IDs.
 Cleanup targets the generated projects and their disposable resources.
 [GPU cases](../python-package/tests/test_docker_gpu.py)
 
+Use `loaf test --cpu` on a host with Docker and no NVIDIA GPU. It enables
+the Docker suite and runs the same isolated model workflows with the CPU
+Compose override. The inference check uses a short prompt and verifies CPU
+placement and the configured context. The model download and disk
+requirements apply to both modes.
+
+```bash
+RUN_TERMINAL_SERVER_TESTS=1 RUN_CATALOG_TESTS=1 .venv/bin/loaf test --cpu -v
+```
+
 ## Terminal server checks
 
 The optional [terminal server Docker checks](terminal-server.md#acceptance-checks) use
 `RUN_TERMINAL_SERVER_TESTS=1`, Docker Engine 26+, and locally built
 `local/open-webui:latest` and `local/open-terminal:latest` images from the current
 checkout. Rebuild the terminal image after changes to the provisioner.
+Use `LOAF_TEST_TERMINAL_IMAGE` to select a disposable test tag.
 Run it on native Debian and Debian in WSL2 with the same local images
 before and after host disconnection. The serving cases drive
 Open WebUI's terminal proxy with two authorized accounts and a denied
@@ -203,10 +215,8 @@ builds after a cold restart on the internal control network. The online and
 offline cases have separate Docker projects and volumes. They need no
 model or GPU.
 
-The migration case checks that an older provisioner blocks startup until
-the launcher stops it and that an unrelated provisioner keeps running.
-The serving cases exercise saved connections using the old hostname.
-They check the default and recent entries offered in the working-directory
+The serving cases use `http://terminal-server:8000` for saved connections
+and check the default and recent entries offered in the working-directory
 menu, selection before the first message, and visibility of files created by
 model commands.
 They also check chat isolation and volume removal after chat deletion.
@@ -242,7 +252,7 @@ RUN_DOCKER_TESTS=1 RUN_GPU_TESTS=1 RUN_TERMINAL_SERVER_TESTS=1 RUN_CATALOG_TESTS
 
 ## Coverage limits
 
-The GPU suite downloads and tests Ministral. Catalog checks cover the other
+The CPU and GPU suites download and test Ministral. Catalog checks cover the other
 example specifiers, whose hardware fits are estimates. Native Debian GPU
 inference, the 8 GB hardware profile, interactive browser login, vision input,
 and Tether desktop installation and sign-in are outside direct test coverage.

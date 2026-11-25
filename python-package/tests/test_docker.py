@@ -150,10 +150,10 @@ class ComposeContractTests(unittest.TestCase):
         self.assertEqual(terminal["pull_policy"], "never")
         self.assertEqual(set(terminal["networks"]), {"terminal-control"})
         self.assertTrue(rendered["networks"]["terminal-control"]["internal"])
-        self.assertIn("tool-server", terminal["networks"]["terminal-control"]["aliases"])
+        self.assertNotIn("tool-server", (terminal["networks"]["terminal-control"] or {}).get("aliases", ()))
         self.assertFalse(terminal.get("ports"))
         self.assertTrue(terminal["read_only"])
-        webui_data, = [mount for mount in terminal["volumes"] if mount["target"] == "/var/lib/owo-webui"]
+        webui_data, = [mount for mount in terminal["volumes"] if mount["target"] == "/var/lib/loaf-webui"]
         self.assertEqual(webui_data["source"], "open-webui")
         self.assertTrue(webui_data["read_only"])
         self.assertEqual({secret["source"] for secret in terminal["secrets"]}, {"terminal-server-key"})
@@ -180,7 +180,7 @@ class ComposeContractTests(unittest.TestCase):
             {key: f"{namespace}_{key}" for key in rendered["networks"]},
         )
 
-    def test_ini_settings_reach_compose_and_legacy_overrides_still_win(self):
+    def test_ini_settings_reach_compose_and_environment_overrides_still_win(self):
         with tempfile.TemporaryDirectory() as folder:
             project = Path(folder)
             (project / "docker-project").symlink_to(DATA, target_is_directory=True)
@@ -225,6 +225,14 @@ class ComposeContractTests(unittest.TestCase):
         self.assertEqual(services["open-webui-online"]["environment"]["OFFLINE_MODE"], "true")
         self.assertEqual(services["open-webui-online"]["environment"]["HF_HUB_OFFLINE"], "1")
         self.assertTrue(resolved["networks"]["inference"]["internal"])
+
+    def test_retired_compose_variables_do_not_change_the_deployment(self):
+        with patch.dict(os.environ, OWO_NAMESPACE="other-deployment", OWO_DOCKER_DIR="/old/path",
+                        OWO_WEBUI_PORT="5999"):
+            resolved = compose_config()
+        self.assertEqual(resolved["volumes"]["ollama"]["name"], "ollama")
+        self.assertEqual(resolved["services"]["open-webui"]["ports"][0]["published"], "3000")
+        self.assertEqual(Path(resolved["services"]["ollama-online"]["build"]["context"]), DOCKER_DIR / "ollama-online")
 
 
 
@@ -348,6 +356,43 @@ class DockerTests(unittest.TestCase):
                 )
         check_fixture("verify", target, readonly=True)
 
+    def test_models_only_commands_merge_and_mirror_the_destination(self):
+        prefix = f"loaf-model-transfer-{uuid4().hex}"
+
+        def create_store(role):
+            version = f"{prefix}-{role}"
+            namespace = config.namespace(version)
+            volume = next(iter(transfer.volume_names(namespace)))
+            image = transfer.image_names(namespace)[0]
+            command(["docker", "volume", "create", volume])
+            self.addCleanup(command, ["docker", "volume", "rm", volume])
+            command(["docker", "image", "tag", transfer.IMAGES[0], image])
+            self.addCleanup(command, ["docker", "image", "rm", image])
+            return version, volume
+
+        def store_shell(volume, script):
+            return command([
+                "docker", "run", "--rm", "--pull", "never", "--network", "none",
+                "--mount", f"type=volume,source={volume},target=/ollama,volume-nocopy",
+                "--entrypoint", "/bin/sh", transfer.IMAGES[0], "-c", script,
+            ])
+
+        source, source_volume = create_store("source")
+        target, target_volume = create_store("target")
+        store_shell(source_volume, "mkdir -p /ollama/models /ollama/config; printf source > /ollama/config/source.model")
+        store_shell(target_volume, "mkdir -p /ollama/models /ollama/config; printf local > /ollama/config/local.model")
+        with tempfile.TemporaryDirectory(prefix="loaf-model-transfer-") as folder:
+            project = Path(folder)
+            compose = {"services": {"ollama-online": {"image": transfer.IMAGES[0]}}}
+            (project / "compose.yml").write_text(json.dumps(compose), encoding="utf-8")
+            launcher = [sys.executable, "-m", "loaf"]
+            options = ["volumes", "--models-only", "--archive", str(project / "models.tar.gz")]
+            command([*launcher, "--version", source, "backup", *options], cwd=project)
+            restore = [*launcher, "--version", target, "restore", *options]
+            command(restore, cwd=project)
+            self.assertEqual(store_shell(target_volume, "ls /ollama/config").split(), ["local.model", "source.model"])
+            command([*restore, "--delete"], cwd=project)
+            self.assertEqual(store_shell(target_volume, "ls /ollama/config").split(), ["source.model"])
 
     def start_stop_fixture(self):
         folder = tempfile.TemporaryDirectory(prefix="loaf-stop-")

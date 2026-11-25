@@ -13,9 +13,12 @@ chmod +x loaf
 ./loaf restore
 ```
 
-Setup creates default configuration and links the packaged Docker files.
-Restore checks the handoff and loads saved images, volumes, settings and
-Modelfiles. For a fresh deployment, use the release executable and run setup.
+Setup creates default configuration and the terminal server key and links
+the packaged Docker files. Restore checks the handoff and loads saved images,
+volumes, settings and Modelfiles. Use `./loaf setup --all` in place of these
+two commands when recovering the full source checkout from a checkout backup.
+For a fresh deployment, use the release executable and run setup.
+[Full checkout recovery](transfer.md#debian-restore) ·
 [Release executable](releases.md#run-the-executable)
 
 On Debian 13, use the following setup command when the backup has Docker
@@ -45,9 +48,8 @@ sudo nvidia-ctk runtime configure --runtime=docker
 sudo systemctl restart docker
 ```
 
-If Open Terminal is enabled and the archive omitted its bearer key, prepare the
-key before running `./loaf offline`. Once WebUI is running, update the
-saved terminal connection if the key changed.
+If the archive omitted the Open Terminal bearer key and setup created a new
+one, update the saved terminal connection after starting WebUI.
 [Terminal setup](terminal-server.md#enable-and-connect)
 
 ## Host integrations

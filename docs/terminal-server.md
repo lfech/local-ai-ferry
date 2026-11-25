@@ -35,11 +35,14 @@ enabled = true
 secret_file = config/terminal-server.key
 ```
 
-For a new deployment, run these commands from the project directory while
-connected. The key-generation command fails if the file already exists.
+Setup creates the key at the configured path with owner-only permissions.
+For an existing deployment that only needs a key, run
+`loaf setup --terminal-server-key` from the project directory. Both commands
+preserve an existing key. For a new deployment, run these commands while
+connected.
 
 ```bash
-(umask 077; set -C; openssl rand -hex 32 > config/terminal-server.key)
+loaf setup
 loaf build
 loaf offline
 ```
@@ -65,24 +68,10 @@ The URL is reachable from Open WebUI on the internal Compose network.
 
 ## Upgrade an existing terminal deployment
 
-Rebuild with `loaf build`, then run `loaf online` or `loaf offline`. The launcher
-stops a running `tool-server` container in the selected Compose project
-before starting `terminal-server`. For direct Compose use, stop the old service
-before starting the new one with profile `terminal`. The new service checks
-for an active older instance before it manages workspace containers.
-Direct Compose uses `LOAF_TERMINAL_SECRET_FILE` for a custom bearer key path.
-
-The supported section is now `[terminal_server]`. The launcher also reads any
-existing `[tool_server]` entries. When both sections specify the same key in
-one file, the current section wins. If the default `config/terminal-server.key`
-is missing, `loaf` uses `config/tool-server.key` when present. Saved direct
-connections to `http://tool-server:8000` continue to resolve through a private
-network alias. Use `http://terminal-server:8000` for new connections.
-
-Workspace resources use `loaf-tools-` Docker names and `loaf.*` ownership
-labels. The rebuilt provisioner starts with fresh workspaces when upgrading
-from a prerelease build that used `owo-tools-`. Keep the earlier build with
-its volumes and archives if you need to access that workspace data.
+Rebuild with `loaf build`, then run `loaf online` or `loaf offline`.
+Use `[terminal_server]` in the INI and `http://terminal-server:8000` for the
+saved connection in Open WebUI. Direct Compose uses
+`LOAF_TERMINAL_SECRET_FILE` for a custom bearer key path.
 
 ## Use the terminal from a model
 
@@ -146,6 +135,7 @@ All settings below belong to `[terminal_server]` in `config/config.ini`.
 | `include_in_backup` | `false` | Include persistent user volumes and the bearer key in `loaf backup`. |
 | `secret_file` | `config/terminal-server.key` | Source for the Compose bearer secret. |
 | `apt_source_file` | blank | Replace the base image's APT sources during the terminal build. [Package mirror](#package-mirror-for-image-builds) |
+| `runtime_apt_source_file` | blank | Mount a host APT source into workspaces read-only when starting Open Terminal. [Runtime APT source](#edit-an-apt-source-on-the-offline-host) |
 | `cpus` | `2` | CPU limit per runner. |
 | `memory_mib` | `2048` | Memory limit per runner. |
 | `max_workspaces` | `4` | Limit on simultaneously allocated runners. |
@@ -193,22 +183,49 @@ offline host. The installed commands run inside the isolated workspaces.
 Package installation happens during the image build. The deployed terminal
 does not need access to the original source file.
 
+## Edit an APT source on the offline host
+
+Copy a readable `.list` or `.sources` file to the Docker host and set its
+path in the project configuration. For example, place the file at
+`config/offline-mirror.sources` after restoring the project.
+
+```ini
+[terminal_server]
+runtime_apt_source_file = config/offline-mirror.sources
+```
+
+Run `loaf offline` using the updated launcher and the loaded Open Terminal
+image. Loaf mounts the file read-only at
+`/etc/apt/sources.list.d/loaf-runtime.sources` in the provisioner and its
+workspaces. A `.list` file gets the corresponding `.list` destination.
+The file is visible to workspace users. Keep it free of mirror credentials.
+
+Edit the source on the host. In-place writes are visible through the mount.
+Run `loaf offline` again after saving through an editor that replaces the
+file. On that run, Loaf recreates the terminal containers if the source changed.
+This supplies an APT source file at runtime. The workspace root filesystem
+is read-only and package installation for the image happens during a build.
+[Docker bind mounts](https://docs.docker.com/engine/storage/bind-mounts/)
+
 ## Offline transfer and shutdown
 
-`loaf backup` includes the matching Open Terminal image when it exists locally.
+`loaf backup` includes the matching Open Terminal image when capturing images
+if it exists locally.
 Use `loaf backup --no-terminal-server` to skip that image. To also transfer each
 account's `user` volume and the bearer key, set
 `[terminal_server] include_in_backup = true` and provision the credential on
-the source before backing up. Move chat files you want to transfer into
+the source before backing up `volumes`. Move chat files you want to transfer into
 `/home/user` before the backup. The archive contains the bearer key in
 plaintext and is created with owner-only permissions. [Archive contents](transfer.md#archive-contents)
 
-`loaf restore` detects those assets automatically. Restore with the matching
+`loaf restore` restores those assets with their corresponding components.
+Restore with the matching
 deployment version and configuration so the workspace names and WebUI account
 IDs match. The destination's `volume_driver` and `volume_options` determine
 how workspace volumes are created. Restore writes the key to `secret_file`
 with owner-only permissions, reuses a matching key, and refuses to replace a
-different key or overwrite populated volumes.
+different key or overwrite populated volumes. Setup from the copied backup
+uses its saved key when creating the local file.
 
 For archives without the terminal image, save and load it separately before
 serving. Use the matching image tag for a versioned deployment. If you also

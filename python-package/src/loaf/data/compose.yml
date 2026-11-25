@@ -5,13 +5,13 @@ name: local-inference
 
 x-ollama-gpu: &ollama-gpu
   scale: 1
-  image: local/ollama-offline:${LOAF_NAMESPACE:-${OWO_NAMESPACE:-latest}}
+  image: local/ollama-offline:${LOAF_NAMESPACE:-latest}
   pull_policy: never
   volumes:
     - ollama:/ollama
   environment: &ollama-settings
-    OLLAMA_CONTEXT_LENGTH: ${OLLAMA_CONTEXT_LENGTH:-${LOAF_INI_CONTEXT_LENGTH:-${OWO_INI_CONTEXT_LENGTH:-16384}}}
-    OLLAMA_STARTUP_TIMEOUT: ${OLLAMA_STARTUP_TIMEOUT:-${LOAF_INI_STARTUP_TIMEOUT:-${OWO_INI_STARTUP_TIMEOUT:-60}}}
+    OLLAMA_CONTEXT_LENGTH: ${OLLAMA_CONTEXT_LENGTH:-${LOAF_INI_CONTEXT_LENGTH:-16384}}
+    OLLAMA_STARTUP_TIMEOUT: ${OLLAMA_STARTUP_TIMEOUT:-${LOAF_INI_STARTUP_TIMEOUT:-60}}
     CUDA_VISIBLE_DEVICES:
   # The NVIDIA driver and runtime belong on the Docker host.
   gpus: all
@@ -34,17 +34,17 @@ x-ollama-gpu: &ollama-gpu
 
 x-webui: &webui
   scale: 1
-  image: local/open-webui:${LOAF_NAMESPACE:-${OWO_NAMESPACE:-latest}}
+  image: local/open-webui:${LOAF_NAMESPACE:-latest}
   pull_policy: never
   volumes:
     - open-webui:/app/backend/data
   environment: &webui-settings
     OLLAMA_BASE_URL: http://ollama-offline:11434
-    WEBUI_AUTH: "${LOAF_WEBUI_AUTH:-${OWO_WEBUI_AUTH:-true}}"
+    WEBUI_AUTH: "${LOAF_WEBUI_AUTH:-true}"
   ports:
     - target: 8080
-      published: "${LOAF_WEBUI_PORT:-${OWO_WEBUI_PORT:-3000}}"
-      host_ip: "${LOAF_WEBUI_BIND_ADDRESS:-${OWO_WEBUI_BIND_ADDRESS:-127.0.0.1}}"
+      published: "${LOAF_WEBUI_PORT:-3000}"
+      host_ip: "${LOAF_WEBUI_BIND_ADDRESS:-127.0.0.1}"
   healthcheck:
     test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3).close()"]
     interval: 5s
@@ -57,13 +57,13 @@ services:
   ollama-online:
     scale: 1
     profiles: [download]
-    image: local/ollama-online:${LOAF_NAMESPACE:-${OWO_NAMESPACE:-latest}}
+    image: local/ollama-online:${LOAF_NAMESPACE:-latest}
     # Consume the locally built image; pulling base images is an explicit build.
     pull_policy: never
     build:
-      context: ${LOAF_DOCKER_DIR:-${OWO_DOCKER_DIR:-./docker}}/ollama-online
+      context: ${LOAF_DOCKER_DIR:-./docker}/ollama-online
       args:
-        OLLAMA_IMAGE: ${OLLAMA_IMAGE:-${LOAF_INI_OLLAMA_IMAGE:-${OWO_INI_OLLAMA_IMAGE:-ollama/ollama:latest}}}
+        OLLAMA_IMAGE: ${OLLAMA_IMAGE:-${LOAF_INI_OLLAMA_IMAGE:-ollama/ollama:latest}}
     volumes:
       - ollama:/ollama
     # Has Internet access for manual `ollama pull` commands.
@@ -81,18 +81,18 @@ services:
     <<: *ollama-gpu
     profiles: [offline]
     build:
-      context: ${LOAF_DOCKER_DIR:-${OWO_DOCKER_DIR:-./docker}}/ollama-offline
+      context: ${LOAF_DOCKER_DIR:-./docker}/ollama-offline
       args:
-        OLLAMA_IMAGE: ${OLLAMA_IMAGE:-${LOAF_INI_OLLAMA_IMAGE:-${OWO_INI_OLLAMA_IMAGE:-ollama/ollama:latest}}}
+        OLLAMA_IMAGE: ${OLLAMA_IMAGE:-${LOAF_INI_OLLAMA_IMAGE:-ollama/ollama:latest}}
     networks: [inference]
 
   open-webui:
     <<: *webui
     profiles: [offline]
     build:
-      context: ${LOAF_DOCKER_DIR:-${OWO_DOCKER_DIR:-./docker}}/open-webui
+      context: ${LOAF_DOCKER_DIR:-./docker}/open-webui
       args:
-        OPEN_WEBUI_IMAGE: ${OPEN_WEBUI_IMAGE:-${LOAF_INI_WEBUI_IMAGE:-${OWO_INI_WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:main}}}
+        OPEN_WEBUI_IMAGE: ${OPEN_WEBUI_IMAGE:-${LOAF_INI_WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:main}}
     depends_on:
       ollama-offline:
         condition: service_healthy
@@ -104,7 +104,7 @@ services:
     profiles: [online]
     environment:
       <<: *ollama-settings
-      OLLAMA_NO_CLOUD: "${LOAF_ONLINE_NO_CLOUD:-${OWO_ONLINE_NO_CLOUD:-false}}"
+      OLLAMA_NO_CLOUD: "${LOAF_ONLINE_NO_CLOUD:-false}"
     networks:
       connected:
         # Reuse the same URL even if an existing WebUI database saved it.
@@ -118,24 +118,23 @@ services:
         condition: service_healthy
     environment:
       <<: *webui-settings
-      OFFLINE_MODE: "${LOAF_ONLINE_OFFLINE_MODE:-${OWO_ONLINE_OFFLINE_MODE:-false}}"
-      HF_HUB_OFFLINE: "${LOAF_ONLINE_HF_HUB_OFFLINE:-${OWO_ONLINE_HF_HUB_OFFLINE:-0}}"
+      OFFLINE_MODE: "${LOAF_ONLINE_OFFLINE_MODE:-false}"
+      HF_HUB_OFFLINE: "${LOAF_ONLINE_HF_HUB_OFFLINE:-0}"
     networks: [connected, terminal-control]
 
   terminal-server:
     scale: 1
     profiles: [terminal]
-    image: local/open-terminal:${LOAF_NAMESPACE:-${OWO_NAMESPACE:-latest}}
+    image: local/open-terminal:${LOAF_NAMESPACE:-latest}
     pull_policy: never
     build:
-      context: ${LOAF_DOCKER_DIR:-${OWO_DOCKER_DIR:-./docker}}/terminal-server
+      context: ${LOAF_DOCKER_DIR:-./docker}/terminal-server
       args:
-        OPEN_TERMINAL_IMAGE: ${LOAF_TERMINAL_BASE_IMAGE:-${OWO_TERMINAL_BASE_IMAGE:-ghcr.io/open-webui/open-terminal:0.17.20-slim}}
-        TERMINAL_APT_SOURCE_FORMAT: ${LOAF_TERMINAL_APT_SOURCE_FORMAT:-${OWO_TERMINAL_APT_SOURCE_FORMAT:-}}
-        TERMINAL_APT_SOURCE_HASH: ${LOAF_TERMINAL_APT_SOURCE_HASH:-${OWO_TERMINAL_APT_SOURCE_HASH:-}}
+        OPEN_TERMINAL_IMAGE: ${LOAF_TERMINAL_BASE_IMAGE:-ghcr.io/open-webui/open-terminal:0.17.20-slim}
+        TERMINAL_APT_SOURCE_FORMAT: ${LOAF_TERMINAL_APT_SOURCE_FORMAT:-}
+        TERMINAL_APT_SOURCE_HASH: ${LOAF_TERMINAL_APT_SOURCE_HASH:-}
       secrets: [terminal-apt-source]
-    # Preserve the entrypoint and environment contract of existing image archives.
-    entrypoint: ["/usr/bin/python3", "/opt/owo-terminal/provisioner.py"]
+    entrypoint: ["/usr/bin/python3", "/opt/loaf-terminal/provisioner.py"]
     command: []
     init: true
     read_only: true
@@ -146,20 +145,18 @@ services:
     sysctls:
       net.ipv4.ip_forward: "0"
     environment:
-      OWO_TERMINAL_CPUS: ${LOAF_TERMINAL_CPUS:-${OWO_TERMINAL_CPUS:-2}}
-      OWO_TERMINAL_MEMORY_MIB: ${LOAF_TERMINAL_MEMORY_MIB:-${OWO_TERMINAL_MEMORY_MIB:-2048}}
-      OWO_TERMINAL_MAX_WORKSPACES: ${LOAF_TERMINAL_MAX_WORKSPACES:-${OWO_TERMINAL_MAX_WORKSPACES:-4}}
-      OWO_TERMINAL_IDLE_SECONDS: ${LOAF_TERMINAL_IDLE_SECONDS:-${OWO_TERMINAL_IDLE_SECONDS:-900}}
-      OWO_TERMINAL_COMMAND_SECONDS: ${LOAF_TERMINAL_COMMAND_SECONDS:-${OWO_TERMINAL_COMMAND_SECONDS:-900}}
-      OWO_TERMINAL_VOLUME_DRIVER: ${LOAF_TERMINAL_VOLUME_DRIVER:-${OWO_TERMINAL_VOLUME_DRIVER:-local}}
-      OWO_TERMINAL_VOLUME_OPTIONS: ${LOAF_TERMINAL_VOLUME_OPTIONS:-${OWO_TERMINAL_VOLUME_OPTIONS:-}}
+      LOAF_TERMINAL_CPUS: ${LOAF_TERMINAL_CPUS:-2}
+      LOAF_TERMINAL_MEMORY_MIB: ${LOAF_TERMINAL_MEMORY_MIB:-2048}
+      LOAF_TERMINAL_MAX_WORKSPACES: ${LOAF_TERMINAL_MAX_WORKSPACES:-4}
+      LOAF_TERMINAL_IDLE_SECONDS: ${LOAF_TERMINAL_IDLE_SECONDS:-900}
+      LOAF_TERMINAL_COMMAND_SECONDS: ${LOAF_TERMINAL_COMMAND_SECONDS:-900}
+      LOAF_TERMINAL_VOLUME_DRIVER: ${LOAF_TERMINAL_VOLUME_DRIVER:-local}
+      LOAF_TERMINAL_VOLUME_OPTIONS: ${LOAF_TERMINAL_VOLUME_OPTIONS:-}
     secrets: [terminal-server-key]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - open-webui:/var/lib/owo-webui:ro
-    networks:
-      terminal-control:
-        aliases: [tool-server] # Saved direct connections from older deployments.
+      - open-webui:/var/lib/loaf-webui:ro
+    networks: [terminal-control]
     healthcheck:
       test: [CMD, curl, --noproxy, "*", -fsS, http://terminal-server:8000/health]
       interval: 5s
@@ -169,17 +166,17 @@ services:
 
 secrets:
   terminal-server-key:
-    file: ${LOAF_TERMINAL_SECRET_FILE:-${OWO_TERMINAL_SECRET_FILE:-./config/terminal-server.key}}
+    file: ${LOAF_TERMINAL_SECRET_FILE:-./config/terminal-server.key}
   terminal-apt-source:
-    file: ${LOAF_TERMINAL_APT_SOURCE_FILE:-${OWO_TERMINAL_APT_SOURCE_FILE:-${LOAF_DOCKER_DIR:-${OWO_DOCKER_DIR:-./docker}}/terminal-server/default-apt-source.list}}
+    file: ${LOAF_TERMINAL_APT_SOURCE_FILE:-${LOAF_DOCKER_DIR:-./docker}/terminal-server/default-apt-source.list}
 
 # --- Durable data: these literal names are also used by backup/restore commands ---
 volumes:
   ollama:
     # Use the literal name rather than a Compose project prefix.
-    name: "${LOAF_NAMESPACE:-${OWO_NAMESPACE:+${OWO_NAMESPACE}-}}${LOAF_NAMESPACE:+-}ollama"
+    name: "${LOAF_NAMESPACE:-}${LOAF_NAMESPACE:+-}ollama"
   open-webui:
-    name: "${LOAF_NAMESPACE:-${OWO_NAMESPACE:+${OWO_NAMESPACE}-}}${LOAF_NAMESPACE:+-}open-webui"
+    name: "${LOAF_NAMESPACE:-}${LOAF_NAMESPACE:+-}open-webui"
 
 # --- Routing: downloader access and browser publishing are separate from Ollama ---
 networks:

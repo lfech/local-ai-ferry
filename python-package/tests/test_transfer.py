@@ -3,8 +3,10 @@
 from base64 import b64encode
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
+import gzip
 from hashlib import sha256
 import io
+from itertools import combinations
 import json
 import os
 from pathlib import Path
@@ -19,7 +21,7 @@ from unittest.mock import Mock, patch
 
 from loaf import cli, setup, transfer
 from loaf.progress import Progress
-from tests import ROOT
+from tests import DATA, ROOT
 
 
 def tar_payload(name, content, **files):
@@ -207,8 +209,8 @@ class TransferTests(unittest.TestCase):
                 self.assertIn(f"{docker_cache}/docker.io_fixture.deb", project.getnames())
                 self.assertNotIn(f"{setup.INSTALL_CACHE}/scratch.txt", project.getnames())
                 self.assertNotIn(".env", project.getnames())
-                self.assertNotIn("offline-images.tar", project.getnames())
-                self.assertNotIn("legacy/offline-images.tar", project.getnames())
+                self.assertIn("offline-images.tar", project.getnames())
+                self.assertIn("legacy/offline-images.tar", project.getnames())
                 self.assertFalse(any(name.startswith(("backup/", "transfer disk/")) for name in project.getnames()))
                 with TemporaryDirectory() as recovered:
                     options = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
@@ -226,6 +228,104 @@ class TransferTests(unittest.TestCase):
             [["image", "ls"], ["image", "save"], ["image", "load"]],
         )
         self.assertFalse(list(self.project.glob(".loaf-restore-*")))
+
+    def test_each_component_set_creates_and_restores_only_its_payloads(self):
+        settings = self.project / "config/config.ini"
+        for size in range(1, len(transfer.COMPONENTS) + 1):
+            for components in combinations(transfer.COMPONENTS, size):
+                with self.subTest(components=components):
+                    settings.write_text("[webui]\nport = 8818\n")
+                    before = set(self.backup_dir.glob("*"))
+                    self.docker_calls.clear()
+                    self.assertEqual(self.invoke("backup", *components), 0, self.progress.getvalue())
+                    folder, = set(self.backup_dir.glob("*")) - before
+                    bundle = transfer.read_bundle(folder)
+                    with tarfile.open(bundle.archive, "r:gz") as archive:
+                        members = {f"{part}.tar" for part in components}
+                        self.assertEqual(set(archive.getnames()), members | {transfer.CHECKSUMS})
+                        with archive.extractfile(transfer.CHECKSUMS) as manifest:
+                            self.assertEqual(set(json.load(manifest)), members)
+                    self.assertEqual(any(call[1:3] == ["image", "save"] for call in self.docker_calls),
+                                     "images" in components)
+                    self.assertEqual(any("stop" in call for call in self.docker_calls), "volumes" in components)
+                    self.assertEqual(any(call[1] == "run" for call in self.docker_calls), "volumes" in components)
+
+                    self.docker_calls.clear()
+                    self.assertEqual(self.invoke("backup", "--verify", "--archive", str(folder), custom=False),
+                                     0, self.progress.getvalue())
+                    self.assertEqual(self.docker_calls, [])
+                    settings.write_text("[webui]\nport = 8820\n")
+                    self.assertEqual(self.invoke("restore", "--archive", str(folder), custom=False),
+                                     0, self.progress.getvalue())
+                    self.assertEqual(any(call[1:3] == ["image", "load"] for call in self.docker_calls),
+                                     "images" in components)
+                    self.assertEqual(any(call[1] == "run" for call in self.docker_calls), "volumes" in components)
+                    self.assertEqual(cli.config.load(self.project / "config").port,
+                                     8818 if "project" in components else 8820)
+
+    def test_restore_a_subset_from_a_full_archive_and_require_explicit_parts(self):
+        self.assertEqual(self.invoke("backup"), 0, self.progress.getvalue())
+        self.docker_calls.clear()
+        self.assertEqual(self.invoke("restore", "project", "images"), 0, self.progress.getvalue())
+        self.assertEqual(self.docker_calls, [["docker", "image", "load"]])
+
+        self.assertEqual(self.invoke("backup", "project"), 0, self.progress.getvalue())
+        self.docker_calls.clear()
+        self.assertEqual(self.invoke("restore", "images", "project"), 1)
+        self.assertIn("does not contain the requested components: images", self.progress.getvalue())
+        self.assertEqual(self.docker_calls, [])
+        self.assertEqual(self.invoke("restore", "--import"), 1)
+        self.assertIn("requires the volumes component", self.progress.getvalue())
+        self.assertEqual(self.docker_calls, [])
+
+    def test_in_place_restore_can_apply_another_component_from_the_retained_bundle(self):
+        (self.project / "config/config.ini").write_text("[terminal_server]\ninclude_in_backup = true\n")
+        original_key = self.project / cli.config.TERMINAL_SECRET
+        original_key.write_bytes(b"archived-terminal-credential-0123456789\n")
+        self.assertEqual(self.invoke("backup"), 0, self.progress.getvalue())
+        self.docker_calls.clear()
+        self.assertEqual(self.invoke("restore", "project", "--no-import", project=self.bundle, custom=False),
+                         0, self.progress.getvalue())
+        self.assertEqual(self.docker_calls, [])
+        self.assertTrue((self.bundle / "loaf").is_symlink())
+        key = self.bundle / cli.config.TERMINAL_SECRET
+        self.assertFalse(key.exists())
+        self.assertEqual(self.invoke("restore", "images", project=self.bundle, custom=False),
+                         0, self.progress.getvalue())
+        self.assertEqual(self.docker_calls, [["docker", "image", "load"]])
+        self.assertEqual(self.invoke("restore", "volumes", project=self.bundle, custom=False),
+                         0, self.progress.getvalue())
+        self.assertEqual(key.read_bytes(), original_key.read_bytes())
+
+    def test_empty_archives_and_terminal_metadata_without_volumes_are_rejected(self):
+        path = self.project / "invalid.tar.gz"
+        for metadata in (None, b"{}"):
+            with self.subTest(terminal_metadata=metadata):
+                entries = {} if metadata is None else {transfer.TERMINAL_METADATA: metadata}
+                hashes = {name: sha256(data).hexdigest() for name, data in entries.items()}
+                path.write_bytes(gzip.compress(tar_payload(transfer.CHECKSUMS, json.dumps(hashes).encode(), **entries)))
+                self.assertEqual(self.invoke("restore", "--archive", str(path), custom=False), 1)
+                expected = "no backup components" if metadata is None else "terminal metadata without the volumes"
+                self.assertIn(expected, self.progress.getvalue())
+                self.assertEqual(self.docker_calls, [])
+
+    def test_volumes_only_round_trip_preserves_the_archived_terminal_key(self):
+        settings = self.project / "config/config.ini"
+        settings.write_text("[terminal_server]\ninclude_in_backup = true\n")
+        key = self.project / cli.config.TERMINAL_SECRET
+        original = b"archived-terminal-credential-0123456789\n"
+        key.write_bytes(original)
+        self.assertEqual(self.invoke("backup", "volumes"), 0, self.progress.getvalue())
+        key.unlink()
+        self.fail_compose_step = "inspect"
+        self.assertEqual(self.invoke("restore", "volumes"), 1)
+        self.assertIn("requires the local helper image", self.progress.getvalue())
+        self.assertFalse(key.exists())
+        self.fail_compose_step = None
+        self.assertEqual(self.invoke("restore", "volumes"), 0, self.progress.getvalue())
+        self.assertEqual(key.read_bytes(), original)
+        self.assertEqual(key.stat().st_mode & 0o777, 0o600)
+        self.assertNotIn(original.strip().decode(), self.output.getvalue() + self.progress.getvalue())
 
     def test_checkout_backup_builds_and_bundles_the_current_executable(self):
         script = self.project / "scripts/build-release.sh"
@@ -380,7 +480,22 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(archive.read_bytes(), previous)
         self.assertEqual(list(root.iterdir()), [archive.parent])
 
-    def test_restore_prefers_newest_timestamp_and_accepts_explicit_or_legacy_backups(self):
+    def test_backup_excludes_numbered_bundles_from_its_checkout_payload(self):
+        self.assertEqual(self.invoke("backup"), 0, self.progress.getvalue())
+        self.assertEqual(self.invoke("backup"), 0, self.progress.getvalue())
+        backup = self.backup_dir / (self.bundle.name + "-2")
+        self.assertTrue(backup.is_dir())
+        # Include a previous bundle in Git's inventory despite the checkout ignore rules.
+        self.git("add", "-f", str(backup.relative_to(self.project)))
+        self.assertEqual(self.invoke("backup"), 0, self.progress.getvalue())
+        newest = transfer.read_bundle(self.backup_dir / (self.bundle.name + "-3"))
+        with tarfile.open(newest.archive, "r:gz") as outer:
+            with tarfile.open(fileobj=outer.extractfile("project.tar"), mode="r|") as checkout:
+                self.assertFalse(any(path.startswith("transfer disk/") for path in checkout.getnames()))
+
+    def test_restore_prefers_newest_timestamp_and_accepts_explicit_archives(self):
+        settings = self.project / "config/config.ini"
+        settings.write_text("[webui]\nport = 8818\n")
         self.assertEqual(self.invoke("backup"), 0)
         self.clock.now.return_value = self.timestamp.replace(minute=1)
         self.assertEqual(self.invoke("backup"), 0)
@@ -391,10 +506,14 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(self.invoke("restore", "--archive", str(self.archive), custom=False), 0)
         self.assertIn(self.archive.name, self.output.getvalue())
         shutil.rmtree(newer)
-        legacy = self.archive.rename(self.backup_dir / transfer.ARCHIVE_NAME)
+        raw_archive = self.archive.rename(self.backup_dir / transfer.ARCHIVE_NAME)
         shutil.rmtree(self.bundle)
-        self.assertEqual(self.invoke("restore"), 0)
-        self.assertIn(str(legacy.resolve()), self.output.getvalue())
+        self.assertEqual(self.invoke("restore"), 1)
+        self.assertIn("No backup found", self.progress.getvalue())
+        settings.write_text("[webui]\nport = 8820\n")
+        self.assertEqual(self.invoke("restore", "--archive", str(raw_archive), custom=False), 0)
+        self.assertIn(str(raw_archive.resolve()), self.output.getvalue())
+        self.assertEqual(cli.config.load(self.project / "config").port, 8818)
 
     def test_versioned_backup_and_restore_use_only_selected_resources(self):
         namespace = "v1-2-local-inference"
@@ -455,18 +574,99 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(self.invoke("restore", custom=False, project=bundle), 23, self.progress.getvalue())
         self.assertEqual(cli.config.load(bundle / "config").port, 3000)
         self.assertFalse((bundle / "config/models/blue.model").exists())
+        original = transfer.read_bundle(bundle)
+        self.assertFalse((bundle / "backup").exists())
         self.fail_volume_restore = False
         self.assertEqual(self.invoke("restore", custom=False, project=bundle), 0, self.progress.getvalue())
         settings = cli.config.load(bundle / "config")
         self.assertEqual((settings.port, settings.version), (8080, "v2"))
         self.assertEqual((bundle / "config/models/blue.model").read_bytes(), source_model.read_bytes())
         self.assertIn(transfer.volume_command(namespace=namespace, restore=True), self.docker_calls)
+        self.assertFalse(original.archive.exists())
+        self.assertFalse((bundle / "backup.json").exists())
+        self.assertEqual(os.readlink(bundle / "loaf"), "dist/loaf")
+        preserved = transfer.read_bundle(bundle / "backup")
+        self.assertEqual(preserved.archive.name, original.archive.name)
+        self.assertEqual((bundle / "dist/loaf").read_bytes(), preserved.executable.read_bytes())
+        self.assertEqual(self.invoke("backup", "--verify", custom=False, project=bundle), 0, self.progress.getvalue())
 
         self.assertEqual(self.invoke("backup", custom=False, project=bundle), 0, self.progress.getvalue())
         backup, = (bundle / "backup").glob("*/*.tar.gz")
+        self.assertEqual(
+            self.invoke("backup", "--verify", "--backup-dir", str(bundle / "backup"), custom=False, project=bundle),
+            0, self.progress.getvalue(),
+        )
+        self.assertIn(str(backup), self.output.getvalue())
         with tarfile.open(backup, "r:gz") as outer:
             with tarfile.open(fileobj=outer.extractfile("project.tar"), mode="r|") as inner:
                 self.assertNotIn(".git/HEAD", inner.getnames())
+
+    @unittest.skipUnless(hasattr(tarfile, "data_filter"), "Safe tar extraction filters are required.")
+    def test_setup_all_recovers_source_files_and_keeps_the_backup(self):
+        docs = self.project / "docs"
+        docs.mkdir()
+        (docs / "guide.md").write_bytes(b"Source documentation\n")
+        (docs / "guide-link.md").symlink_to("guide.md")
+        package_file = self.project / "python-package/pyproject.toml"
+        package_file.write_bytes(b"# Exact Python package fixture\n")
+        package_file.chmod(0o755)
+        self.git("add", "docs", "python-package")
+        bin_dir = self.project / ".venv/bin"
+        bin_dir.mkdir()
+        (bin_dir / "python3").symlink_to("/usr/bin/python3")
+        (bin_dir / "python3.13").symlink_to("python3")
+        self.assertEqual(self.invoke("backup"), 0, self.progress.getvalue())
+        original_bytes = self.archive.read_bytes()
+        self.docker_calls.clear()
+
+        self.assertEqual(self.invoke("setup", "--all", "--dry-run", custom=False, project=self.bundle), 0)
+        self.assertFalse((self.bundle / "docs").exists())
+        self.assertEqual(self.docker_calls, [])
+        rename = Path.rename
+
+        def fail_launcher_link(source, target):
+            if source.name == "loaf-link":
+                raise OSError("Cannot publish launcher link.")
+            return rename(source, target)
+
+        with patch.object(Path, "rename", fail_launcher_link):
+            self.assertEqual(self.invoke("setup", "--all", custom=False, project=self.bundle), 1)
+        self.assertIn("Cannot publish launcher link.", self.progress.getvalue())
+        self.assertEqual(transfer.read_bundle(self.bundle).archive.read_bytes(), original_bytes)
+        for path in ("backup", "dist", "docs", "python-package"):
+            self.assertFalse((self.bundle / path).exists())
+        self.docker_calls.clear()
+        self.assertEqual(self.invoke("setup", "--all", custom=False, project=self.bundle), 0, self.progress.getvalue())
+
+        recovered = self.bundle / package_file.relative_to(self.project)
+        self.assertEqual(recovered.read_bytes(), package_file.read_bytes())
+        self.assertEqual(recovered.stat().st_mode & 0o777, 0o755)
+        self.assertEqual(os.readlink(self.bundle / "docs/guide-link.md"), "guide.md")
+        self.assertEqual((self.bundle / "docs/guide-link.md").read_bytes(), b"Source documentation\n")
+        self.assertEqual(os.readlink(self.bundle / ".venv/bin/python3"), "/usr/bin/python3")
+        self.assertEqual(os.readlink(self.bundle / ".venv/bin/python3.13"), "python3")
+        self.assertEqual((self.bundle / ".git/HEAD").read_bytes(), (self.project / ".git/HEAD").read_bytes())
+        self.assertTrue((self.bundle / cli.config.TERMINAL_SECRET).is_file())
+        self.assertFalse((self.bundle / ".env").exists())
+        preserved = transfer.read_bundle(self.bundle / "backup")
+        self.assertEqual(preserved.archive.read_bytes(), original_bytes)
+        self.assertEqual(os.readlink(self.bundle / "loaf"), "dist/loaf")
+        self.assertEqual((self.bundle / "loaf").read_bytes(), preserved.executable.read_bytes())
+        self.assertIn(transfer.volume_command(restore=True), self.docker_calls)
+
+    @unittest.skipUnless(hasattr(tarfile, "data_filter"), "Safe tar extraction filters are required.")
+    def test_setup_all_rejects_external_source_links_before_docker(self):
+        docs = self.project / "docs"
+        docs.mkdir()
+        (docs / "escape").symlink_to(self.project)
+        self.git("add", "docs", "python-package")
+        self.assertEqual(self.invoke("backup"), 0, self.progress.getvalue())
+        self.docker_calls.clear()
+        self.assertEqual(self.invoke("setup", "--all", custom=False, project=self.bundle), 1)
+        self.assertIn("absolute path", self.progress.getvalue())
+        self.assertTrue(self.archive.is_file())
+        self.assertFalse((self.bundle / "docs").exists())
+        self.assertEqual(self.docker_calls, [])
 
     def test_restore_checks_bundle_paths_and_executable_before_docker(self):
         self.assertEqual(self.invoke("backup"), 0)
@@ -483,40 +683,25 @@ class TransferTests(unittest.TestCase):
         self.assertIn("SHA-256 verification failed", self.progress.getvalue())
         self.assertEqual(self.docker_calls, [])
 
-    def test_verify_and_restore_discover_a_backup_from_before_the_rename(self):
+    def test_verify_and_restore_reject_a_retired_bundle_manifest(self):
         self.assertEqual(self.invoke("backup"), 0)
-        legacy = self.backup_dir / "20261120-1500_open-webui-offline"
-        self.bundle.rename(legacy)
-        archive = legacy / f"{legacy.name}.tar.gz"
-        (legacy / self.archive.name).rename(archive)
-        (legacy / "loaf").unlink()
-        launcher = legacy / "owo"
-        launcher.write_bytes(b"#!/bin/bash\n# owo standalone backup launcher v1\n\n__OWO_PAYLOAD__\n\x1f\x8bfixture")
-        (legacy / "backup.json").write_text(json.dumps({
-            "archive": archive.name, "owo_sha256": setup.file_digest(launcher), "version": "",
+        (self.bundle / "backup.json").write_text(json.dumps({
+            "archive": self.archive.name, "owo_sha256": setup.file_digest(self.executable), "version": "",
         }), encoding="utf-8")
         self.docker_calls.clear()
-        self.assertEqual(self.invoke("backup", "--verify"), 0, self.progress.getvalue())
-        self.assertEqual(self.docker_calls, [])
-        self.assertEqual(self.invoke("restore"), 0, self.progress.getvalue())
-        self.assertIn(str(archive), self.output.getvalue())
-        self.assertIn(["docker", "image", "load"], self.docker_calls)
-
-        launcher.write_bytes(launcher.read_bytes() + b"changed")
-        self.docker_calls.clear()
-        self.assertEqual(self.invoke("restore"), 1)
-        self.assertIn("SHA-256 verification failed", self.progress.getvalue())
+        for command, options in (("backup", ("--verify",)), ("restore", ())):
+            with self.subTest(command=command):
+                self.assertEqual(self.invoke(command, *options), 1)
+                self.assertIn("Invalid backup manifest", self.progress.getvalue())
         self.assertEqual(self.docker_calls, [])
 
-    def test_latest_model_archive_can_use_the_older_filename(self):
+    def test_model_archive_discovery_uses_current_dated_filenames(self):
         self.backup_dir.mkdir()
-        old_archive = self.backup_dir / "owo-volumes.tar.gz"
-        old_archive.touch()
-        self.assertEqual(transfer.latest_backup(self.backup_dir, models_only=True), old_archive)
-        dated = self.backup_dir / "20261120-1600_owo-volumes.tar.gz"
-        dated.touch()
-        self.assertEqual(transfer.latest_backup(self.backup_dir, models_only=True), dated)
-        current = self.backup_dir / "20261120-1700_loaf-volumes.tar.gz"
+        (self.backup_dir / "owo-volumes.tar.gz").touch()
+        (self.backup_dir / "20261120-1600_owo-volumes.tar.gz").touch()
+        (self.backup_dir / "loaf-volumes.tar.gz").touch()
+        self.assertIsNone(transfer.latest_backup(self.backup_dir, models_only=True))
+        current = self.backup_dir / "20261120-1500_loaf-volumes.tar.gz"
         current.touch()
         self.assertEqual(transfer.latest_backup(self.backup_dir, models_only=True), current)
 
@@ -538,6 +723,26 @@ class TransferTests(unittest.TestCase):
         self.assertEqual((recovered / "Packages").read_bytes(), b"fixture package index")
         self.assertFalse((self.bundle / setup.PYTHON_WHEEL_DIR).exists())
         self.assertEqual(self.docker_calls, [])
+
+    def test_key_setup_from_a_bundle_preserves_the_archived_credential(self):
+        (self.project / "config/config.ini").write_text("[terminal_server]\ninclude_in_backup = true\n")
+        key = self.project / cli.config.TERMINAL_SECRET
+        key.write_bytes(b"archived-terminal-credential-0123456789")
+        self.assertEqual(self.invoke("backup"), 0, self.progress.getvalue())
+        self.docker_calls.clear()
+        self.assertEqual(
+            self.invoke("setup", "--terminal-server-key", custom=False, project=self.bundle),
+            0, self.progress.getvalue(),
+        )
+        recovered_key = self.bundle / cli.config.TERMINAL_SECRET
+        self.assertEqual(recovered_key.read_bytes(), key.read_bytes())
+        self.assertFalse((self.bundle / "config/config.ini").exists())
+
+        with patch.object(setup, "bundled_release", return_value=self.bundle / "runtime"):
+            self.assertEqual(self.invoke("setup", custom=False, project=self.bundle), 0, self.progress.getvalue())
+        self.assertEqual(self.docker_calls, [])
+        self.assertEqual(self.invoke("restore", custom=False, project=self.bundle), 0, self.progress.getvalue())
+        self.assertEqual(recovered_key.read_bytes(), key.read_bytes())
 
     def test_backup_lists_the_selected_checkout_with_different_ownership(self):
         environment = {
@@ -728,24 +933,34 @@ class TransferTests(unittest.TestCase):
                 if member.name == "project.tar":
                     data = b"x" + data[1:]
                 output.addfile(member, io.BytesIO(data))
-        for mode, options in (("backup", ["--verify"]), ("restore", [])):
+        for mode, options in (("backup", ["--verify"]), ("restore", []), ("restore", ["images"])):
             self.assertEqual(self.invoke(mode, "--archive", str(changed), *options, custom=False), 1)
             self.assertIn("SHA-256 verification failed for project.tar", self.progress.getvalue())
             self.assertEqual(self.docker_calls, [])
 
-    def test_legacy_archives_remain_restorable(self):
+    def test_archives_without_hashes_are_rejected_before_docker(self):
         self.assertEqual(self.invoke("backup"), 0)
-        legacy = self.backup_dir / transfer.ARCHIVE_NAME
-        with tarfile.open(self.archive, "r:gz") as bundle, tarfile.open(legacy, "w:gz") as output:
+        archive = self.backup_dir / transfer.ARCHIVE_NAME
+        with tarfile.open(self.archive, "r:gz") as bundle, tarfile.open(archive, "w:gz") as output:
             for member in bundle:
                 if member.name != transfer.CHECKSUMS:
                     with bundle.extractfile(member) as content:
                         output.addfile(member, content)
-        self.assertEqual(self.invoke("restore", "--archive", str(legacy), custom=False), 0)
         self.docker_calls.clear()
-        self.assertEqual(self.invoke("backup", "--verify", "--archive", str(legacy), custom=False), 1)
-        self.assertIn("has no SHA-256 manifest", self.progress.getvalue())
+        for command, options in (("restore", ()), ("backup", ("--verify",))):
+            with self.subTest(command=command):
+                self.assertEqual(self.invoke(command, "--archive", str(archive), *options, custom=False), 1)
+                self.assertIn("has no SHA-256 manifest", self.progress.getvalue())
         self.assertEqual(self.docker_calls, [])
+
+    def test_cpu_modelfile_restore_uses_the_cpu_override(self):
+        self.assertEqual(self.invoke("backup"), 0)
+        self.docker_calls.clear()
+        self.assertEqual(self.invoke("restore", "--import", "--cpu"), 0, self.progress.getvalue())
+        serving, = [call for call in self.docker_calls if "compose" in call and "up" in call]
+        self.assertIn(str(DATA / "compose.cpu.yml"), serving)
+        self.assertEqual(serving[-1], "ollama-offline")
+        self.assertIn("CPU Ollama is ready", self.output.getvalue())
 
     def test_transfer_dry_run_performs_no_docker_calls_or_writes(self):
         for mode in ("backup", "restore"):
@@ -781,6 +996,29 @@ class ModelTransferTests(unittest.TestCase):
                                            "--archive", str(archive), "--delete"]), 0)
             self.assertEqual(restore.call_args.args[:3], (project.resolve(), archive.resolve(), "v2-local-inference"))
             self.assertEqual(restore.call_args.kwargs, {"delete": True})
+
+    def test_models_only_flags_route_to_the_model_store_operations(self):
+        with TemporaryDirectory() as folder:
+            project = Path(folder)
+            (project / "compose.yml").touch()
+            archive = project / "models.tar.gz"
+            options = ["--project-dir", folder, "--archive", str(archive), "--version", "v2"]
+            with (
+                patch.object(transfer, "export_models") as save,
+                patch.object(transfer, "import_models") as restore,
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(cli.main(["backup", "volumes", "--models-only", *options]), 0)
+                self.assertEqual(cli.main(["restore", "volumes", "--models-only", *options, "--delete"]), 0)
+            self.assertEqual(save.call_args.args[:3], (project.resolve(), archive, "v2-local-inference"))
+            self.assertEqual(restore.call_args.args[:3], (project.resolve(), archive, "v2-local-inference"))
+            self.assertEqual(restore.call_args.kwargs, {"delete": True})
+            for arguments in (
+                ["backup", "images", "volumes", "--models-only"], ["restore", "volumes", "--delete"],
+                ["backup", "project", "project"], ["restore", "config"], ["backup", "images", "--verify"],
+            ):
+                with self.subTest(arguments=arguments), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    cli.main(arguments)
 
     def test_wrong_model_archive_never_reaches_docker(self):
         with TemporaryDirectory() as folder:

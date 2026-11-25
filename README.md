@@ -20,6 +20,8 @@ to prepare the deployment. Run `loaf online` to test it. Use
 To move the deployment offline, run `loaf backup` and copy the entire backup
 folder to the destination. From the copied folder, run `./loaf setup`,
 `./loaf restore`, and `./loaf offline`.
+Use `./loaf setup --all` in place of setup and restore to recover the full
+source checkout from a backup made from source. [Backup recovery](docs/transfer.md#debian-restore)
 
 ## Development disclosure
 
@@ -57,9 +59,9 @@ Toolkit installers under the Git-ignored `install-cache/` directory. On Debian
 Compose, and Buildx. Configure the NVIDIA container runtime before starting GPU
 inference. [Debian setup](docs/debian.md#install-the-loaf-command)
 
-If `[terminal_server] enabled = true` in `config/config.ini`, create the
-terminal bearer key before starting a serving profile. The checkout enables
-the terminal server. [Terminal server setup](docs/terminal-server.md#enable-and-connect)
+Setup creates the terminal bearer key if it is missing. To prepare only the
+key, run `loaf setup --terminal-server-key`. The checkout enables the terminal
+server. [Terminal server setup](docs/terminal-server.md#enable-and-connect)
 
 Build the images, download the selected models, and start offline serving.
 
@@ -119,7 +121,7 @@ when starting from a prepared archive.
 
 | Mode | What it does |
 | --- | --- |
-| `setup` / `install` | Set up the project virtualenv and cache Python and NVIDIA toolkit installers. Add `--with-docker-deps` on Debian 13 to prepare Docker. |
+| `setup` / `install` | Prepare the deployment and its terminal key. Use `--terminal-server-key` for key setup alone or `--all` in a source checkout backup to recover the source and Docker data. [Setup options](docs/cli-help.md#setup) |
 | `link-docker-project` | Create a `docker-project` symlink to the packaged Compose file, Dockerfiles, and default configuration. [Direct Compose commands](docs/launcher.md#link-the-docker-project) |
 | `integration` | Print a systemd unit, Continue YAML, or Tether installation instructions. [Host integrations](docs/installation.md#host-integrations) |
 | `build` / `upgrade` | Build the local images. Upgrade refreshes upstream base images first. |
@@ -127,8 +129,8 @@ when starting from a prepared archive.
 | `clean` | Remove temporary files and the runtime cache. Add `--full` to clear generated installation files too. [Cleanup](docs/launcher.md#clean-generated-files) |
 | `download` | Download selected models using the downloader. |
 | `online` / `offline` | Start Ollama and WebUI with the selected network profile. Add `--cpu` for CPU inference. |
-| `export` / `import` | Transfer an Ollama model archive between deployments. Import merges by default and accepts `--delete` to mirror the archive. [Model transfer](docs/transfer.md#transfer-models-between-existing-deployments) |
-| `backup` / `restore` | Create or restore a folder with the standalone executable, deployment archive and verification manifest. |
+| `export` / `import` | Transfer the Ollama model store. Also available as `backup volumes --models-only` and `restore volumes --models-only`. [Model transfer](docs/transfer.md#transfer-models-between-existing-deployments) |
+| `backup` / `restore` | Select any combination of `images`, `volumes` and `project` for a deployment backup. [Component selection](docs/transfer.md#select-deployment-components) |
 | `backup --verify` | Check a backup's SHA-256 hashes and report image platforms without Docker. |
 | `status` / `stop` | Check deployment readiness and list containers, or stop and remove containers across all profiles. [Keep stopped containers](docs/launcher.md#stop-and-remove-containers) |
 | `test` | Run the checkout's test suite. [Verification guide](docs/verification.md) |

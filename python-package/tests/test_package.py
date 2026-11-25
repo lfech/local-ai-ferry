@@ -207,18 +207,6 @@ class PackageTests(unittest.TestCase):
             self.assertIn(b'already exists', result.stderr)
             self.assertEqual(link.readlink(), Path('missing'))
 
-    def test_link_docker_project_updates_a_link_from_before_the_rename(self):
-        with tempfile.TemporaryDirectory() as folder:
-            link = Path(folder) / "docker-project"
-            previous = Path("python-package/src/owo/data")
-            link.symlink_to(previous, target_is_directory=True)
-            preview = self.invoke(folder, "link-docker-project", "--dry-run")
-            self.assertEqual(preview.returncode, 0, preview.stderr)
-            self.assertEqual(link.readlink(), previous)
-            result = self.invoke(folder, "link-docker-project")
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(link.resolve(), DATA)
-
     # --- Standard unittest supplies the summary, diagnostics and failure status ---
     def test_test_command_prints_summary_and_skip_count(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -268,6 +256,9 @@ class PackageTests(unittest.TestCase):
                 "import unittest\n"
                 "@unittest.skip('no GPU')\n"
                 "class GpuWorkflowTests(unittest.TestCase):\n"
+                "    def test_inference(self): pass\n"
+                "class CpuWorkflowTests(unittest.TestCase):\n"
+                "    cpu = True\n"
                 "    def test_inference(self): pass\n",
                 encoding="utf-8",
             )
@@ -291,17 +282,17 @@ class PackageTests(unittest.TestCase):
 
             result = self.invoke(ROOT, "test", "-v", "--badges", "--project-dir", folder)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(b"Ran 5 tests", result.stderr)
+            self.assertIn(b"Ran 6 tests", result.stderr)
             self.assertIn(b"OK (skipped=3)", result.stderr)
             self.assertIn(b"Updated test badges for CLI baseline, Docker.", result.stdout)
             self.assertCountEqual([path.name for path in badges.iterdir()], ["cli.svg", "docker.svg", "gpu.svg"])
-            for filename in ("cli.svg", "docker.svg"):
-                self.assertIn("1/1 passed", (badges / filename).read_text(encoding="utf-8"))
+            self.assertIn("1/1 passed", (badges / "cli.svg").read_text(encoding="utf-8"))
+            self.assertIn("2/2 passed", (badges / "docker.svg").read_text(encoding="utf-8"))
             self.assertEqual(gpu.read_bytes(), b"<svg>previous GPU badge</svg>")
             self.assertIn(old_gpu, readme.read_text(encoding="utf-8"))
             self.assertNotIn("Previous CLI", readme.read_text(encoding="utf-8"))
             entry = report.read_text(encoding="utf-8")
-            self.assertIn("| CLI baseline | 1/1 |\n| Docker | 1/1 |", entry)
+            self.assertIn("| CLI baseline | 1/1 |\n| Docker | 2/2 |", entry)
             self.assertTrue(entry.endswith(history.split("\n\n", 1)[1]))
 
     def test_badges_count_subtests_once_and_preserve_test_failures(self):

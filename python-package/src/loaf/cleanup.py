@@ -12,10 +12,9 @@ from . import assets, config, locks, setup, transfer
 
 
 STAGING_PREFIXES = (".loaf-backup-", ".loaf-restore-", ".loaf-toolkit-", ".loaf-badges-", ".loaf-bootstrap-",
-                    ".loaf-terminal-key-", ".loaf-wheels-", ".loaf-docker-", ".loaf-binary-", ".loaf-link-")
+                    ".loaf-terminal-key-", ".loaf-wheels-", ".loaf-docker-", ".loaf-binary-")
 FULL_PATHS = (".venv", "dist", "install-cache", "python-package/build", "python-package/dist")
-PROTECTED_NAMES = {".git", "backup", transfer.BUNDLE_MANIFEST, ".env", config.TERMINAL_SECRET.name,
-                   config.LEGACY_TERMINAL_SECRET.name}
+PROTECTED_NAMES = {".git", "backup", transfer.BUNDLE_MANIFEST, ".env", config.TERMINAL_SECRET.name}
 ARCHIVE_SUFFIXES = (".tar.gz", ".tgz", ".tar")
 
 
@@ -38,7 +37,7 @@ def project_targets(project: Path, runtime: Path, full: bool) -> set[Path]:
     link = managed_link(project, runtime)
     package = project / setup.PYTHON_PACKAGE_DIR
     source = local_directory(package) and (package / "src/loaf/__init__.py").is_file()
-    if not (source or link or transfer.is_bundle(project)):
+    if not (source or link or transfer.is_bundle(project) or transfer.is_bundle(project / transfer.RESTORED_BACKUP_DIR)):
         return set()
 
     targets = {project / ".test-artifacts", project / "__pycache__"}
@@ -99,6 +98,10 @@ def checkout_files(project: Path) -> set[Path]:
 
 def protected_files(project: Path) -> set[Path]:
     paths = checkout_files(project)
+    launcher = project / "loaf"
+    if (launcher.is_symlink() and launcher.readlink() == transfer.RESTORED_LAUNCHER
+            and transfer.is_bundle(project / transfer.RESTORED_BACKUP_DIR)):
+        paths.add(project / transfer.RESTORED_LAUNCHER)
     try:
         settings = config.load(project / "config")
     except config.ConfigError:
@@ -151,7 +154,7 @@ def contains_saved_data(path: Path, runtime: Path) -> bool:
         if current.is_mount() or PROTECTED_NAMES.intersection(directories + filenames) or transfer.is_bundle(current):
             return True
         for name in filenames:
-            if name in transfer.RESTORE_PAYLOADS + ("project.tar",) and any(
+            if name in transfer.PAYLOADS and any(
                 part.startswith((".loaf-backup-", ".loaf-restore-")) for part in current.parts
             ):
                 continue

@@ -37,7 +37,9 @@ def test_group(test: unittest.TestCase) -> str:
         return "docker"
     if module == "test_terminal_server" and case in TERMINAL_CASES:
         return "open-terminal"
-    return {"test_docker_gpu": "gpu", "test_catalog": "catalog"}.get(module, "cli")
+    if module == "test_docker_gpu":
+        return "docker" if getattr(test, "cpu", False) else "gpu"
+    return "catalog" if module == "test_catalog" else "cli"
 
 
 class BadgeResult(unittest.TextTestResult):

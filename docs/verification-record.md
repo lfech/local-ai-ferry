@@ -4,6 +4,71 @@
 
 Older entries use the current command and project names in examples.
 
+## 2026-11-25 15:52:12 +0100 — Runtime terminal APT source
+
+- On Debian 13.8 in WSL2 with Python 3.13.5, the installed CLI suite
+  passed 199 of 249 cases with Docker disabled. The 50 skips covered
+  Docker, CPU/GPU model inference, catalog, Open Terminal opt-ins and
+  API dependencies, and the host rsync fixture.
+- The focused Docker test passed on Engine 26.1.5 and Compose 2.26.1-4
+  with a previously loaded image and `--no-build --pull never`. It
+  verified read-only access in an unprivileged workspace, live in-place
+  edits, and pickup after replacing the file and restarting the service.
+- The focused configuration, terminal settings, readiness, and
+  documentation suite passed all 24 cases. All five standalone
+  documentation checks passed. An offline wheel build included the
+  Compose overlay and both Open Terminal scripts.
+
+## 2026-11-25 15:37:10 +0100 — Selectable transfers and terminal key
+
+- On Debian 13.8 in WSL2 with Python 3.13.5, 229 of 246 cases passed with
+  the regular Docker suite enabled. The 17 skips covered CPU/GPU model
+  inference, catalog, Open Terminal opt-ins and API dependencies, and
+  the host rsync fixture. The Docker model-only case verified both merge
+  and mirror through the installed CLI.
+- A focused real Docker round trip verified the terminal workspace and the
+  exact archived key with mode `0600` from both full and volumes-only backups.
+- The final transfer rerun passed 46 of 47 cases with the host rsync fixture
+  skipped. It exercised all seven component combinations and verified that
+  a project-only restore leaves the archived terminal key for the later
+  volumes restore. All five documentation checks passed.
+
+## 2026-11-25 15:19:44 +0100 — Compatibility audit and CPU verification
+
+- Compared the committed and pre-cleanup working trees on Debian 13.8 in
+  WSL2 with Python 3.13.5. The Docker-free suites passed 183 and 188 cases
+  respectively, each with 48 skips.
+- The final core run passed 230 of 239 cases on Docker Engine 26.1.5 and
+  Compose 2.26.1-4, with the catalog, rsync, and local Open Terminal API
+  checks enabled. The nine skips were covered separately by three passing
+  Open Terminal Docker cases and six passing CPU model cases.
+- The CPU cases passed with Ollama 0.40.18, including real inference at the
+  configured 16,384-token context, 100% CPU placement, and live archive
+  mirroring. GPU-specific placement and long-prompt assertions were outside
+  this run. The rebuilt Open Terminal image used a disposable tag.
+- The initial integration runs surfaced stale help assertions and a
+  Compose fixture that assumed an alias mapping. The corrected fixtures
+  passed in the final core run. The combined CPU run ended after CPU
+  fixture cleanup to avoid repeating the already-verified groups.
+- A cold restore with the built Linux amd64 standalone launcher recovered
+  a copied source checkout and both Docker fixture volumes. The relocated
+  launcher verified the retained archive. The standalone build used the
+  upstream setuptools wheel after Debian's wheel failed in bundled Python.
+  The wheel smoke check and all five documentation checks also passed.
+  [Verification commands](verification.md)
+
+## 2026-11-25 14:44:36 +0100 — Terminal key setup and in-place backup recovery
+
+- On Debian 13.8 in WSL2 with Python 3.13.5, the Docker-free suite passed
+  188 of 236 cases. Transfer fixtures used simulated Docker and covered
+  terminal key reuse, minimal and full recovery, archive link rejection,
+  and rollback when the launcher move failed.
+- The 48 skips covered 41 opt-in Docker, GPU, Open Terminal Docker and catalog
+  cases, six Open Terminal API cases with missing dependencies, and one
+  local model-transfer case requiring rsync.
+- All five standalone documentation checks passed using the offline editable
+  installation. [Verification commands](verification.md)
+
 ## 2026-11-24 00:49:12 +0100 — Test badge run
 
 `loaf test --badges` passed on Linux with Python 3.13.2.

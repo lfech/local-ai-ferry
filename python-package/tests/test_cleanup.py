@@ -110,6 +110,16 @@ class CleanupTests(unittest.TestCase):
         self.assertIn(f"Keep {notes.parent}", output)
         self.assertEqual(notes.read_bytes(), b"fixture")
 
+    def test_full_keeps_the_launcher_linked_by_an_in_place_restore(self):
+        binary = self.put(self.project / transfer.RESTORED_LAUNCHER)
+        manifest = self.put(self.project / "backup/backup.json")
+        launcher = self.project / "loaf"
+        launcher.symlink_to(transfer.RESTORED_LAUNCHER)
+        status, output = self.invoke("--full")
+        self.assertEqual(status, 0, output)
+        self.assertEqual(launcher.read_bytes(), binary.read_bytes())
+        self.assertTrue(manifest.is_file())
+
     def test_busy_project_or_runtime_prevents_cleanup(self):
         candidate = self.put(self.project / ".loaf-restore-active/images.tar")
         for lock in (

@@ -52,18 +52,29 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.port, 3201)
         self.assertFalse(settings.auth)
 
-    def test_terminal_base_image_moves_to_images_with_legacy_override_support(self):
+    def test_terminal_base_image_uses_the_images_section(self):
         defaults = self.project / "defaults"
         defaults.mkdir()
         (defaults / "config.ini").write_text("[images]\nterminal_server_image=upstream:default\n")
-        self.path.write_text("[terminal-server]\ninclude_in_backup=true\nbase_image=upstream:local\n")
+        self.path.write_text("[terminal_server]\ninclude_in_backup=true\n")
         settings = config.load(defaults, self.config_dir)
         self.assertTrue(settings.terminal_server_include_in_backup)
-        self.assertEqual(settings.compose_variables()["LOAF_TERMINAL_BASE_IMAGE"], "upstream:local")
+        self.assertEqual(settings.compose_variables()["LOAF_TERMINAL_BASE_IMAGE"], "upstream:default")
         with self.path.open("a") as source:
             source.write("[images]\nterminal_server_image=upstream:current\n")
         settings = config.load(defaults, self.config_dir)
         self.assertEqual(settings.compose_variables()["LOAF_TERMINAL_BASE_IMAGE"], "upstream:current")
+
+    def test_retired_terminal_settings_are_rejected(self):
+        for source, message in (
+            ("[tool_server]\nenabled=true\n", r"unknown section \[tool_server\]"),
+            ("[terminal-server]\nenabled=true\n", r"unknown section \[terminal-server\]"),
+            ("[terminal_server]\nbase_image=upstream:test\n", "unknown setting.*base_image"),
+            ("[tests]\nrun_tool_server_tests=true\n", "unknown setting.*run_tool_server_tests"),
+        ):
+            with self.subTest(ini=source), self.assertRaisesRegex(config.ConfigError, message):
+                self.path.write_text(source)
+                config.load(self.config_dir)
 
     def test_terminal_apt_source_file_applies_only_to_builds(self):
         step = cli.Step(("terminal",), ("build", "terminal-server"))
@@ -86,6 +97,28 @@ class ConfigTests(unittest.TestCase):
         self.path.write_text("[terminal_server]\napt_source_file=config/local.txt\n")
         with self.assertRaisesRegex(config.ConfigError, "expected a Debian APT file"):
             config.load(self.config_dir)
+
+    def test_runtime_apt_source_changes_the_terminal_start_without_a_build(self):
+        self.path.write_text("[terminal_server]\nenabled = true\nruntime_apt_source_file = config/offline.sources\n")
+        compose = cli.Compose(self.project, settings=config.load(self.config_dir))
+        start = cli.Step(("terminal",), ("up", "--no-build", "--pull", "never", "terminal-server"))
+        stop = cli.Step(("terminal",), ("stop", "terminal-server"))
+        build = cli.Step(("terminal",), ("build", "terminal-server"))
+        overlay = str(cli.assets.DATA_DIR / "compose.terminal-apt.yml")
+        self.assertIn(overlay, compose.command(start))
+        for step in (stop, build):
+            self.assertNotIn(overlay, compose.command(step))
+            self.assertNotIn("LOAF_TERMINAL_RUNTIME_APT_SOURCE_FILE", compose.variables(step))
+        with self.assertRaisesRegex(FileNotFoundError, "runtime APT source file is missing"):
+            compose.variables(start)
+        source = self.config_dir / "offline.sources"
+        source.write_text("first source\n")
+        before = compose.variables(start)
+        self.assertEqual(before["LOAF_TERMINAL_RUNTIME_APT_SOURCE_FILE"], str(source))
+        self.assertEqual(before["LOAF_TERMINAL_RUNTIME_APT_SOURCE_FORMAT"], "sources")
+        source.write_text("second source\n")
+        self.assertNotEqual(before["LOAF_TERMINAL_RUNTIME_APT_SOURCE_HASH"],
+                            compose.variables(start)["LOAF_TERMINAL_RUNTIME_APT_SOURCE_HASH"])
 
     def test_local_model_selection_uses_packaged_files_only_when_missing_locally(self):
         data = self.project / "python-package/src/loaf/data"
@@ -201,3 +234,14 @@ class ConfigTests(unittest.TestCase):
             ["1", "0", "0"],
         )
         self.assertEqual(child_env["ALLOW_LEGACY_TERMINAL_BRIDGE"], "1")
+
+    def test_verification_cpu_overrides_gpu_settings(self):
+        (self.project / "python-package/tests").mkdir(parents=True)
+        with (
+            patch.dict(os.environ, RUN_DOCKER_TESTS="0", RUN_GPU_TESTS="1", RUN_CPU_TESTS="0"),
+            patch("loaf.cli.subprocess.run", return_value=subprocess.CompletedProcess([], 0)) as run,
+        ):
+            self.assertEqual(cli.main(["--project-dir", str(self.project), "test", "--cpu"]), 0)
+        child_env = run.call_args.kwargs["env"]
+        self.assertEqual([child_env[flag] for flag in ("RUN_DOCKER_TESTS", "RUN_CPU_TESTS", "RUN_GPU_TESTS")],
+                         ["1", "1", "0"])

@@ -73,10 +73,12 @@ Use `[terminal_server]` for the optional Open Terminal service. Its
 the standard backup. Backup includes the matching local terminal image when
 available. Use `loaf backup --no-terminal-server` to skip that image.
 Set `[images] terminal_server_image` to override its
-base image. The former `[terminal_server] base_image` still works when no
-replacement is set in the same file. Configure a custom Debian package mirror
+base image. Configure a custom Debian package mirror
 for the terminal image build with `[terminal_server] apt_source_file`.
+Set `runtime_apt_source_file` in the same section to mount a host APT source
+read-only in the provisioner and its workspaces using the loaded image.
 [Terminal server setup](terminal-server.md#enable-and-connect) · [Package mirror](terminal-server.md#package-mirror-for-image-builds)
+[Runtime APT source](terminal-server.md#edit-an-apt-source-on-the-offline-host)
 
 ### Overrides
 
@@ -95,10 +97,10 @@ for the terminal image build with `[terminal_server] apt_source_file`.
   `cuda_visible_devices`. When the INI setting is blank, Compose can also read
   `CUDA_VISIBLE_DEVICES` from `.env`. Use comma-separated NVIDIA device IDs or
   UUIDs. [Ollama GPU selection](https://docs.ollama.com/gpu#gpu-selection)
-- For `loaf test`, an exported `RUN_DOCKER_TESTS`, `RUN_GPU_TESTS`,
+- For `loaf test`, an exported `RUN_DOCKER_TESTS`, `RUN_GPU_TESTS`, `RUN_CPU_TESTS`,
   `RUN_CATALOG_TESTS`, `RUN_TERMINAL_SERVER_TESTS`, or `ALLOW_LEGACY_TERMINAL_BRIDGE`
   overrides its matching INI key. The value `1` enables the option. The
-  GPU test also requires the Docker check. The legacy bridge option runs the
+  CPU and GPU model workflows also require the Docker check. The legacy bridge option runs the
   terminal-server test with ordinary internal bridges on Docker Engine 26 or 27.
   [Terminal server acceptance checks](terminal-server.md#acceptance-checks)
 

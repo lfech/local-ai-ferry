@@ -316,9 +316,9 @@ class HelpTests(unittest.TestCase):
             "clean": ("--full", "--dry-run"),
             "online": ("--cpu", "--wait-timeout SECONDS"),
             "backup": ("--verify", "--no-terminal-server", "--export", "--no-export"),
-            "restore": ("--import", "--no-import", "--archive PATH"),
+            "restore": ("--import", "--no-import", "--archive PATH", "--cpu"),
             "stop": ("-n", "--remove-containers", "--no-remove-containers"),
-            "test": ("--config-dir PATH", "--badges"),
+            "test": ("--config-dir PATH", "--badges", "--cpu"),
         }
         for command, expected in flags.items():
             with self.subTest(command=command):
@@ -507,9 +507,9 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(compose.files, files + ((DATA / "compose.cpu.yml",) if cpu else ()))
                 self.assertEqual("Ollama on CPU" in steps[-1].description, cpu)
 
-    def test_cpu_option_is_rejected_for_non_serving_commands(self):
+    def test_cpu_option_is_rejected_when_creating_a_backup(self):
         with redirect_stderr(io.StringIO()) as errors, self.assertRaises(SystemExit) as raised:
-            self.invoke("restore", "--import", "--cpu")
+            self.invoke("backup", "--cpu")
         self.assertEqual(raised.exception.code, 2)
         self.assertIn("--cpu is only supported", errors.getvalue())
 

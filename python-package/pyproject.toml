@@ -36,6 +36,7 @@ namespaces = false
 loaf = [
     "data/compose.yml",
     "data/compose.cpu.yml",
+    "data/compose.terminal-apt.yml",
     "data/config/*.ini",
     "data/docker/*/Dockerfile",
     "data/docker/*/.dockerignore",

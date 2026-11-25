@@ -31,7 +31,7 @@ context and the default configuration. [Terminal server](../terminal-server.md)
 | `loaf online` | Stops the downloader and offline services, then starts GPU Ollama and WebUI on the connected bridge. |
 | `loaf import` | Stops the downloader and synchronizes the archive into the Ollama volume. Supports optional deletion of destination-only data. |
 | `loaf offline` | Stops the downloader and online services, then starts GPU Ollama and WebUI from local images. |
-| `loaf backup` / `loaf restore` | Package the deployment archive and standalone executable into a dated folder, or restore its images, volumes and saved configuration. |
+| `loaf backup` / `loaf restore` | Create or recover a deployment bundle with selectable images, volumes and project components. Use `--models-only` for model-store transfer. |
 | `loaf status` | Checks deployment readiness and lists the project's containers. [Readiness checks](../launcher.md#check-readiness-with-status) |
 | `loaf stop` | Stops services and removes their Compose containers by default. Use `-n` or `--no-remove-containers` to keep stopped service containers and their logs. Images and volumes persist. [Shutdown options](../launcher.md#stop-and-remove-containers) |
 | `loaf integration <name>` | Prints a systemd unit, Continue configuration or Tether installation instructions. [Host integrations](../installation.md#host-integrations) |
@@ -132,23 +132,28 @@ shutdown remove runners and their networks while preserving named volumes.
 
 ## Backup and restore
 
-`loaf export` stages the Ollama model store with `rsync` before creating a
-compressed archive. `loaf import` uses `rsync` to publish blobs before manifests
-and can delete destination-only data with `--delete`. Both stop the downloader
-and allow the selected Ollama serving container to keep running. [Model transfer](../transfer.md#transfer-models-between-existing-deployments)
+`loaf backup volumes --models-only` and `loaf restore volumes --models-only`
+use the same model-store format and implementation as `loaf export` and
+`loaf import`. Backup stages the store with `rsync` before compressing it.
+Restore uses `rsync` to publish blobs before manifests. The default merges
+with the destination. Add `--delete` to mirror the archive. Both operations
+stop the downloader and allow the selected Ollama serving container to keep
+running. [Model transfer](../transfer.md#transfer-models-between-existing-deployments)
 
 `loaf backup` publishes one `YYYYMMDD-HHMM_local-ai-ferry/` folder per
 successful run in the default deployment. The folder has the matching
 `.tar.gz` archive, the standalone `loaf` executable, and `backup.json` with
-the archive name, deployment version and executable SHA-256 hash. The
-archive contains these payloads:
+the archive name, deployment version and executable SHA-256 hash. An
+operator can select any nonempty subset of `images`, `volumes` and `project`.
+Without component names, backup includes all three and restore recovers
+all available components. The archive uses the following members.
 
 | Member | Contents |
 | --- | --- |
 | `volumes.tar` | The `ollama` and `open-webui` volumes and the persistent per-account terminal volumes when included. |
 | `images.tar` | The three core Docker images and the matching Open Terminal image when available locally. Use `--no-terminal-server` to omit the terminal image. |
 | `project.tar` | Configuration, saved Modelfiles and cached installers. Backups from source checkouts retain working files, Git history and the project virtualenv. |
-| `terminal.json` | The per-account volume inventory and bearer key when `[terminal_server] include_in_backup = true`. |
+| `terminal.json` | With `volumes`, the per-account volume inventory and bearer key when `[terminal_server] include_in_backup = true`. |
 | `sha256.json` | The SHA-256 digest of each payload. |
 
 Backup stops all project services before capturing the volumes and publishes
@@ -164,14 +169,17 @@ in a terminal backup, move them into `/home/user` before running it.
 Backups from a source checkout build the current executable before capturing
 Docker data. Standalone deployments package the executable that launched them.
 
-`loaf backup --verify` checks the executable and payload hashes and reports
-saved image platforms without Docker. Restore verifies the required files
-and hashes, then loads images and extracts the volume data into new or empty
-volumes. It recovers the saved settings and Modelfiles after the data load.
-It refuses volumes in use.
+`loaf backup --verify` checks the executable and all payload hashes and
+reports platforms when images are included. Restore verifies the entire
+archive and rejects explicitly requested components that are absent. It
+loads selected images, extracts selected volumes into new or empty volumes
+and recovers settings and Modelfiles when `project` is selected. A volume
+restore uses the matching local downloader image when images are omitted.
+It refuses volumes in use and restores the archived terminal key with the
+terminal volumes.
 By default, restore leaves services stopped. Add `--import` to start offline
-Ollama and apply saved Modelfiles after the transfer. The optional backup
-`--export` step refreshes selected cached Modelfiles before capture. Both
+Ollama and apply saved Modelfiles after restoring volumes. The optional backup
+`--export` step refreshes selected cached Modelfiles before capturing volumes. Both
 options run under the transfer's project lock.
 A prepared compatible host can restore and start offline without network
 access. [Backup and restore](../transfer.md)
@@ -179,7 +187,7 @@ access. [Backup and restore](../transfer.md)
 The release and backup executables use the same setup workflow. They
 supply Python and the packaged deployment files. `loaf setup` creates the
 default configuration and Docker link. `loaf restore` is optional and uses
-a full backup. The separate source archive contains the tagged repository
+a deployment backup. The separate source archive contains the tagged repository
 files. [Release assets](../releases.md)
 Setup stores Python wheels in `install-cache/wheels/` and matching toolkit
 installers in `install-cache/deb/nvidia/`. On Debian 13, the optional Docker

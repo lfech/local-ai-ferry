@@ -18,7 +18,8 @@ PYTHONPATH=python-package/src python3 -m loaf install
 ```
 
 The release executable includes Python. Its setup prepares default
-configuration and links the packaged Docker project. After source setup,
+configuration and links the packaged Docker project. Both forms of setup
+create the configured terminal server key when it is missing. After source setup,
 run `source .venv/bin/activate` or call `.venv/bin/loaf` directly.
 [Release executable](releases.md#run-the-executable)
 
@@ -128,8 +129,9 @@ From the project directory on Debian, run setup with system Python.
 PYTHONPATH=python-package/src python3 -m loaf setup
 ```
 
-The command prepares the virtualenv, Python wheel cache and NVIDIA toolkit
-packages under the checkout lock. `install` runs the same preparation. Use
+The command prepares the virtualenv, Python wheel cache, NVIDIA toolkit
+packages and terminal key under the checkout lock. `install` runs the same
+preparation. Use `setup --terminal-server-key` to prepare only the key. Use
 `setup --dry-run` to preview it. Once installed, run `build` or `upgrade`, then
 `download`, `offline` to check the deployment, and `backup` to archive it.
 [Host prerequisites](debian.md) · [Quick Setup](../README.md#quick-setup) ·
@@ -273,7 +275,8 @@ temporary files and Python bytecode from the selected project.
 build and release files, and the packaged Docker link. Both modes preserve
 Git history and working files, saved backups, configuration, credentials,
 and Docker data. A generated directory that contains Git work or a
-backup archive is kept. Lock files stay in place so commands can coordinate
+backup archive is kept. The active `dist/loaf` from an in-place restore
+is kept with its root launcher link. Lock files stay in place so commands can coordinate
 cleanup with active work.
 
 Use the original standalone executable to run setup again after a full

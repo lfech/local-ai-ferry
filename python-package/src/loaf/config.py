@@ -13,15 +13,11 @@ DEFAULT_WAIT_TIMEOUT = 300
 DEFAULT_COMPRESSION_LEVEL = 1
 OPEN_TERMINAL_IMAGE = "ghcr.io/open-webui/open-terminal:0.17.20-slim"
 TERMINAL_SECRET = Path("config/terminal-server.key")
-LEGACY_TERMINAL_SECRET = Path("config/tool-server.key")
 TERMINAL_KEY_PATTERN = re.compile(rb"[!-~]{32,512}(?:\r?\n)?")
 TEST_FLAGS = (
-    "run_docker_tests", "run_gpu_tests", "run_catalog_tests", "run_terminal_server_tests", "allow_legacy_terminal_bridge",
+    "run_docker_tests", "run_gpu_tests", "run_cpu_tests", "run_catalog_tests", "run_terminal_server_tests",
+    "allow_legacy_terminal_bridge",
 )
-LEGACY_TEST_FLAGS = {
-    "run_tool_server_tests": "run_terminal_server_tests",
-    "allow_legacy_tool_bridge": "allow_legacy_terminal_bridge",
-}
 
 
 class ConfigError(ValueError):
@@ -52,6 +48,7 @@ class Settings:
     terminal_server_include_in_backup: bool = False
     terminal_server_secret_file: Path = TERMINAL_SECRET
     terminal_server_apt_source_file: Path | None = None
+    terminal_server_runtime_apt_source_file: Path | None = None
     terminal_server_cpus: int = 2
     terminal_server_memory_mib: int = 2048
     terminal_server_max_workspaces: int = 4
@@ -61,6 +58,7 @@ class Settings:
     terminal_server_volume_options: str = "{}"
     run_docker_tests: bool = False
     run_gpu_tests: bool = False
+    run_cpu_tests: bool = False
     run_catalog_tests: bool = False
     run_terminal_server_tests: bool = False
     allow_legacy_terminal_bridge: bool = False
@@ -199,7 +197,7 @@ SECTIONS = {
         "include_in_backup": boolean_value,
         "secret_file": path_value,
         "apt_source_file": apt_source_file_value,
-        "base_image": image_value,
+        "runtime_apt_source_file": apt_source_file_value,
         "cpus": positive_int,
         "memory_mib": positive_int,
         "max_workspaces": positive_int,
@@ -232,13 +230,7 @@ def read_terminal_secret(path: Path) -> bytes:
 
 
 def terminal_secret_path(project: Path, configured: Path) -> Path:
-    configured = configured.expanduser()
-    path = project / configured
-    if configured == TERMINAL_SECRET and not path.exists():
-        legacy = project / LEGACY_TERMINAL_SECRET
-        if legacy.is_file():
-            return legacy.resolve()
-    return path.resolve()
+    return (project / configured.expanduser()).resolve()
 
 
 def _read_values(path: Path) -> dict:
@@ -253,29 +245,18 @@ def _read_values(path: Path) -> dict:
     if parser.defaults():
         raise ConfigError(f"{path}: use the named sections instead of [DEFAULT].")
     values = {}
-    aliases = {"tool_server": 0, "terminal-server": 1}
-    # Load aliases first so current settings win within a file.
-    for section in sorted(parser.sections(), key=lambda name: aliases.get(name, 2)):
-        current = "terminal_server" if section in aliases else section
-        if current not in SECTIONS:
+    for section in parser.sections():
+        if section not in SECTIONS:
             raise ConfigError(f"{path}: unknown section [{section}].")
         for key, value in parser[section].items():
-            legacy_base = current == "terminal_server" and key == "base_image"
-            if legacy_base and parser.has_option("images", "terminal_server_image"):
-                continue
-            current_key = LEGACY_TEST_FLAGS.get(key, key) if current == "tests" else key
-            if current_key != key and current_key in parser[section]:
-                continue
             try:
-                convert = SECTIONS[current][current_key]
+                convert = SECTIONS[section][key]
             except KeyError as exc:
                 raise ConfigError(f"{path}: unknown setting [{section}] {key}.") from exc
             try:
                 if any(character in value for character in ("\n", "\x00")):
                     raise ValueError("expected a single line of text")
-                setting = f"terminal_server_{current_key}" if current == "terminal_server" else current_key
-                if legacy_base:
-                    setting = "terminal_server_image"
+                setting = f"terminal_server_{key}" if section == "terminal_server" else key
                 values[setting] = convert(value)
             except ValueError as exc:
                 raise ConfigError(f"{path}: [{section}] {key}: {exc}.") from exc

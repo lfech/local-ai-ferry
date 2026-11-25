@@ -206,6 +206,8 @@ def check(compose: Compose, *, cpu: bool = False) -> bool:
             return "valid"
 
         report("Terminal server key file", terminal_secret)
+        if compose.settings.terminal_server_runtime_apt_source_file is not None:
+            report("Terminal runtime APT source file", compose.terminal_runtime_source_file)
     if services is None:
         return False
     try:

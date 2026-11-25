@@ -133,10 +133,6 @@ async def configure(webui, key):
     }
     verified = await webui.request("POST", CONNECTION + "/verify", admin, json=connection)
     assert verified == {"status": True, "type": "terminal"}, verified
-    # Keep the original URL in the database to verify that upgraded deployments still work.
-    connection["url"] = "http://tool-server:8000"
-    legacy = await webui.request("POST", CONNECTION + "/verify", admin, json=connection)
-    assert legacy == verified, legacy
     connection["server_type"] = verified["type"]
     await webui.request("POST", CONNECTION, admin, json={"TERMINAL_SERVER_CONNECTIONS": [connection]})
     return accounts

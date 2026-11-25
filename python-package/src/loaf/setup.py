@@ -7,15 +7,16 @@ import os
 from pathlib import Path
 from platform import freedesktop_os_release
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
 import sys
-from tempfile import TemporaryDirectory, mkdtemp
+from tempfile import NamedTemporaryFile, TemporaryDirectory, mkdtemp
 from typing import Iterable, Iterator
 from urllib.request import urlopen
 
-from . import assets
+from . import assets, config
 
 
 PYTHON_PACKAGE_DIR = Path("python-package")
@@ -80,7 +81,7 @@ def setup_standalone(project: Path) -> None:
     directory = project / "config"
     if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
         raise SetupError(f"{directory} must be a local configuration directory.")
-    if not assets.compose_path(project).is_file() or assets.legacy_docker_link(project):
+    if not assets.compose_path(project).is_file():
         assets.link_docker_project(project, dry_run=False)
     directory.mkdir(exist_ok=True)
     for name in ("config.ini", "models.ini"):
@@ -93,7 +94,31 @@ def setup_standalone(project: Path) -> None:
         except FileExistsError:
             if not target.is_file():
                 raise SetupError(f"{target} must be a configuration file.") from None
-    print(f"Deployment ready in {project}.")
+
+
+def ensure_terminal_key(path: Path, archived_key: bytes | None = None) -> None:
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with NamedTemporaryFile(dir=path.parent, prefix=".loaf-terminal-key-") as pending:
+            pending.write(archived_key if archived_key is not None else new_terminal_key())
+            pending.flush()
+            try:
+                os.link(pending.name, path)
+            except FileExistsError:
+                pass
+            else:
+                print(f"Created terminal server key at {path}.")
+    config.read_terminal_secret(path)
+
+
+def new_terminal_key() -> bytes:
+    return secrets.token_hex(32).encode("ascii")
+
+
+def install_backup_host_packages(project: Path) -> None:
+    prepare_docker(project, allow_downloads=False)
+    if any((project / TOOLKIT_DIR).glob("*.deb")):
+        install_toolkit(project, allow_downloads=False)
 
 
 def installed_toolkit() -> dict[str, tuple[str, str]]:
@@ -186,9 +211,7 @@ def apt(*args: str) -> None:
 def add_nvidia_repository() -> None:
     prefix = [] if os.geteuid() == 0 else ["sudo"]
     sources = Path("/etc/apt/sources.list.d")
-    legacy_list = sources / "owo-nvidia-container-toolkit.list"
-    # Reuse the installed list so APT does not see two keys for the same repository.
-    repository = legacy_list.stem if legacy_list.is_file() else "loaf-nvidia-container-toolkit"
+    repository = "loaf-nvidia-container-toolkit"
     keyring = f"/usr/share/keyrings/{repository}.asc"
     arch = subprocess.check_output(["dpkg", "--print-architecture"], text=True).strip()
     with TemporaryDirectory(prefix="loaf-apt-") as folder:

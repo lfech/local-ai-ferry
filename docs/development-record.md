@@ -7,6 +7,50 @@ Git milestones use commit timestamps. Working-tree milestones use the
 associated verification time where it was recorded.
 Earlier entries use the current names for commands, paths and artifacts.
 
+## 2026-11-25 15:52 CET — Edit terminal APT sources at runtime
+
+- Added an optional host APT source file that Open Terminal workspaces
+  mount read-only using the image already loaded on the Docker host.
+  In-place edits are visible immediately. Running `loaf offline` after
+  a file replacement recreates the affected containers.
+  [Runtime APT sources](terminal-server.md#edit-an-apt-source-on-the-offline-host)
+
+## 2026-11-25 15:37 CET — Select backup and restore components
+
+- Added selectable images, volumes and project payloads. Restore verifies
+  every archived payload and applies all present components when no names
+  are supplied. [Component selection](transfer.md#select-deployment-components)
+- Kept the archived terminal key with the volumes component and covered
+  successive component restores from the same retained bundle.
+  [Terminal transfer](terminal-server.md#offline-transfer-and-shutdown)
+- Added `backup volumes --models-only` and `restore volumes --models-only`
+  through the existing rsync implementation. Model restore merges by default
+  and accepts `--delete` for mirroring.
+  [Model-store transfer](transfer.md#transfer-models-between-existing-deployments)
+
+## 2026-11-25 15:19 CET — Retire old Loaf formats and test CPU workflows
+
+- Removed the pre-release Loaf configuration, environment, bundle, and
+  terminal-server fallbacks. Restore now requires the payload SHA-256 manifest.
+  [Backup and restore](transfer.md#verify-a-backup)
+- Kept numbered bundles out of later checkout snapshots and recovered saved
+  settings when the operator selects a full archive by filename.
+- Added CPU execution for the Docker model tests and for Modelfile replay
+  after restore. Added regression coverage for the retired formats, archive
+  selection, saved configuration, and CPU options.
+  [CPU test workflow](verification.md#full-isolated-gpu-workflow)
+
+## 2026-11-25 14:44 CET — Terminal key setup and in-place backup recovery
+
+- Setup creates the configured bearer key with owner-only permissions and
+  preserves an existing key. Added `setup --terminal-server-key` for key-only
+  setup. Setup from a backup reuses its archived credential when available.
+  [Terminal setup](terminal-server.md#enable-and-connect)
+- Added `setup --all` to restore a source checkout and its Docker data from a
+  copied backup. Both in-place restore paths retain the bundle under
+  `backup/` and link the root launcher to `dist/loaf`.
+  [Backup recovery](transfer.md#debian-restore)
+
 ## 2026-11-24 00:43 CET — Open Terminal workspace labels
 
 - Adopted `loaf.*` Docker ownership labels and `loaf-tools-` resource names in

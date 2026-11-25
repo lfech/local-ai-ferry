@@ -68,10 +68,12 @@ cleanup with other invocations. Generated systemd units refer to the
 original executable. [Python Build Standalone release](https://github.com/astral-sh/python-build-standalone/releases/tag/20261110)
 
 Setup creates `config/config.ini` and `config/models.ini` if missing,
-and links the packaged Docker project. Use the same setup command with a
-binary carried in a backup. Follow it with `loaf restore` when recovering
-a deployment. For a fresh deployment, use `../loaf build` from the
-project directory. [Backup recovery](transfer.md#debian-restore)
+creates the terminal server key, and links the packaged Docker project.
+Use the same setup command with a binary carried in a backup. Follow it
+with `loaf restore` when recovering a minimal deployment, or use
+`loaf setup --all` to recover an archived source checkout and its Docker data.
+For a fresh deployment, use `../loaf build` from the project directory.
+[Backup recovery](transfer.md#debian-restore)
 
 On Debian 13, run `../loaf setup --with-docker-deps` to have setup prepare
 and install Docker. The host supplies the NVIDIA driver for GPU inference.

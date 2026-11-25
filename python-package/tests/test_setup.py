@@ -35,8 +35,36 @@ class SetupTests(unittest.TestCase):
             ):
                 self.assertEqual(cli.main(["--project-dir", directory, "setup"]), 0)
             prepare.assert_called_once_with(project, with_docker_deps=False)
+            key = project / cli.config.TERMINAL_SECRET
+            self.assertRegex(key.read_bytes(), br"^[0-9a-f]{64}$")
+            self.assertEqual(key.stat().st_mode & 0o777, 0o600)
             run.assert_not_called()
             compose.assert_not_called()
+
+    def test_key_only_uses_the_configured_path_and_preserves_existing_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            config_dir = project / "settings"
+            config_dir.mkdir()
+            (config_dir / "config.ini").write_text("[terminal_server]\nsecret_file=private/terminal.key\n")
+            key = project / "private/terminal.key"
+            command = ["--project-dir", directory, "setup", "--config-dir", str(config_dir), "--terminal-server-key"]
+            with (
+                patch.object(setup, "install") as install,
+                patch.object(setup, "setup_standalone") as standalone,
+                redirect_stdout(StringIO()) as log,
+            ):
+                self.assertEqual(cli.main([*command, "--dry-run"]), 0)
+                self.assertFalse(key.parent.exists())
+                self.assertEqual(cli.main(command), 0)
+                original = key.read_bytes()
+                self.assertEqual(cli.main(command), 0)
+            self.assertEqual(key.read_bytes(), original)
+            self.assertEqual(key.stat().st_mode & 0o777, 0o600)
+            self.assertNotIn(original.decode(), log.getvalue())
+            self.assertFalse((project / "config").exists())
+            install.assert_not_called()
+            standalone.assert_not_called()
 
     def test_setup_dry_run_does_not_execute_or_lock(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -110,6 +138,7 @@ class SetupTests(unittest.TestCase):
                 configuration = project / "config/config.ini"
                 self.assertTrue(configuration.is_file())
                 self.assertTrue((project / "config/models.ini").is_file())
+                self.assertTrue((project / cli.config.TERMINAL_SECRET).is_file())
                 self.assertTrue((project / "docker-project/compose.yml").is_file())
                 configuration.write_text("# local changes\n", encoding="utf-8")
                 self.assertEqual(cli.main(command), 0)

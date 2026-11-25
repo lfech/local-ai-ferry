@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from configparser import ConfigParser
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 import gzip
@@ -24,24 +24,25 @@ from . import config
 from .progress import Progress, TrackedStream
 from .setup import (
     INSTALL_CACHE, PYTHON_PACKAGE_DIR, PYTHON_WHEEL_DIR, TOOLKIT_DIR, WHEEL_CACHE_RECORD,
-    docker_installer_files, file_digest, prepare_python_wheels, toolkit_files,
+    docker_installer_files, file_digest, install_backup_host_packages, new_terminal_key, prepare_python_wheels,
+    toolkit_files,
 )
 
 
 ARCHIVE_NAME = "local-ai-ferry.tar.gz"
 BUNDLE_NAME = "local-ai-ferry"
-LEGACY_ARCHIVE_NAME = "open-webui_offline.tar.gz"
-LEGACY_BUNDLE_NAME = "open-webui-offline"
 BUNDLE_MANIFEST = "backup.json"
+RESTORED_BACKUP_DIR = "backup"
+RESTORED_LAUNCHER = Path("dist/loaf")
+CHECKOUT_RESERVED_PATHS = {RESTORED_BACKUP_DIR, BUNDLE_MANIFEST, "dist", "docker-project", "loaf", ".run.lock"}
 EXECUTABLE_HEADER = b"#!/bin/bash\n# loaf standalone backup launcher v1\n"
-LEGACY_EXECUTABLE_HEADER = b"#!/bin/bash\n# owo standalone backup launcher v1\n"
-RESTORE_PAYLOADS = ("volumes.tar", "images.tar", "terminal.json")
 CONFIG_SUFFIXES = {".ini", ".model", ".list", ".sources"}
 MODEL_ARCHIVE_NAME = "loaf-volumes.tar.gz"
-LEGACY_MODEL_ARCHIVE_NAME = "owo-volumes.tar.gz"
-MEMBERS = ("volumes.tar", "images.tar", "project.tar")
+COMPONENTS = ("volumes", "images", "project")
+MEMBERS = tuple(f"{component}.tar" for component in COMPONENTS)
 CHECKSUMS = "sha256.json"
 TERMINAL_METADATA = "terminal.json"
+PAYLOADS = (*MEMBERS, TERMINAL_METADATA)
 TERMINAL_KEY_STAGING = ".loaf-terminal-key-"
 IMAGES = ("local/ollama-online:latest", "local/ollama-offline:latest", "local/open-webui:latest")
 VOLUMES = {"ollama": "ollama", "open-webui": "webui"}
@@ -116,8 +117,8 @@ def volume_names(namespace: str) -> dict[str, str]:
     return {f"{namespace}-{name}": target for name, target in VOLUMES.items()}
 
 
-def archive_name(namespace: str, name: str = ARCHIVE_NAME) -> str:
-    return f"{namespace}_{name}" if namespace else name
+def archive_name(namespace: str) -> str:
+    return f"{namespace}_{ARCHIVE_NAME}" if namespace else ARCHIVE_NAME
 
 
 def backup_path(directory: Path, *, namespace: str = "", models_only: bool = False) -> Path:
@@ -127,46 +128,51 @@ def backup_path(directory: Path, *, namespace: str = "", models_only: bool = Fal
     name = "_".join(part for part in (timestamp, namespace, BUNDLE_NAME) if part)
     target = directory / name
     sequence = 2
-    while target.exists() or target.is_symlink():
+    while target.exists() or target.is_symlink() or target.with_suffix(".tar.gz").is_file():
         target = directory / f"{name}-{sequence}"
         sequence += 1
     return target
 
 
-def latest_backup(directory: Path, *, namespace: str = "", models_only: bool = False) -> Path:
-    names = (MODEL_ARCHIVE_NAME, LEGACY_MODEL_ARCHIVE_NAME) if models_only else (
-        archive_name(namespace), archive_name(namespace, LEGACY_ARCHIVE_NAME),
-    )
+def latest_backup(directory: Path, *, namespace: str = "", models_only: bool = False) -> Path | None:
+    name = MODEL_ARCHIVE_NAME if models_only else archive_name(namespace)
+    stem = name.removesuffix(".tar.gz")
+    suffix = "" if models_only else r"(?:-([0-9]+))?"
+    timestamped = re.compile(r"[0-9]{8}-[0-9]{4}_" + re.escape(stem) + suffix + r"\.tar\.gz")
     archives = []
-    for name in names:
-        timestamped = re.compile(r"[0-9]{8}-[0-9]{4}_" + re.escape(name))
-        archives.extend((path.name[:13], 0, path) for path in directory.glob(f"*_{name}")
-                        if timestamped.fullmatch(path.name) and path.is_file())
+    if models_only or (directory / BUNDLE_MANIFEST).is_file():
+        for path in directory.glob(f"*_{stem}*.tar.gz"):
+            if path.is_file() and (match := timestamped.fullmatch(path.name)):
+                sequence = match[1] if match.lastindex else None
+                archives.append((path.name[:13], int(sequence or "0"), path))
     if not models_only:
         prefix = re.escape(f"{namespace}_" if namespace else "")
-        names_pattern = f"(?:{re.escape(BUNDLE_NAME)}|{re.escape(LEGACY_BUNDLE_NAME)})"
-        folders = re.compile(r"([0-9]{8}-[0-9]{4})_" + prefix + names_pattern + r"(?:-([0-9]+))?")
+        folders = re.compile(r"([0-9]{8}-[0-9]{4})_" + prefix + re.escape(BUNDLE_NAME) + r"(?:-([0-9]+))?")
         for path in directory.iterdir() if directory.is_dir() else ():
             if path.is_dir() and (match := folders.fullmatch(path.name)):
                 archives.append((match[1], int(match[2] or "1"), path))
-    # Timestamp prefixes sort chronologically. Keep older unprefixed backups usable.
-    if archives:
-        return max(archives)[2]
-    return next((directory / name for name in names if (directory / name).is_file()), directory / names[0])
+    return max(archives)[2] if archives else None
 
 
 @dataclass(frozen=True)
 class BackupBundle:
     archive: Path
     version: str
+    executable: Path
+
+
+@dataclass(frozen=True)
+class RestoredBackup:
+    components: frozenset[str]
+    settings: config.Settings | None
 
 
 def is_bundle(directory: Path) -> bool:
     return directory.is_dir() and (
         (directory / BUNDLE_MANIFEST).exists()
         or (directory / BUNDLE_MANIFEST).is_symlink()
-        or any(re.fullmatch(r"[0-9]{8}-[0-9]{4}_(?:.+_)?" + re.escape(name) + r"(?:-[0-9]+)?", directory.name)
-               for name in (BUNDLE_NAME, LEGACY_BUNDLE_NAME))
+        or (not (directory / RESTORED_BACKUP_DIR / BUNDLE_MANIFEST).is_file()
+            and re.fullmatch(r"[0-9]{8}-[0-9]{4}_(?:.+_)?" + re.escape(BUNDLE_NAME) + r"(?:-[0-9]+)?", directory.name))
     )
 
 
@@ -183,15 +189,12 @@ def find_bundle(project: Path, selection: Path | None) -> Path | None:
     return None
 
 
-def standalone_executable(path: Path, *, legacy: bool = False) -> bool:
+def standalone_executable(path: Path) -> bool:
     if not path.is_file():
         return False
     with path.open("rb") as executable:
         header = executable.read(4096)
-    expected, marker = (LEGACY_EXECUTABLE_HEADER, b"__OWO_PAYLOAD__") if legacy else (
-        EXECUTABLE_HEADER, b"__LOAF_PAYLOAD__",
-    )
-    return header.startswith(expected) and b"\n" + marker + b"\n\x1f\x8b" in header
+    return header.startswith(EXECUTABLE_HEADER) and b"\n__LOAF_PAYLOAD__\n\x1f\x8b" in header
 
 
 def release_executable(project: Path) -> Path:
@@ -209,10 +212,7 @@ def read_bundle(directory: Path, *, verify: bool = True) -> BackupBundle:
         raise TransferError(f"Backup manifest not found: {manifest}")
     try:
         data = json.loads(manifest.read_text(encoding="utf-8"))
-        old_bundle = "loaf_sha256" not in data
-        name, digest, version = (data[key] for key in (
-            "archive", "owo_sha256" if old_bundle else "loaf_sha256", "version",
-        ))
+        name, digest, version = (data[key] for key in ("archive", "loaf_sha256", "version"))
         if not isinstance(name, str) or not name.endswith(".tar.gz") or Path(name).name != name:
             raise ValueError("Invalid archive file name.")
         if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
@@ -223,14 +223,14 @@ def read_bundle(directory: Path, *, verify: bool = True) -> BackupBundle:
     except (KeyError, TypeError, ValueError) as exc:
         raise TransferError(f"Invalid backup manifest: {manifest}") from exc
     archive = directory / name
-    executable = directory / ("owo" if old_bundle else "loaf")
+    executable = directory / "loaf"
     if archive.is_symlink() or not archive.is_file():
         raise TransferError(f"Backup archive not found: {archive}")
-    if executable.is_symlink() or not standalone_executable(executable, legacy=old_bundle):
+    if executable.is_symlink() or not standalone_executable(executable):
         raise TransferError(f"Standalone backup executable missing or invalid: {executable}")
     if verify and file_digest(executable) != digest:
         raise TransferError(f"SHA-256 verification failed for {executable}.")
-    return BackupBundle(archive, version)
+    return BackupBundle(archive, version, executable)
 
 
 def backup_bundle(project: Path, destination: Path, prepare_volumes: Callable[[], None], *,
@@ -270,6 +270,11 @@ def archive_project(project: Path, destination: Path, *, exclude_file: Path | No
             cwd=project,
         )
         paths = {Path(os.fsdecode(name)) for name in files.split(b"\0") if name}
+        bundle_dirs = {
+            path.parent for path in paths
+            if path.name == BUNDLE_MANIFEST and path.parent != Path(".") and (project / path.parent / "loaf").is_file()
+        }
+        paths = {path for path in paths if not any(path.is_relative_to(bundle) for bundle in bundle_dirs)}
     config_dir = config_dir or project / "config"
     paths = {path for path in paths if not path.is_relative_to(INSTALL_CACHE)}
     environment = project / ".venv"
@@ -306,12 +311,14 @@ def archive_project(project: Path, destination: Path, *, exclude_file: Path | No
                     archive.add(package.resolve(), arcname=(TOOLKIT_DIR / package.name).as_posix())
             for relative in sorted(paths):
                 if (
-                    relative.name == "offline-images.tar" or relative.name.startswith(TERMINAL_KEY_STAGING)
+                    relative.name.startswith(TERMINAL_KEY_STAGING)
                     or relative.parts[0] == ".venv"
                 ):
                     continue
                 path = project / relative
                 if path == exclude_file:
+                    continue
+                if relative == Path("loaf") and path.is_symlink() and path.readlink() == RESTORED_LAUNCHER:
                     continue
                 if path.exists() or path.is_symlink():
                     archive.add(path, arcname=relative.as_posix(), recursive=False)
@@ -628,6 +635,7 @@ def backup(
     destination: Path,
     prepare_volumes: Callable[[], None],
     *,
+    components: tuple[str, ...] = COMPONENTS,
     namespace: str = "",
     compression_level: int = config.DEFAULT_COMPRESSION_LEVEL,
     exclude_project_file: Path | None = None,
@@ -637,38 +645,42 @@ def backup(
 ) -> None:
     if destination.is_relative_to(project / ".git"):
         raise TransferError("Choose a backup directory outside .git.")
+    members = tuple(f"{component}.tar" for component in COMPONENTS if component in components)
+    if not members or set(components) - set(COMPONENTS):
+        raise TransferError("Select backup components from images, volumes and project.")
+    include_terminal = include_terminal and "volumes" in components
+    exclude_project_file = exclude_project_file or project / config.TERMINAL_SECRET
     if include_terminal:
-        exclude_project_file = exclude_project_file or project / config.TERMINAL_SECRET
         key = config.read_terminal_secret(exclude_project_file)
     destination.parent.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(prefix=".loaf-backup-", dir=destination.parent) as folder:
         staging = Path(folder)
-        print("Collecting project files…", file=sys.stderr, flush=True)
-        archive_project(project, staging / "project.tar", exclude_file=exclude_project_file, config_dir=config_dir)
-        images = image_names(namespace)
-        if include_terminal_image:
-            terminal_image = image_names(namespace, include_terminal=True)[-1]
-            if subprocess.check_output(
-                ["docker", "image", "ls", "--quiet", "--filter", f"reference={terminal_image}"], cwd=project,
-            ).strip():
-                images += (terminal_image,)
-        docker_archive(
-            project, ["docker", "image", "save", *images],
-            staging / "images.tar", "Save images.tar",
-        )
-        print("Preparing services for volume backup…", file=sys.stderr, flush=True)
-        prepare_volumes()
-        workspaces = list_terminal_workspaces(project, namespace) if include_terminal else ()
-        require_inactive_volumes(project, namespace, workspaces)
-        docker_archive(
-            project, volume_command(namespace=namespace, workspaces=workspaces), staging / "volumes.tar", "Save volumes.tar",
-        )
-        for problem in check_backup_modelfiles(project, staging / "volumes.tar", staging, namespace):
-            print(f"Warning: {problem}", file=sys.stderr, flush=True)
+        if "project" in components:
+            print("Collecting project files…", file=sys.stderr, flush=True)
+            archive_project(project, staging / "project.tar", exclude_file=exclude_project_file, config_dir=config_dir)
+        if "images" in components:
+            images = image_names(namespace)
+            if include_terminal_image:
+                terminal_image = image_names(namespace, include_terminal=True)[-1]
+                if subprocess.check_output(
+                    ["docker", "image", "ls", "--quiet", "--filter", f"reference={terminal_image}"], cwd=project,
+                ).strip():
+                    images += (terminal_image,)
+            docker_archive(
+                project, ["docker", "image", "save", *images], staging / "images.tar", "Save images.tar",
+            )
+        if "volumes" in components:
+            print("Preparing services for volume backup…", file=sys.stderr, flush=True)
+            prepare_volumes()
+            workspaces = list_terminal_workspaces(project, namespace) if include_terminal else ()
+            require_inactive_volumes(project, namespace, workspaces)
+            volumes = staging / "volumes.tar"
+            docker_archive(project, volume_command(namespace=namespace, workspaces=workspaces), volumes, "Save volumes.tar")
+            for problem in check_backup_modelfiles(project, volumes, staging, namespace):
+                print(f"Warning: {problem}", file=sys.stderr, flush=True)
 
         # Publish only after all payloads are complete, preserving any old backup
         # if a command fails or the operation is interrupted.
-        members = MEMBERS
         if include_terminal:
             (staging / TERMINAL_METADATA).write_text(
                 json.dumps({"key": key.decode("ascii"), "workspaces": workspaces}) + "\n", encoding="utf-8",
@@ -690,8 +702,7 @@ def backup(
         pending.replace(destination)
 
 
-def unpack_payloads(source: Path, staging: Path, *, save: tuple[str, ...] = RESTORE_PAYLOADS,
-                    require_checksums: bool = False) -> None:
+def unpack_payloads(source: Path, staging: Path, *, save: tuple[str, ...]) -> frozenset[str]:
     if not source.is_file():
         raise TransferError(f"Backup archive not found: {source}. Use --backup-dir or --archive to locate it.")
     checksums = {}
@@ -710,7 +721,7 @@ def unpack_payloads(source: Path, staging: Path, *, save: tuple[str, ...] = REST
                     if not isinstance(expected, dict):
                         raise TransferError(f"Invalid {CHECKSUMS} in {source.name}.")
                     continue
-                if member.name not in (*MEMBERS, TERMINAL_METADATA):
+                if member.name not in PAYLOADS:
                     raise TransferError(f"Unexpected member in {source.name}: {member.name!r}")
                 stage = member.name in save
                 target = (staging / member.name).open("wb") if stage else nullcontext()
@@ -727,17 +738,18 @@ def unpack_payloads(source: Path, staging: Path, *, save: tuple[str, ...] = REST
         # Read to EOF so gzip checks its checksum before Docker state can change.
         while compressed.read(COPY_BUFFER):
             pass
-    missing = set(MEMBERS) - checksums.keys()
-    if missing:
-        raise TransferError(f"{source.name} is missing: {', '.join(sorted(missing))}")
     if expected is None:
-        if require_checksums or TERMINAL_METADATA in checksums:
-            raise TransferError(f"{source.name} has no SHA-256 manifest. Create a new backup to verify payload hashes.")
-        print("Legacy backup. Checked gzip integrity. No payload hashes were recorded.", file=sys.stderr)
-    elif expected != checksums:
+        raise TransferError(f"{source.name} has no SHA-256 manifest. Create a new backup to record payload hashes.")
+    if expected != checksums:
         mismatches = [name for name in checksums if expected.get(name) != checksums[name]]
         detail = ", ".join(mismatches) or CHECKSUMS
         raise TransferError(f"SHA-256 verification failed for {detail}.")
+    components = frozenset(component for component in COMPONENTS if f"{component}.tar" in checksums)
+    if TERMINAL_METADATA in checksums and "volumes" not in components:
+        raise TransferError(f"{source.name} contains terminal metadata without the volumes component.")
+    if not components:
+        raise TransferError(f"{source.name} contains no backup components.")
+    return components
 
 
 def image_platforms(path: Path, namespace: str) -> dict[str, set[str]]:
@@ -768,10 +780,11 @@ def image_platforms(path: Path, namespace: str) -> dict[str, set[str]]:
 def verify_backup(source: Path, namespace: str) -> None:
     with TemporaryDirectory(prefix="loaf-verify-") as folder:
         staging = Path(folder)
-        unpack_payloads(source, staging, save=("images.tar", TERMINAL_METADATA), require_checksums=True)
+        components = unpack_payloads(source, staging, save=("images.tar", TERMINAL_METADATA))
         read_terminal_backup(staging, namespace)
-        platforms = image_platforms(staging / "images.tar", namespace)
+        platforms = image_platforms(staging / "images.tar", namespace) if "images" in components else {}
     print(f"Verified SHA-256 hashes for all payloads in {source}")
+    print(f"Components: {', '.join(part for part in COMPONENTS if part in components)}")
     for image, supported in sorted(platforms.items()):
         print(f"  {image}  {', '.join(sorted(supported))}")
 
@@ -824,18 +837,23 @@ def publish_project_files(files: list[tuple[Path, Path]]) -> None:
             replacement.replace(destination)
 
 
-def recover_installers(bundle: BackupBundle, project: Path) -> None:
+def prepare_bundle_setup(bundle: BackupBundle, project: Path, *, installers: bool) -> bytes | None:
+    """Recover the setup credential and optionally the cached Debian packages."""
     with TemporaryDirectory(prefix=".loaf-restore-", dir=project) as folder:
         staging = Path(folder)
-        unpack_payloads(bundle.archive, staging, save=("project.tar",), require_checksums=True)
-        files = staging / "files"
-        stage_project_files(staging / "project.tar", files, installers=True)
-        publish_project_files(project_file_targets(files, project))
+        save = (TERMINAL_METADATA, "project.tar") if installers else (TERMINAL_METADATA,)
+        components = unpack_payloads(bundle.archive, staging, save=save)
+        terminal = read_terminal_backup(staging, config.namespace(bundle.version))
+        if installers:
+            if "project" not in components:
+                raise TransferError("The backup has no project component containing cached host installers.")
+            files = staging / "files"
+            stage_project_files(staging / "project.tar", files, installers=True)
+            publish_project_files(project_file_targets(files, project))
+        return terminal[0] if terminal is not None else None
 
 
-def stage_configuration(staging: Path, defaults: Path, destination: Path, version: str) -> config.Settings:
-    stage_project_files(staging / "project.tar", staging)
-    recovered = staging / "config"
+def stage_configuration(recovered: Path, defaults: Path, destination: Path, version: str) -> config.Settings:
     target = recovered / config.CONFIG_NAME
     current = recovered if target.is_file() else destination
     settings = config.load(defaults, current)
@@ -852,50 +870,221 @@ def stage_configuration(staging: Path, defaults: Path, destination: Path, versio
     return config.load(defaults, recovered)
 
 
+def stage_checkout(source: Path, checkout: Path) -> None:
+    """Extract source files into a private tree and refuse writes through archive links."""
+    data_filter = getattr(tarfile, "data_filter", None)
+    if data_filter is None:
+        raise TransferError("Full project recovery requires the standalone loaf executable or a Python with tar extraction filters.")
+
+    def checked_member(member, directory):
+        path = PurePosixPath(member.name)
+        target = checkout / path
+        if target.is_symlink() or target.resolve() != target:
+            raise TransferError(f"Checkout path goes through a link: {member.name!r}")
+        if (member.issym() and path.parent == PurePosixPath(".venv/bin")
+                and re.fullmatch(r"python[0-9.]*", path.name)
+                and re.fullmatch(r"(?:/.+/bin/)?python[0-9.]*", member.linkname)):
+            # venv records the original host interpreter. Preserve the link as
+            # metadata without using it as an extraction destination.
+            checked = data_filter(member.replace(linkname="."), directory).replace(linkname=member.linkname)
+        else:
+            checked = data_filter(member, directory)
+        return checked if member.issym() else checked.replace(mode=member.mode & 0o777)
+
+    checkout.mkdir()
+    with tarfile.open(source, "r:") as archive:
+        members = archive.getmembers()
+        seen = set()
+        for member in members:
+            path = PurePosixPath(member.name)
+            if (not path.parts or path.is_absolute() or ".." in path.parts or path in seen
+                    or path.parts[0] in CHECKOUT_RESERVED_PATHS or path.parts[0].startswith(".loaf-")):
+                raise TransferError(f"Invalid checkout path in backup: {member.name!r}")
+            seen.add(path)
+        archive.extractall(checkout, members=members, filter=checked_member)
+    if not (checkout / PYTHON_PACKAGE_DIR / "pyproject.toml").is_file() or not (checkout / "docs").is_dir():
+        raise TransferError("This backup has no complete source checkout. Use loaf setup followed by loaf restore.")
+
+
+def checkout_targets(checkout: Path, project: Path) -> list[tuple[Path, Path]]:
+    def collect(source: Path, target: Path, *, merge: bool):
+        if not target.exists() and not target.is_symlink():
+            yield source, target
+        elif merge and not (source.is_symlink() or target.is_symlink()):
+            if source.is_dir() and target.is_dir():
+                for entry in source.iterdir():
+                    yield from collect(entry, target / entry.name, merge=True)
+            elif source.is_file() and target.is_file():
+                yield source, target
+            else:
+                raise TransferError(f"Cannot restore checkout over {target}.")
+        else:
+            raise TransferError(f"Cannot restore checkout over {target}.")
+
+    targets = []
+    for entry in checkout.iterdir():
+        targets.extend(collect(entry, project / entry.name, merge=entry.name in {"config", INSTALL_CACHE.name}))
+    return targets
+
+
+def stage_backup_layout(bundle: BackupBundle, project: Path, staging: Path) -> None:
+    backup = project / RESTORED_BACKUP_DIR
+    dist = project / "dist"
+    if backup.is_symlink() or (backup.exists() and (not backup.is_dir() or any(backup.iterdir()))):
+        raise TransferError(f"Cannot move the backup bundle to {backup}: use an empty local directory.")
+    if dist.is_symlink() or (dist.exists() and not dist.is_dir()):
+        raise TransferError(f"Cannot use {dist} for the restored executable.")
+    if (dist / "loaf").exists() or (dist / "loaf").is_symlink():
+        raise TransferError(f"Cannot replace the existing executable at {dist / 'loaf'}.")
+
+    saved = staging / RESTORED_BACKUP_DIR
+    saved.mkdir(mode=0o700)
+    for source in (bundle.archive, project / BUNDLE_MANIFEST):
+        os.link(source, saved / source.name)
+    shutil.copyfile(bundle.executable, saved / "loaf")
+    (saved / "loaf").chmod(0o700)
+    shutil.copyfile(bundle.executable, staging / "loaf-binary")
+    (staging / "loaf-binary").chmod(0o700)
+    (staging / "loaf-link").symlink_to(RESTORED_LAUNCHER)
+
+
+def publish_backup_layout(bundle: BackupBundle, project: Path, staging: Path,
+                          checkout_entries: list[tuple[Path, Path]]) -> None:
+    binary = project / RESTORED_LAUNCHER
+    backup = project / RESTORED_BACKUP_DIR
+    previous = staging / "previous"
+    previous.mkdir()
+    with ExitStack() as rollback:
+        def move(source: Path, target: Path) -> None:
+            source.rename(target)
+            rollback.callback(target.rename, source)
+
+        for index, (entry, destination) in enumerate(checkout_entries):
+            if destination.exists():
+                move(destination, previous / f"checkout-{index}")
+            move(entry, destination)
+        if not binary.parent.exists():
+            binary.parent.mkdir()
+            rollback.callback(binary.parent.rmdir)
+        move(staging / "loaf-binary", binary)
+        if backup.is_dir():
+            move(backup, previous / "empty-backup")
+        move(staging / RESTORED_BACKUP_DIR, backup)
+        move(project / BUNDLE_MANIFEST, previous / BUNDLE_MANIFEST)
+        move(bundle.archive, previous / bundle.archive.name)
+        move(bundle.executable, previous / "loaf")
+        move(staging / "loaf-link", bundle.executable)
+        rollback.pop_all()
+    print(f"Backup bundle moved to {backup}.")
+
+
 def restore(project: Path, source: Path, *, namespace: str = "", terminal_key: Path | None = None,
             workspace_driver: str = "local", workspace_options: str = "{}",
-            configuration: tuple[Path, Path, str] | None = None) -> config.Settings | None:
+            configuration: tuple[Path, Path, str] | None = None, in_place_bundle: BackupBundle | None = None,
+            full_checkout: bool = False, with_docker_deps: bool = False,
+            components: tuple[str, ...] | None = None, require_volumes: bool = False) -> RestoredBackup:
     # Stage files in the project so the source can be on read-only media.
     with TemporaryDirectory(prefix=".loaf-restore-", dir=project) as folder:
         staging = Path(folder)
         print(f"Checking and unpacking {source}…", file=sys.stderr, flush=True)
-        save = RESTORE_PAYLOADS if configuration is None else (*RESTORE_PAYLOADS, "project.tar")
-        unpack_payloads(source, staging, save=save, require_checksums=configuration is not None)
+        chosen = components if components is not None else COMPONENTS
+        save = tuple(f"{part}.tar" for part in chosen if part != "project" or configuration is not None)
+        if "volumes" in chosen:
+            save += (TERMINAL_METADATA,)
+        available = unpack_payloads(source, staging, save=save)
+        missing = set(components or ()) - available
+        if missing:
+            raise TransferError(f"{source.name} does not contain the requested components: {', '.join(sorted(missing))}.")
+        restoring = available.intersection(chosen)
+        if full_checkout and "project" not in restoring:
+            raise TransferError("Setup --all requires the project component from a source checkout backup.")
+        if require_volumes and "volumes" not in restoring:
+            raise TransferError("Restore --import requires the volumes component.")
         images = staging / "images.tar"
         terminal = read_terminal_backup(staging, namespace)
-        image_platforms(images, namespace)
+        if "images" in restoring:
+            image_platforms(images, namespace)
         settings = None
         files = []
-        if configuration is not None:
+        checkout = staging / "checkout"
+        project_files = checkout if full_checkout else staging
+        if "project" in restoring and configuration is not None:
             defaults, destination, version = configuration
-            settings = stage_configuration(staging, defaults, destination, version)
-            files = project_file_targets(staging / "config", destination)
+            if full_checkout:
+                stage_checkout(staging / "project.tar", checkout)
+                if (checkout / "config").is_symlink() or (checkout / "config" / config.CONFIG_NAME).is_symlink():
+                    raise TransferError("The checkout configuration must use local files.")
+            else:
+                stage_project_files(staging / "project.tar", staging)
+            settings = stage_configuration(project_files / "config", defaults, destination, version)
+            if not full_checkout:
+                files = project_file_targets(staging / "config", destination)
             terminal_key = config.terminal_secret_path(project, settings.terminal_server_secret_file)
             workspace_driver = settings.terminal_server_volume_driver
             workspace_options = settings.terminal_server_volume_options
         workspaces = ()
         credential = nullcontext()
+        if terminal_key is None:
+            terminal_key = project / config.TERMINAL_SECRET
+        key = None
         if terminal is not None:
             key, workspaces = terminal
-            terminal_key = terminal_key or project / config.TERMINAL_SECRET
             if configuration is not None and not terminal_key.is_relative_to(project):
                 raise TransferError("The backup's terminal key path must be inside the destination project.")
-            if any(path == terminal_key for _, path in files):
-                raise TransferError("The backup uses the terminal key path for a configuration file.")
-            matching_terminal_key(terminal_key, key)
-            credential = restore_terminal_key(terminal_key, key)
-        validate_volume_payload(staging / "volumes.tar", workspaces)
-        require_inactive_volumes(project, namespace, workspaces)
+        elif ((full_checkout or {"project", "volumes"} <= restoring) and in_place_bundle is not None
+                and terminal_key.is_relative_to(project) and not terminal_key.exists()):
+            key = new_terminal_key()
+        if key is not None:
+            if in_place_bundle is not None:
+                key_path = terminal_key.relative_to(project)
+                if (not key_path.parts or key_path.parts[0] in CHECKOUT_RESERVED_PATHS | {".git"}
+                        or key_path.parts[0].startswith(".loaf-")):
+                    raise TransferError("The backup uses a reserved project path for the terminal key.")
+            if full_checkout:
+                staged_key = checkout / terminal_key.relative_to(project)
+                if staged_key.resolve() != staged_key or staged_key.exists() or staged_key.is_symlink():
+                    raise TransferError("The backup uses the terminal key path for a checkout file.")
+                if not matching_terminal_key(terminal_key, key):
+                    # Keep a new credential inside the staged tree until the restore succeeds.
+                    with restore_terminal_key(staged_key, key):
+                        pass
+            else:
+                if any(path == terminal_key for _, path in files):
+                    raise TransferError("The backup uses the terminal key path for a configuration file.")
+                matching_terminal_key(terminal_key, key)
+                credential = restore_terminal_key(terminal_key, key)
+        restored_checkout = checkout_targets(checkout, project) if full_checkout else []
+        if in_place_bundle is not None:
+            stage_backup_layout(in_place_bundle, project, staging)
+        volumes = staging / "volumes.tar"
+        if "volumes" in restoring:
+            validate_volume_payload(volumes, workspaces)
+            require_inactive_volumes(project, namespace, workspaces)
+            if "images" not in restoring:
+                image = image_names(namespace)[0]
+                try:
+                    subprocess.run(["docker", "image", "inspect", image], cwd=project,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True)
+                except subprocess.CalledProcessError as exc:
+                    raise TransferError(f"Restoring volumes without images requires the local helper image {image}.") from exc
+        if with_docker_deps:
+            install_backup_host_packages(checkout)
         if workspaces:
             create_workspace_volumes(project, namespace, workspaces, workspace_driver, json.loads(workspace_options))
-        docker_archive(project, ["docker", "image", "load"], images, "Load images.tar", send=True)
+        if "images" in restoring:
+            docker_archive(project, ["docker", "image", "load"], images, "Load images.tar", send=True)
         with credential:
-            docker_archive(
-                project, volume_command(restore=True, namespace=namespace, workspaces=workspaces),
-                staging / "volumes.tar", "Restore volumes.tar", send=True,
-            )
+            if "volumes" in restoring:
+                docker_archive(
+                    project, volume_command(restore=True, namespace=namespace, workspaces=workspaces),
+                    volumes, "Restore volumes.tar", send=True,
+                )
             publish_project_files(files)
-        return settings
+            if in_place_bundle is not None:
+                publish_backup_layout(in_place_bundle, project, staging, restored_checkout)
+        if terminal is not None:
+            print(f"Terminal server key available at {terminal_key}.")
+        return RestoredBackup(restoring, settings)
 
 
 MODEL_TRANSFER_SETUP = """\
