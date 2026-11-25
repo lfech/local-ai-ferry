@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from loaf import cli, config
+from loaf import assets, cli, config
 
 
 class ConfigTests(unittest.TestCase):
@@ -51,6 +51,19 @@ class ConfigTests(unittest.TestCase):
         settings = config.load(defaults, self.config_dir)
         self.assertEqual(settings.port, 3201)
         self.assertFalse(settings.auth)
+
+    def test_previous_compact_ollama_tags_select_the_packaged_recipes(self):
+        for tag, recipe in (
+            ("local/loaf-ollama-cpu-test:0.40.18", "loaf-ollama-cpu"),
+            ("local/loaf-ollama-cuda-test:0.40.18", "loaf-ollama-cuda13"),
+        ):
+            with self.subTest(tag=tag):
+                self.path.write_text(f"[images]\nollama_image = {tag}\n", encoding="utf-8")
+                settings = config.load(self.config_dir)
+                packaged = cli.Compose(self.project, files=(assets.DATA_DIR / "compose.yml",), settings=settings)
+                self.assertEqual(packaged.variables()["LOAF_INI_OLLAMA_IMAGE"], recipe)
+                custom = cli.Compose(self.project, settings=settings)
+                self.assertEqual(custom.variables()["LOAF_INI_OLLAMA_IMAGE"], tag)
 
     def test_terminal_base_image_uses_the_images_section(self):
         defaults = self.project / "defaults"

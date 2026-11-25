@@ -10,7 +10,7 @@ import re
 
 CONFIG_NAME = "config.ini"
 DEFAULT_WAIT_TIMEOUT = 300
-DEFAULT_COMPRESSION_LEVEL = 1
+DEFAULT_COMPRESSION_LEVEL = 4
 OPEN_TERMINAL_IMAGE = "ghcr.io/open-webui/open-terminal:0.17.20-slim"
 TERMINAL_SECRET = Path("config/terminal-server.key")
 TERMINAL_KEY_PATTERN = re.compile(rb"[!-~]{32,512}(?:\r?\n)?")

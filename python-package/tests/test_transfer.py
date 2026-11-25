@@ -1106,6 +1106,37 @@ class ModelTransferTests(unittest.TestCase):
                     transfer.model_volume_command(project, "v2-local-inference")
 
     @unittest.skipUnless(shutil.which("rsync") and shutil.which("sh"), "rsync and sh are required.")
+    def test_matching_blob_name_and_size_can_hide_corrupt_destination_data(self):
+        healthy = b"GGUF fixture"
+        corrupt = b"---- fixture"
+        digest = sha256(healthy).hexdigest()
+        blob = f"models/blobs/sha256-{digest}"
+        tag = "models/manifests/registry.ollama.ai/library/example/latest"
+        manifest = json.dumps({"config": {"digest": f"sha256:{digest}", "size": len(healthy)}, "layers": []}).encode()
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            archive = root / "models.tar"
+            source = root / "source"
+            (source / tag).parent.mkdir(parents=True)
+            (source / tag).write_bytes(manifest)
+            (source / blob).parent.mkdir(parents=True)
+            for contents in (corrupt, healthy):
+                (source / blob).write_bytes(contents)
+                with tarfile.open(archive, "w") as payload:
+                    payload.add(source / "models", arcname="models")
+                transfer.validate_model_archive(archive)
+
+            target, staging = root / "destination", root / "staging"
+            staging.mkdir()
+            (target / blob).parent.mkdir(parents=True)
+            (target / blob).write_bytes(corrupt)
+            script = transfer.IMPORT_MODELS.replace("/ollama", str(target)).replace("/staging", str(staging))
+            with archive.open("rb") as payload:
+                subprocess.run(["sh", "-c", script], stdin=payload, check=True)
+            self.assertEqual((target / blob).read_bytes(), corrupt)
+            self.assertEqual((target / tag).read_bytes(), manifest)
+
+    @unittest.skipUnless(shutil.which("rsync") and shutil.which("sh"), "rsync and sh are required.")
     def test_snapshot_and_import_scripts_merge_by_default_and_delete_on_request(self):
         with TemporaryDirectory() as folder:
             project = Path(folder)

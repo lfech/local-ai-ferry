@@ -38,6 +38,11 @@ the manifest blobs' SHA-256 hashes, and the presence and sizes of
 referenced model blobs before import changes the destination volume.
 [Ollama manifest storage](https://github.com/ollama/ollama/blob/v0.40.17/manifest/manifest.go#L1169)
 
+Layer checks use the stored filename and size. Import reuses existing blobs
+with matching names. A same-size damaged layer can pass these checks and
+fail inference. Use a clean model store when recovering from suspected
+blob damage.
+
 Both commands use `rsync` in a disposable container without networking.
 Build or upgrade the downloader image while connected to obtain `rsync`.
 Allow space for an uncompressed tar on the host and for a staged copy in
@@ -103,9 +108,10 @@ The default directory is `backup/` in the project. Set `[transfer]`
 `--backup-dir PATH` to either command. An explicit relative path resolves
 from the shell's current directory. Backup names use local time.
 Restore uses the folder it is run from or the folder containing the executable.
-Use `loaf restore --archive PATH` to choose a specific folder. Restore can
-also select the latest backup from the configured directory for the requested
-namespace. Git ignores the default `backup/` directory and the generated names.
+Use `loaf restore --archive PATH` to choose a specific folder or archive
+file. Restore can also select the latest backup from the configured directory
+for the requested namespace. Git ignores the default `backup/` directory
+and the generated names.
 
 Keep the transfer folder private. The archive contains WebUI data and may
 include Git history. A deployment prepared by the standalone executable can
@@ -113,9 +119,10 @@ back up its configuration and cached installers directly. The release
 executable supplies the packaged defaults and Docker files. Copy required
 `.env` settings and other external data separately.
 
-The images component includes the Open Terminal image tagged for the selected deployment
-when it is available locally. Use `loaf backup --no-terminal-server` to skip
-that image. Set `[terminal_server] include_in_backup = true` to add per-account
+The images component includes the shared Open Terminal image tagged for the
+selected deployment when it is available locally. Chat package images stay
+on the source host. Use `loaf backup --no-terminal-server` to skip the shared
+image. Set `[terminal_server] include_in_backup = true` to add per-account
 `user` volumes and the bearer key when backing up volumes. Move any
 chat files you want to transfer into `/home/user` before backing up.
 `loaf restore` reads the archive to decide which assets to restore. The
@@ -139,7 +146,10 @@ packages on the destination. [Disconnected installation](installation.md#disconn
 
 Backup stops all project services before capturing the volumes and leaves them
 stopped. More than one backup in a minute gets numbered suffixes such as `-2`.
-Allow room for the uncompressed payloads and compressed archive during backup.
+Full backups and model-only exports use gzip level 4 by default. Set
+`compression_level` under `[transfer]` in `config/config.ini` to choose a
+level from 0 through 9. Allow disk space for the uncompressed payloads and
+the compressed archive during backup.
 Restore stages the payloads in the writable project directory. The backup
 can stay on read-only media.
 
@@ -155,9 +165,10 @@ an image export or pauses its stream, the meter shows `waiting for Docker`.
 loaf backup --verify --archive /media/transfer/YYYYMMDD-HHMM_local-ai-ferry
 ```
 
-Verification checks the bundled executable and each archive payload by SHA-256,
-lists the available components, and reports the operating system and
-architecture of any saved images. It performs no Docker operations. Allow
+Verification checks each archive payload by SHA-256, lists the available
+components and reports the operating system and architecture of any saved
+images. For a complete bundle, it also checks the executable against
+`backup.json`. It performs no Docker operations. Allow
 temporary disk space when the archive contains `images.tar`. Without `--archive`,
 it checks the newest backup in the configured directory. Select the backup's
 namespace with `--version` when applicable. Verification and restore both
@@ -261,16 +272,17 @@ archive beside itself and leaves the original bundle on the media.
 
 ## Restore behavior
 
-Restore discovers the archive and executable from the backup folder and checks
-their presence, the executable hash, the archive structure and the recorded
-payload hashes before calling Docker. Restore checks volume paths and
+Restore checks the archive structure and recorded payload hashes before
+calling Docker. For a complete bundle, it also checks the executable against
+`backup.json`. Restore checks volume paths and
 archive links before extracting selected volumes. Stop containers that use
 the destination volumes before restoring them. Restore loads selected images,
 extracts selected volumes into new or empty volumes, and writes saved settings
 and Modelfiles to `config/` when restoring the project. The bundled executable
 supplies the launcher and deployment files.
-Restore leaves services stopped by default. Run `loaf offline` and open the
-printed address to sign in or create the first account.
+Restore starts services only when Modelfile replay is enabled. On a
+recovered host, run `loaf offline` and open the printed address to sign in
+or create the first account.
 
 Add `--import` or set `import_models = true` under `[transfer]` to start offline
 Ollama and import all saved Modelfiles after restoring volumes.

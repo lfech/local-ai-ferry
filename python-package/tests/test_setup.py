@@ -36,7 +36,7 @@ class SetupTests(unittest.TestCase):
                 self.assertEqual(cli.main(["--project-dir", directory, "setup"]), 0)
             prepare.assert_called_once_with(project, with_docker_deps=False)
             key = project / cli.config.TERMINAL_SECRET
-            self.assertRegex(key.read_bytes(), br"^[0-9a-f]{64}$")
+            cli.config.read_terminal_secret(key)
             self.assertEqual(key.stat().st_mode & 0o777, 0o600)
             run.assert_not_called()
             compose.assert_not_called()

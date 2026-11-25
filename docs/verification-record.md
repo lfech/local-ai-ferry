@@ -4,6 +4,94 @@
 
 Older entries use the current command and project names in examples.
 
+## 2026-11-25 22:17:33 +0100 — Bundled Ollama build recipes
+
+- On Debian 13.8 in WSL2 with Docker Engine 26.1.5 and Compose 2.26.1-4,
+  `loaf build` succeeded from an empty image store using the earlier CUDA
+  test tag in its INI. `loaf upgrade` built the compact stack with and
+  without Open Terminal. A direct Compose build using the registry Ollama
+  image skipped the unused compact source. The built CUDA Ollama, Open
+  WebUI slim and Open Terminal images measured approximately 1.34 GB,
+  610 MB and 767 MB, respectively.
+- The new standalone executable passed the 79.8-second GPU smoke on an
+  RTX 4070 Ti SUPER. It built its bundled CUDA 13 recipe and generated an
+  authenticated chat reply with 100% GPU placement. The CPU handoff built
+  the bundled recipe, created a 372,362,384-byte backup and restored from read-only
+  media into an empty, disconnected Docker store. It passed saved chat,
+  follow-up inference and corrupt-weight checks in 169.1 seconds. The
+  destination used Docker Engine 28.5.2 with overlay2 and Compose 2.40.3.
+- The Docker-free suite passed 204 of 255 cases with 51 skips. All 30
+  focused configuration, Compose and documentation checks passed. The
+  documentation checks used a temporary editable virtualenv because the
+  checkout interpreter was inaccessible.
+  [Ollama build selection](configuration.md#select-an-ollama-build-recipe) ·
+  [Release acceptance](verification.md#check-a-release-candidate)
+
+## 2026-11-25 22:01:29 +0100 — Backup compression
+
+- On Debian 13.8 with Python 3.13.5, gzip compressed the same 924,610,560-byte
+  tar payload in 7.01 seconds at level 1 (395,365,883 bytes), 9.29 seconds at
+  level 3 (382,382,012 bytes), 9.66 seconds at level 4 (372,374,239 bytes),
+  and 19.30 seconds at level 6 (363,426,358 bytes). These times measure
+  compression from the unpacked tar file.
+- Recompressed the retained level-9 archive to level 4 in 12.00 seconds,
+  including decompression. It grew from 361,895,305 to 372,374,304 bytes.
+  The uncompressed tar SHA-256 matched the original. The bundled
+  executable verified the launcher and payload hashes and found all three
+  saved images for `linux/amd64`.
+- The Docker-free suite passed 203 of 254 cases with 51 skips. All five
+  documentation checks passed in a temporary editable virtualenv because
+  the checkout interpreter was inaccessible. The built-in, packaged and
+  working configuration defaults all resolved to level 4.
+  [Transfer guide](transfer.md#archive-contents)
+
+## 2026-11-25 21:55:33 +0100 — Compact inference and release handoff
+
+- On Debian 13.8 in WSL2 with Python 3.13.5, the Docker-free suite passed
+  203 of 254 cases with 51 skips. The regular Docker suite passed 235 of
+  254 cases with 19 skips on Engine 26.1.5 and Compose 2.26.1-4. Those
+  skips covered the full CPU/GPU model suite, the Open Terminal opt-ins
+  and API dependencies, and the network catalog check. All six provisioner
+  checks passed separately in the terminal image, including the key format
+  comparison. All five documentation checks passed using a temporary
+  virtualenv because the checkout's interpreter was inaccessible.
+- The base images used locally were approximately 192 MB for CPU Ollama,
+  1.34 GB for CUDA 13 Ollama, and 610 MB for WebUI slim. The slim stack
+  generated authenticated chat replies on CPU and at 100% GPU placement
+  on an RTX 4070 Ti SUPER. The GPU smoke took 135.7 seconds, including
+  the first CUDA fixture build and model download. The first WebUI pull
+  took longer during a registry layer stall.
+- The retained gzip level-9 backup was 361,895,305 bytes. It held one
+  SmolLM2 chat model, the three core images, synthetic WebUI data,
+  configuration, and host installers from the preparation machine's APT
+  cache. A separate verification and cold restore of those exact files
+  took 54.8 seconds. The destination had no external network and no
+  initial Docker data. Docker Engine 28.5.2 used overlay2 and Compose 2.40.3.
+  Setup and restore ran from a read-only copy. Sign-in, the saved
+  conversation, and a generated follow-up passed.
+- The cached level-1 release gate passed in 106.7 seconds and generated a
+  395,358,118-byte archive. Both final cold runs found the corrupt model in
+  preflight and confirmed that Ollama rejected its modified GGUF header.
+  The first rehearsal exposed a test assertion that compared WebUI-added
+  authorship fields. The reruns compared message roles, content and model
+  selection. [Release acceptance](verification.md#check-a-release-candidate)
+
+## 2026-11-25 20:58:41 +0100 — Documentation and architecture audit
+
+- All five documentation checks passed with no skips on Debian 13.8 with
+  Python 3.13.5. The checkout virtualenv's interpreter was inaccessible.
+  The checks ran with system Python and a temporary virtualenv using the
+  checkout's editable package registration. The package README also passed
+  a separate Markdown and local link check.
+- The Docker-free `loaf test -v` run passed 200 of 250 cases. Its 50 skips
+  covered Docker (32), CPU/GPU model workflows (6), Open Terminal Docker
+  tests (5), missing Open Terminal API test dependencies (6), and the
+  network catalog check (1). The host rsync fixture passed.
+- The launcher dry runs confirmed that CPU serving and Modelfile replay
+  apply the CPU Compose override, that replay targets Ollama alone, and
+  that an images-and-project backup has no service stop step.
+  [Verification guide](verification.md)
+
 ## 2026-11-25 16:55:23 +0100 — Chat-scoped APT packages
 
 - The regular Docker suite passed 231 of 250 cases. Its 19 skips covered

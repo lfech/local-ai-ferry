@@ -875,12 +875,16 @@ with open(sys.argv[1], "w", encoding="utf-8") as output:
         return json.loads(metadata.read_text())
 
 
-async def serve(*, allow_legacy_bridge=False):
-    with KEY_FILE.open("rb") as source:
+def read_terminal_key(path):
+    with path.open("rb") as source:
         key = source.read(515)
     if not re.fullmatch(rb"[!-~]{32,512}(?:\r?\n)?", key):
         raise ValueError("The terminal server secret must be 32–512 printable ASCII characters without spaces.")
-    secret = key.rstrip(b"\r\n").decode("ascii")
+    return key.rstrip(b"\r\n").decode("ascii")
+
+
+async def serve(*, allow_legacy_bridge=False):
+    secret = read_terminal_key(KEY_FILE)
     source_format = os.environ.get("LOAF_TERMINAL_RUNTIME_APT_SOURCE_FORMAT")
     metadata = read_metadata(runtime=bool(source_format))
 

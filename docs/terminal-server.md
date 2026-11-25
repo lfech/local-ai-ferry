@@ -10,8 +10,9 @@ bridge. [Bridge driver options](https://docs.docker.com/engine/network/drivers/b
 
 ## Selected design
 
-The provisioner and all workspaces use the same local image built from
-MIT-licensed Open Terminal. Each authorized Open WebUI account gets a persistent
+The provisioner and new workspaces start from the shared local image built from
+MIT-licensed Open Terminal. A chat that installs packages uses its own derived
+image. Each authorized Open WebUI account gets a persistent
 user volume on first use. Each chat runs in a separate container and can access
 that account's user volume. Users select one direct
 Open Terminal connection in Open WebUI and use its terminal, files, and model
@@ -49,8 +50,11 @@ loaf offline
 
 Set `secret_file` to another path if needed. Relative paths start at the
 project directory. The file holds one bearer key of 32–512 printable ASCII
-characters without spaces, optionally followed by one newline. The launcher
-checks the file before starting either serving profile. Compose mounts it
+characters without spaces, optionally terminated by one LF or CRLF.
+Setup and restore copy the archived bytes when creating a key from a backup.
+Enter the characters before the line ending as the WebUI bearer credential.
+Both the launcher and the
+provisioner validate this format. Compose mounts the file
 only in the provisioner. Run `loaf status` to check the key under
 **Configuration** and the Open Terminal image under **Local images and GPU**
 or **Local images** with `--cpu`.
@@ -209,13 +213,15 @@ same configured source through a separate installer.
 
 ## Install packages for a chat
 
-With `apt_source_file` set, `loaf offline` enables the `install_chat_packages`
-tool on the Open Terminal connection. Ask the model to install an APT package
-for the current chat. Loaf runs APT against the configured mirror, including
-dependency resolution and package setup. The terminal restarts after a
-successful install. Its files and working-directory selection are retained.
-The packages are available from both `user` and `chat` for that chat.
-Every new chat starts with the base image's packages.
+With `apt_source_file` set, `loaf offline` and `loaf online` enable the
+`install_chat_packages` tool on the Open Terminal connection. Ask the model
+to install an APT package for the current chat. Loaf runs APT against the
+configured mirror, including dependency resolution and package setup. After
+a successful install, the next terminal request starts a new runner. Named
+volumes keep their files, and the runner tries to reopen the last working
+directory. Files stored in the old runner's temporary `/home/chat` or
+`/tmp` expire with that runner. The packages are available from both `user`
+and `chat` for that chat. Every new chat starts with the base image's packages.
 
 For an HTTP or HTTPS source, make the mirror reachable from the Docker
 host's bridge network. For a mirror stored on the offline host, set

@@ -3,9 +3,11 @@
 > ⚠️ **Warning**\
 > You are responsible for making this application reachable on your network!
 > Local AI Ferry was engineered with heavy AI assistance.\
-> It's extensive tests exercise only application functional behavior.
-> There are no low-level unit tests. Source-code review is not planned.
+> The test suite covers launcher internals and deployment workflows.
+> Source-code review is not planned.
 > The documentation was mostly generated with AI.
+
+[Verification coverage and results](verification.md#verification-coverage)
 
 Create the first admin account locally and keep Open WebUI sign-in enabled.
 The examples use HTTP and are intended for a trusted local network.
@@ -164,6 +166,10 @@ Under `[webui]` in your deployment's `config/config.ini`, set
 exception you added for WebUI. For WSL, also follow the matching steps below.
 Rerun your serving command after the changes. Open `http://localhost:3000`
 locally, using your configured port.
+
+On Docker Engine releases before 28.0.0, devices on the same network segment
+may still reach a port published to loopback.
+[Docker port publishing](https://docs.docker.com/engine/network/port-publishing/)
 
 ### Remove the WSL NAT proxy
 

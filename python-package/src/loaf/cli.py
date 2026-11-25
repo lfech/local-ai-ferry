@@ -37,6 +37,10 @@ TRANSFER_MODES = ("backup", "restore")
 MODEL_TRANSFER_MODES = ("export", "import")
 INSTALL_MODES = ("setup", "install")
 LINK_MODE = "link-docker-project"
+LEGACY_COMPACT_OLLAMA_IMAGES = {
+    "local/loaf-ollama-cpu-test:0.40.18": "loaf-ollama-cpu",
+    "local/loaf-ollama-cuda-test:0.40.18": "loaf-ollama-cuda13",
+}
 # Tags may be quantization names or complete GGUF filenames. This conservative
 # grammar checks syntax locally; repository/tag availability is a separate check.
 MODEL_PATTERN = re.compile(
@@ -290,6 +294,9 @@ class Compose:
     def variables(self, step: Step | None = None) -> dict[str, str]:
         variables = {"LOAF_NAMESPACE": self.namespace, **self.settings.compose_variables()}
         compose_dir = self.files[0].parent
+        recipe = LEGACY_COMPACT_OLLAMA_IMAGES.get(self.settings.ollama_image)
+        if recipe and (compose_dir / "docker/ollama/Dockerfile").is_file():
+            variables["LOAF_INI_OLLAMA_IMAGE"] = recipe
         if compose_dir != self.project_dir:
             # Keep the working project's .env while resolving the relocated build contexts.
             variables["LOAF_DOCKER_DIR"] = str(compose_dir / "docker")
@@ -653,7 +660,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 0
             with project_lock(project_dir / PROJECT_LOCK):
                 return build_executable(project_dir, script, verbose=args.verbose)
-        except (OSError, AlreadyRunningError, subprocess.CalledProcessError) as exc:
+        except (OSError, config.ConfigError, AlreadyRunningError, subprocess.CalledProcessError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
         except KeyboardInterrupt:

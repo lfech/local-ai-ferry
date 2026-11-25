@@ -115,6 +115,10 @@ remaining remotes from the same commit. It reuses the existing annotated tag
 and its original notes. You can also use the standard Git commands directly,
 such as `git tag -a v0.1.0` and `git push origin refs/tags/v0.1.0`.
 
+Both release jobs run the small disconnected handoff with the executable
+they just built before attaching it to a draft.
+[Release handoff check](verification.md#check-a-release-candidate)
+
 Rerunning a release job refreshes its build attachments in an existing
 draft. Use a new version and tag for changes after publication.
 [GitHub workflow](../.github/workflows/release.yml) ·
@@ -125,7 +129,9 @@ draft. Use a new version and tag for changes after publication.
 Enable repository Actions and register a Linux amd64 runner with the
 `ubuntu-latest` label. Its job environment needs Git, Bash, GNU tar,
 Node.js for checkout, and Python 3.11 or newer. The runner needs access
-to GitHub, Python package sources, and the Gitea API.
+to GitHub, Python package sources, the Gitea API, and the container and model
+registries used by the handoff check. Its local Docker daemon must support
+starting the disconnected Debian fixture with its own daemon.
 Enable Releases and release attachments in Gitea. Allow the built-in job
 token to write releases. If you use a reverse proxy, allow upload bodies
 large enough for the executable. [Gitea Actions setup](https://docs.gitea.com/usage/actions/quickstart/) ·

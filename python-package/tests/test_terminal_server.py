@@ -40,6 +40,20 @@ def load_component(name):
     return module
 
 
+KEY_FORMAT_CASES = (
+    ("minimum length", b"!" + b"k" * 30 + b"~", True),
+    ("LF", b"k" * 32 + b"\n", True),
+    ("maximum length with CRLF", b"k" * 512 + b"\r\n", True),
+    ("too short", b"k" * 31, False),
+    ("too long", b"k" * 513, False),
+    ("space", b"k" * 32 + b" ", False),
+    ("control byte", b"k" * 32 + b"\0", False),
+    ("non-ASCII byte", b"k" * 32 + b"\xff", False),
+    ("bare CR", b"k" * 32 + b"\r", False),
+    ("multiple records", b"k" * 512 + b"\r\n\n", False),
+)
+
+
 class TerminalServerSettingsTests(unittest.TestCase):
     def test_selected_profiles_and_secret_path(self):
         with TemporaryDirectory() as folder:
@@ -117,12 +131,36 @@ class TerminalServerSettingsTests(unittest.TestCase):
             self.assertIn("APT source file is missing", errors.getvalue())
             execute.assert_not_called()
 
+    def test_terminal_key_format_preserves_the_file_bytes(self):
+        with TemporaryDirectory() as folder:
+            key = Path(folder) / "terminal.key"
+            for label, contents, valid in KEY_FORMAT_CASES:
+                with self.subTest(label=label):
+                    key.write_bytes(contents)
+                    if valid:
+                        self.assertEqual(config.read_terminal_secret(key), contents)
+                    else:
+                        with self.assertRaises(config.ConfigError):
+                            config.read_terminal_secret(key)
+
 
 @unittest.skipUnless(ClientSession, "Install aiohttp to run the Docker-free provisioner tests.")
 class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.module = load_component("provisioner")
         self.secret = secrets.token_urlsafe(32)
+
+    def test_provisioner_accepts_the_same_key_format_as_the_launcher(self):
+        with TemporaryDirectory() as folder:
+            key = Path(folder) / "terminal.key"
+            for label, contents, valid in KEY_FORMAT_CASES:
+                with self.subTest(label=label):
+                    key.write_bytes(contents)
+                    if valid:
+                        self.assertEqual(self.module.read_terminal_key(key), contents.rstrip(b"\r\n").decode("ascii"))
+                    else:
+                        with self.assertRaises(ValueError):
+                            self.module.read_terminal_key(key)
 
     async def test_discovery_and_streams_use_verified_identity_and_runner_credential(self):
         module = self.module

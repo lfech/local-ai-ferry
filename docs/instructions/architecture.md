@@ -1,36 +1,40 @@
 # Architecture
 
+[Project overview](../../README.md) · [Configuration](../configuration.md) ·
+[Verification](../verification.md)
+
 ## Deployment
 
-The `loaf` launcher prepares Hugging Face models and serves them with Ollama
-and Open WebUI on connected or disconnected hosts. The documented hosts are
-native Debian and Debian in WSL2 with Docker Engine. The launcher uses the
-Python 3.10+ standard library. GPU inference requires working NVIDIA host
-drivers and container support. Compose 2.30 and newer support `gpus: all`.
-Compose 2.26.1 through 2.29.x use the NVIDIA device reservation in the same
-service definition. [Installation](../installation.md) ·
-[Docker and Compose requirements](../debian.md#prepare-debian-before-disconnecting-it)
+The `loaf` launcher prepares Hugging Face models for Ollama and serves them
+through Open WebUI on connected or disconnected hosts. The documented hosts
+are native Debian and Debian in WSL2 with Docker Engine and Compose 2.26.1 or
+newer. The launcher uses the Python 3.10+ standard library. The standalone
+Linux amd64 executable supplies its own Python and deployment files.
+[Installation](../installation.md) · [Release executable](../releases.md#run-the-executable)
 
 ## CLI and Compose profiles
 
 The Python package ships the [deployment data](../../python-package/src/loaf/data/)
 with one Compose file, three core build contexts, the optional terminal server
-context and the default configuration. [Terminal server](../terminal-server.md)
+context and the default configuration. The two Ollama contexts share a
+multi-stage Dockerfile for registry bases and the bundled CPU and CUDA 13
+recipes. [Ollama build selection](../configuration.md#select-an-ollama-build-recipe) ·
+[Terminal server](../terminal-server.md)
 `loaf link-docker-project` exposes the deployment tree for direct Compose calls.
 [Direct Compose commands](../launcher.md#link-the-docker-project)
 
 | Command | Behavior |
 | --- | --- |
-| `loaf setup` / `loaf install` | Standalone setup writes default user configuration and links the packaged deployment. Source checkout setup prepares the Python wheel cache, virtualenv and NVIDIA Container Toolkit on Debian. On Debian 13, `--with-docker-deps` also prepares native Docker packages. [Quick Setup](../../README.md#quick-setup) |
+| `loaf setup` / `loaf install` | Standalone setup copies missing configuration and links the packaged deployment. Source checkout setup prepares the Python wheel cache, virtualenv and NVIDIA Container Toolkit on Debian. Both create the terminal bearer key if needed. [Installation](../installation.md) |
 | `loaf binary` | Build or update the standalone Linux amd64 executable at `dist/loaf` using the current source files. [Local binary build](../releases.md#build-and-check-locally) |
 | `loaf clean` | Clear the user runtime cache and project temporaries. `--full` also clears generated installation files. Git, backups, settings, credentials and Docker data are preserved. [Cleanup](../launcher.md#clean-generated-files) |
-| `loaf build` | Builds the downloader, GPU Ollama and Open WebUI images. Includes the terminal image when enabled. |
+| `loaf build` | Builds the downloader, Ollama serving and Open WebUI images. Includes the terminal image when enabled. |
 | `loaf upgrade` | Builds the same images with Compose's `--pull` option to refresh their base images. |
 | `loaf download` | Stops serving services, starts the downloader in the `download` profile and pulls each selected model. |
 | `loaf export` | Stops the downloader and archives the Ollama model store using a disposable container. |
-| `loaf online` | Stops the downloader and offline services, then starts GPU Ollama and WebUI on the connected bridge. |
+| `loaf online` | Switches to connected Ollama and WebUI with outbound access. |
 | `loaf import` | Stops the downloader and synchronizes the archive into the Ollama volume. Supports optional deletion of destination-only data. |
-| `loaf offline` | Stops the downloader and online services, then starts GPU Ollama and WebUI from local images. |
+| `loaf offline` | Switches to Ollama on an internal network and WebUI with offline settings. |
 | `loaf backup` / `loaf restore` | Create or recover a deployment bundle with selectable images, volumes and project components. Use `--models-only` for model-store transfer. |
 | `loaf status` | Checks deployment readiness and lists the project's containers. [Readiness checks](../launcher.md#check-readiness-with-status) |
 | `loaf stop` | Stops services and removes their Compose containers by default. Use `-n` or `--no-remove-containers` to keep stopped service containers and their logs. Images and volumes persist. [Shutdown options](../launcher.md#stop-and-remove-containers) |
@@ -38,18 +42,20 @@ context and the default configuration. [Terminal server](../terminal-server.md)
 | `loaf test [-v]` | Runs the selected project's unittest suite. [Verification guide](../verification.md) |
 
 Both `loaf` and `python -m loaf` use the current directory by default.
-`--project-dir` selects another checkout or linked directory. The checkout has
-an editable `config/`. Local settings override packaged keys, and a local
-model file replaces the selected bundled list. Use
-`--config-dir` to select a different override directory.
+`--project-dir` selects another deployment. The launcher looks for Compose
+in the project root, the checkout's deployment tree, then `docker-project/`.
+Local configuration overrides individual packaged keys. A local model INI
+supplies the entire selected list. Use `--config-dir` to select a different
+override directory.
 Download and `backup --export` use the selected model INI. Named sections
 replace `[models.default]`. An optional `name` creates an Ollama alias. [Model selection](../launcher.md#select-models)
 
-The launcher holds an OS lock across Compose transitions and transfers in the
-checkout. The serving and build plans validate the Compose configuration
-before changing services or building images. Status and archive verification
-are observational. Execution stops at the first failure and preserves completed
-downloads and exports.
+The launcher holds a per-directory OS lock across Compose transitions and
+transfers. The serving and build plans validate Compose configuration before
+changing services or building images. Status inspects local resources and
+uses disposable, network-disabled probe containers. Archive verification
+runs without Docker. Execution stops at the first failure and preserves
+completed downloads and exports.
 `--dry-run` describes the steps without invoking Docker.
 `-v` prints the Docker Compose commands for live runs and previews.
 `--attach` follows Compose logs after the workflow releases the lock.
@@ -57,6 +63,18 @@ downloads and exports.
 seconds. [Launcher options and failure handling](../launcher.md)
 
 ## Model storage and serving
+
+| Compose profile | Services | Networks |
+| --- | --- | --- |
+| `download` | `ollama-online` | Outbound `download` bridge. |
+| `online` | `ollama-connected`, `open-webui-online` | Outbound `connected` bridge. WebUI also joins the internal `terminal-control` network. |
+| `offline` | `ollama-offline`, `open-webui` | Internal `inference` network. WebUI also joins the regular `web` bridge and the internal `terminal-control` network. |
+| `terminal` | `terminal-server` | Internal `terminal-control` network. The launcher starts the provisioner alongside either serving profile when enabled. |
+
+The launcher stops services from competing profiles before switching the
+shared volumes to the next profile. Startup uses local images with
+`--no-build --pull never`. Each Compose service has `scale: 1`.
+[Compose definition](../../python-package/src/loaf/data/compose.yml)
 
 The default Compose project is `local-inference`, with local images tagged
 `latest` and named volumes `ollama` and `open-webui`. A versioned project
@@ -67,35 +85,48 @@ when naming archives and checking restored images.
 
 All three Ollama services mount the `ollama` volume at `/ollama`. Its
 `models/` directory holds manifests and blobs, including vision projectors
-where supplied. The export helper atomically writes complete Modelfiles under
+where supplied. Ollama registrations can use `manifests/` or `manifests-v2/`,
+where tags can link to content-addressed manifest blobs.
+The export helper atomically writes complete Modelfiles under
 `config/`, preserving model names, tags, templates and blob references.
 Changing the selection leaves existing exports and registrations in place.
 [Storage layout](../configuration.md#services-and-storage)
 
-Both serving profiles use the same GPU Ollama image and startup wrapper. The
-wrapper waits for the local API, then recursively imports every saved
-`.model` file. With no exports, Ollama serves existing registrations. An
-import failure blocks backend readiness, and WebUI waits for a healthy
-backend. The GPU server defaults to a 16,384-token context and a 60-second API
-startup wait. [Startup and configuration](../configuration.md#applying-changes)
+Both serving profiles use the same Ollama image and startup wrapper.
+NVIDIA GPU inference is the default and requires a compatible host driver
+and container runtime. The Compose service definition supplies `gpus: all`
+for Compose 2.30 and newer and a device reservation for 2.26.1 through 2.29.x.
+With `--cpu`, the launcher applies `compose.cpu.yml` to remove the GPU
+requests and hide GPU devices from Ollama. CPU serving uses the same image,
+volumes and startup wrapper. [Docker and Compose requirements](../debian.md#prepare-debian-before-disconnecting-it) ·
+[CPU serving](../launcher.md#serve-on-cpu)
+
+The startup wrapper waits for the local API, then recursively imports saved
+`.model` files from `/ollama/config`. With no exports, Ollama serves existing
+registrations. An import failure blocks backend readiness, and WebUI waits
+for a healthy backend. Ollama defaults to a 16,384-token context and a
+60-second API startup wait. [Startup and configuration](../configuration.md#applying-changes)
 
 Both serving profiles use the same WebUI image and persist accounts, chats and
 settings in the `open-webui` volume. WebUI reaches Ollama at
-`http://ollama-offline:11434` in both modes. The default browser address is
-`http://localhost:3000`. Ollama has no published host port. The online pair
-runs on a bridge with outbound internet access. Its default settings enable
-Ollama cloud features and automatic WebUI downloads.
-Offline Ollama runs only on an internal Docker network. Offline WebUI also
-uses a regular bridge for localhost publishing, which can provide outbound
-access while the host is connected. The offline image settings suppress
-automatic downloads and telemetry. Disconnecting the host isolates the entire
-deployment. [Networking and offline operation](../configuration.md#networking-and-offline-operation)
+`http://ollama-offline:11434` in both modes using an alias in the connected
+profile. WebUI is the only service with a published host port. The default
+browser address is `http://localhost:3000`, backed by `127.0.0.1:3000` on
+the host and port `8080` in the container.
+
+The online profile enables Ollama cloud features and automatic WebUI
+downloads by default. Offline settings disable Ollama cloud features and
+suppress automatic WebUI downloads. Both WebUI profiles opt out of telemetry.
+Offline WebUI's regular bridge can still provide outbound access while the
+host is connected. Physical disconnection isolates the host from external
+networks. [Networking and offline operation](../configuration.md#networking-and-offline-operation)
 
 ## Open Terminal workspaces
 
-When `[terminal_server] enabled = true`, both serving profiles start the
-Open Terminal provisioner. Open WebUI reaches it at
-`http://terminal-server:8000` over the internal `terminal-control` network.
+When `[terminal_server] enabled = true`, the launcher requires WebUI
+authentication and validates the configured bearer key before serving.
+Open WebUI reaches the provisioner at `http://terminal-server:8000` over
+the internal `terminal-control` network.
 WebUI supplies the authenticated account and, when available, the chat
 session. The provisioner authenticates the connection with the terminal bearer
 key and routes file requests, model commands and terminal streams to the
@@ -112,12 +143,17 @@ Docker Engine 26 and 27 use `inhibit_ipv4` to keep an IPv4 address off the
 host bridge. Docker Engine 28 and newer use the `isolated` gateway mode.
 [Workspace isolation and limits](../terminal-server.md#workspace-policy)
 
-With a configured APT source, Open WebUI can request packages for an
-authenticated chat. The provisioner runs APT in a disposable installer
-from that chat's image with access to the configured mirror and without
-the runner's data volumes or credentials. It publishes an image for the
-chat after APT succeeds. The new runner uses that image with either
-working directory. [Chat packages](../terminal-server.md#install-packages-for-a-chat)
+A configured `apt_source_file` replaces inherited sources during an image
+build. At startup, a Compose override mounts the source file and the
+launcher's bundled provisioner and runner scripts read-only. This enables
+per-chat installs using an already loaded image. The provisioner runs APT in
+a disposable installer based on the current chat image, with access to the
+configured mirror and without runner data volumes or credentials. An
+`apt_repository_dir` mounts a local repository read-only in a network-disabled
+installer. After APT succeeds, the provisioner publishes a chat-specific image.
+The next workspace request starts a runner from that image.
+[Package mirror](../terminal-server.md#package-mirror-for-image-builds) ·
+[Chat packages](../terminal-server.md#install-packages-for-a-chat)
 
 | Folder | Storage and lifetime |
 | --- | --- |
@@ -134,19 +170,24 @@ history. [Files and working directory](../terminal-server.md#use-the-terminal-fr
 The bundled deployment mounts the existing `open-webui` volume read-only in
 the provisioner. It checks saved chat ownership and existence in the WebUI
 SQLite database. After WebUI deletes a chat, the next successful cleanup pass
-removes its runner, network, chat volume and package image. Idle cleanup and provisioner
-shutdown remove runners and their networks while preserving named volumes.
+removes its runner, network, chat volume and package image. Saved chat
+images survive service shutdown.
+Temporary chat images are eligible for idle cleanup and are removed at
+provisioner shutdown. Idle cleanup and shutdown remove runners and their
+networks while preserving named volumes.
 [Workspace lifecycle](../terminal-server.md#workspace-policy)
 
 ## Backup and restore
 
 `loaf backup volumes --models-only` and `loaf restore volumes --models-only`
 use the same model-store format and implementation as `loaf export` and
-`loaf import`. Backup stages the store with `rsync` before compressing it.
-Restore uses `rsync` to publish blobs before manifests. The default merges
-with the destination. Add `--delete` to mirror the archive. Both operations
-stop the downloader and allow the selected Ollama serving container to keep
-running. [Model transfer](../transfer.md#transfer-models-between-existing-deployments)
+`loaf import`. Both use `rsync` in a disposable, network-disabled container
+from the local downloader image. Export stages the store before compressing
+it. Import validates the archive, then publishes missing blobs before updating
+manifests. The default merges with the destination. Add `--delete` to mirror the
+archive. Both operations stop the downloader and allow at most one running
+consumer of the volume, the selected deployment's serving backend.
+[Model transfer](../transfer.md#transfer-models-between-existing-deployments)
 
 `loaf backup` publishes one `YYYYMMDD-HHMM_local-ai-ferry/` folder per
 successful run in the default deployment. The folder has the matching
@@ -159,48 +200,51 @@ all available components. The archive uses the following members.
 | Member | Contents |
 | --- | --- |
 | `volumes.tar` | The `ollama` and `open-webui` volumes and the persistent per-account terminal volumes when included. |
-| `images.tar` | The three core Docker images and the matching Open Terminal image when available locally. Use `--no-terminal-server` to omit the terminal image. |
+| `images.tar` | The three core Docker images and the matching shared Open Terminal image when available locally. Chat package images stay on the source host. Use `--no-terminal-server` to omit the terminal image. |
 | `project.tar` | Configuration, saved Modelfiles and cached installers. Backups from source checkouts retain working files, Git history and the project virtualenv. |
 | `terminal.json` | With `volumes`, the per-account volume inventory and bearer key when `[terminal_server] include_in_backup = true`. |
 | `sha256.json` | The SHA-256 digest of each payload. |
 
-Backup stops all project services before capturing the volumes and publishes
+Backup stops all project services when capturing volumes and publishes
 the folder only after all selected payloads are complete. The default output
 directory is the Git-ignored `backup/` directory. Both commands use the
 configured `backup_dir` and accept `--backup-dir` for one run. Restore selects
 the folder it runs from, the folder containing its executable, or the
 newest backup for the chosen namespace. Use `loaf restore --archive PATH`
-to select a specific folder. To carry chat files
+to select a specific folder or archive file. To carry chat files
 in a terminal backup, move them into `/home/user` before running it.
 [Terminal backup contents](../terminal-server.md#offline-transfer-and-shutdown)
 
 Backups from a source checkout build the current executable before capturing
 Docker data. Standalone deployments package the executable that launched them.
 
-`loaf backup --verify` checks the executable and all payload hashes and
-reports platforms when images are included. Restore verifies the entire
-archive and rejects explicitly requested components that are absent. It
-loads selected images, extracts selected volumes into new or empty volumes
+`loaf backup --verify` checks all payload hashes and reports platforms when
+images are included. Selecting a bundle also checks its executable against
+`backup.json`. Restore verifies the entire archive and rejects explicitly
+requested components that are absent. It loads selected images, extracts
+selected volumes into new or empty volumes
 and recovers settings and Modelfiles when `project` is selected. A volume
 restore uses the matching local downloader image when images are omitted.
 It refuses volumes in use and restores the archived terminal key with the
 terminal volumes.
-By default, restore leaves services stopped. Add `--import` to start offline
-Ollama and apply saved Modelfiles after restoring volumes. The optional backup
+Restore starts services only when Modelfile replay is enabled. After restoring
+volumes, `--import` starts offline Ollama alone and applies saved Modelfiles.
+Add `--cpu` to run the replay on CPU. The optional backup
 `--export` step refreshes selected cached Modelfiles before capturing volumes. Both
 options run under the transfer's project lock.
 A prepared compatible host can restore and start offline without network
 access. [Backup and restore](../transfer.md)
 
-The release and backup executables use the same setup workflow. They
-supply Python and the packaged deployment files. `loaf setup` creates the
-default configuration and Docker link. `loaf restore` is optional and uses
-a deployment backup. The separate source archive contains the tagged repository
-files. [Release assets](../releases.md)
-Setup stores Python wheels in `install-cache/wheels/` and matching toolkit
-installers in `install-cache/deb/nvidia/`. On Debian 13, the optional Docker
-cache contains native Engine, CLI, Compose, Buildx and required packages
-under `install-cache/deb/docker/` with a local APT index. Each Docker cache
-targets one Debian release and package architecture. Git ignores
-`install-cache/`. [Debian installation](../installation.md#disconnected-debian-installation) ·
-[Host integrations](../installation.md#host-integrations)
+Standalone setup uses the archived bearer key when available and creates one
+if needed. Restore from inside a copied bundle moves the handoff into
+`backup/` and links the root launcher to `dist/loaf`. Use `loaf setup --all`
+inside a copied source checkout backup to recover the checkout and the Docker
+data included in the bundle in one operation. [Backup recovery](../transfer.md#debian-restore)
+
+Source setup caches Python wheels in `install-cache/wheels/` and matching
+NVIDIA Toolkit installers in `install-cache/deb/nvidia/`. On Debian 13,
+`--with-docker-deps` also prepares native Engine, CLI, Compose, Buildx and
+their required packages with a local APT index under
+`install-cache/deb/docker/`. Each Docker cache targets one Debian release and
+package architecture. Standalone setup can install matching packages from
+the backup with the same flag. [Debian installation](../installation.md#disconnected-debian-installation)

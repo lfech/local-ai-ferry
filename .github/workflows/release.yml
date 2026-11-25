@@ -13,7 +13,7 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -24,6 +24,8 @@ jobs:
           python-version: "3.13"
       - name: Build and check release assets
         run: bash scripts/build-release.sh "$GITHUB_REF_NAME" "$RUNNER_TEMP/loaf-release"
+      - name: Rehearse an offline handoff with the release executable
+        run: python3 python-package/tests/release_handoff.py "$RUNNER_TEMP/loaf-release/loaf"
       - name: Attach assets to a draft release
         env:
           GH_TOKEN: ${{ github.token }}

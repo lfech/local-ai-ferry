@@ -62,8 +62,11 @@ services:
     pull_policy: never
     build:
       context: ${LOAF_DOCKER_DIR:-./docker}/ollama-online
-      args:
+      dockerfile: ../ollama/Dockerfile
+      target: ollama-online
+      args: &ollama-build-args
         OLLAMA_IMAGE: ${OLLAMA_IMAGE:-${LOAF_INI_OLLAMA_IMAGE:-ollama/ollama:latest}}
+        OLLAMA_SOURCE:
     volumes:
       - ollama:/ollama
     # Has Internet access for manual `ollama pull` commands.
@@ -82,8 +85,9 @@ services:
     profiles: [offline]
     build:
       context: ${LOAF_DOCKER_DIR:-./docker}/ollama-offline
-      args:
-        OLLAMA_IMAGE: ${OLLAMA_IMAGE:-${LOAF_INI_OLLAMA_IMAGE:-ollama/ollama:latest}}
+      dockerfile: ../ollama/Dockerfile
+      target: ollama-offline
+      args: *ollama-build-args
     networks: [inference]
 
   open-webui:

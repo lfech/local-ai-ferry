@@ -102,13 +102,9 @@ def protected_files(project: Path) -> set[Path]:
     if (launcher.is_symlink() and launcher.readlink() == transfer.RESTORED_LAUNCHER
             and transfer.is_bundle(project / transfer.RESTORED_BACKUP_DIR)):
         paths.add(project / transfer.RESTORED_LAUNCHER)
-    try:
-        settings = config.load(project / "config")
-    except config.ConfigError:
-        # A broken settings file should still allow cleanup of the runtime.
-        pass
-    else:
-        paths.add(config.terminal_secret_path(project, settings.terminal_server_secret_file))
+    # An unreadable configuration can hide a key inside a cleanup target.
+    settings = config.load(project / "config")
+    paths.add(config.terminal_secret_path(project, settings.terminal_server_secret_file))
     return paths
 
 

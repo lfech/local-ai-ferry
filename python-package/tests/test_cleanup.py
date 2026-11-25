@@ -110,6 +110,19 @@ class CleanupTests(unittest.TestCase):
         self.assertIn(f"Keep {notes.parent}", output)
         self.assertEqual(notes.read_bytes(), b"fixture")
 
+    def test_full_refuses_to_remove_caches_with_invalid_configuration(self):
+        key = self.put(self.project / "install-cache/private", b"k" * 32)
+        self.put(self.project / "config/config.ini",
+                 b"[terminal_server]\nsecret_file = install-cache/private\n[webui]\nport = invalid\n")
+        for options in (("--dry-run",), ()):
+            with self.subTest(options=options):
+                status, output = self.invoke("--full", *options)
+                self.assertEqual(status, 1, output)
+                self.assertIn("[webui] port", output)
+                self.assertNotIn("Would remove", output)
+                self.assertEqual(key.read_bytes(), b"k" * 32)
+                self.assertTrue(self.runtime.is_dir())
+
     def test_full_keeps_the_launcher_linked_by_an_in_place_restore(self):
         binary = self.put(self.project / transfer.RESTORED_LAUNCHER)
         manifest = self.put(self.project / "backup/backup.json")

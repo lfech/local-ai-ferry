@@ -60,7 +60,7 @@ Compose **2.30.0 or newer** supports the `gpus: all` setting. Compose
 **2.26.1 through 2.29.x** can use the NVIDIA device reservation and produces a
 compatibility warning in `loaf status`. The documented Compose 2.40.3 build
 run used Buildx 0.20.1. Complete Docker and driver setup before disconnecting.
-[Compose service options](https://docs.docker.com/reference/compose-file/services/#gpus) · [Compose GPU reservations](https://docs.docker.com/compose/how-tos/gpu-support/) · [Verification record](verification-record.md)
+[Compose GPU setting](https://docs.docker.com/reference/compose-file/container-spec/#gpus) · [Compose GPU reservations](https://docs.docker.com/compose/how-tos/gpu-support/) · [Verification record](verification-record.md)
 
 ## Docker access
 

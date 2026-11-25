@@ -131,7 +131,7 @@ when starting from a prepared archive.
 | `online` / `offline` | Start Ollama and WebUI with the selected network profile. Add `--cpu` for CPU inference. |
 | `export` / `import` | Transfer the Ollama model store. Also available as `backup volumes --models-only` and `restore volumes --models-only`. [Model transfer](docs/transfer.md#transfer-models-between-existing-deployments) |
 | `backup` / `restore` | Select any combination of `images`, `volumes` and `project` for a deployment backup. [Component selection](docs/transfer.md#select-deployment-components) |
-| `backup --verify` | Check a backup's SHA-256 hashes and report image platforms without Docker. |
+| `backup --verify` | Check archive payload and bundled executable hashes, and report saved image platforms without Docker. |
 | `status` / `stop` | Check deployment readiness and list containers, or stop and remove containers across all profiles. [Keep stopped containers](docs/launcher.md#stop-and-remove-containers) |
 | `test` | Run the checkout's test suite. [Verification guide](docs/verification.md) |
 
@@ -221,10 +221,10 @@ See [configuration and offline behavior](docs/configuration.md).
 | [Backup and transfer](docs/transfer.md) | Model-only archives and full Debian deployment recovery |
 | [Development specification](docs/instructions/development.md) | Pending validation and development work |
 | [Development record](docs/development-record.md) | Dated implementation milestones |
-| [Architecture](docs/instructions/architecture.md) | Launcher, deployment and transfer design |
+| [Architecture](docs/instructions/architecture.md) | Launcher, CPU and GPU serving, Compose networks, Open Terminal and transfer design |
 | [Terminal server setup](docs/terminal-server.md) | Optional per-user Open Terminal workspaces, credentials and acceptance checks |
 | [Troubleshooting](docs/troubleshooting.md) | Context errors, GPU access, imports and connection checks |
-| [Verification guide](docs/verification.md) | Unit, shell, Docker, GPU, archive and catalog checks |
+| [Verification guide](docs/verification.md) | Unit, Docker and GPU checks, compact images and release handoff |
 | [Verification record](docs/verification-record.md) | Dated test results |
 | [Releases](docs/releases.md) | Version tags, GitHub and Gitea drafts, and release assets |
 

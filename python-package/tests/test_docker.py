@@ -79,8 +79,13 @@ class ComposeContractTests(unittest.TestCase):
         for name in builders:
             with self.subTest(service=name):
                 build = self.services[name]["build"]
-                self.assertEqual(Path(build["context"]).resolve(), (DOCKER_DIR / name).resolve())
-                self.assertTrue((Path(build["context"]) / "Dockerfile").is_file())
+                context = Path(build["context"])
+                self.assertEqual(context.resolve(), (DOCKER_DIR / name).resolve())
+                dockerfile = context / build.get("dockerfile", "Dockerfile")
+                self.assertTrue(dockerfile.is_file())
+                if name.startswith("ollama-"):
+                    self.assertEqual(dockerfile.resolve(), DOCKER_DIR / "ollama/Dockerfile")
+                    self.assertEqual(build["target"], name)
 
     def test_ollama_profiles_share_model_storage(self):
         self.assertEqual(self.rendered["volumes"]["ollama"]["name"], "ollama")
@@ -204,6 +209,7 @@ class ComposeContractTests(unittest.TestCase):
                 }
             }
             env["OLLAMA_IMAGE"] = "registry.example/ollama:shell"
+            env["OLLAMA_SOURCE"] = "registry.example/ollama:source"
             compose = cli.Compose(project, settings=config.load(project))
             with patch.dict(os.environ, env, clear=True):
                 env.update(compose.variables())
@@ -211,7 +217,10 @@ class ComposeContractTests(unittest.TestCase):
             resolved = json.loads(compose_command(compose, step, env=env))
         services = resolved["services"]
         self.assertEqual(Path(services["ollama-online"]["build"]["context"]), DOCKER_DIR / "ollama-online")
-        self.assertEqual(services["ollama-online"]["build"]["args"]["OLLAMA_IMAGE"], env["OLLAMA_IMAGE"])
+        for name in ("ollama-online", "ollama-offline"):
+            args = services[name]["build"]["args"]
+            self.assertEqual(args["OLLAMA_IMAGE"], env["OLLAMA_IMAGE"])
+            self.assertEqual(args["OLLAMA_SOURCE"], env["OLLAMA_SOURCE"])
         self.assertEqual(services["open-webui"]["build"]["args"]["OPEN_WEBUI_IMAGE"], "registry.example/webui:pinned")
         offline = services["ollama-offline"]["environment"]
         self.assertEqual(offline["OLLAMA_CONTEXT_LENGTH"], "12288")

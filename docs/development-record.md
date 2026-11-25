@@ -7,6 +7,52 @@ Git milestones use commit timestamps. Working-tree milestones use the
 associated verification time where it was recorded.
 Earlier entries use the current names for commands, paths and artifacts.
 
+## 2026-11-25 22:17 CET — Bundled Ollama build recipes
+
+- Packaged the compact CPU and CUDA 13 recipes in the Dockerfile shared by
+  the Ollama downloader and serving images. `loaf build` and `loaf upgrade`
+  use the selected recipe. INIs that use the earlier local test tags select
+  their bundled equivalents. [Ollama build selection](configuration.md#select-an-ollama-build-recipe)
+- The release chat and cold handoff checks build through the candidate's
+  packaged recipe. [Verification](verification.md#fast-chat-check-with-compact-images)
+
+## 2026-11-25 22:01 CET — Backup compression
+
+- Set gzip level 4 for deployment backups and model-only exports. The
+  release handoff uses the candidate's default unless given an explicit
+  level. Recompressed the retained handoff fixture with the same tar
+  payload. [Transfer guide](transfer.md#archive-contents) ·
+  [Release acceptance](verification.md#check-a-release-candidate)
+
+## 2026-11-25 21:55 CET — Compact inference and release handoff
+
+- Added small CPU and CUDA 13 Ollama test bases and pinned Open WebUI slim
+  for authenticated SmolLM2 chat checks. Annotated the compact and full
+  settings with measured image sizes. The full model suite also checks
+  WebUI authentication and model discovery.
+  [Compact image checks](verification.md#fast-chat-check-with-compact-images)
+- Added a standalone release handoff check for GitHub and Gitea. It uses a
+  disconnected Debian Docker daemon, restores a synthetic account and
+  chat from read-only media, and exercises a corrupt model blob.
+  [Release acceptance](verification.md#check-a-release-candidate)
+- Made cleanup refuse an invalid configuration so it can protect a custom
+  terminal key. Added a shared compatibility test matrix for launcher and
+  provisioner key readers. [Cleanup](launcher.md#clean-generated-files) ·
+  [Terminal key format](terminal-server.md#enable-and-connect)
+
+## 2026-11-25 20:58 CET — Documentation and architecture audit
+
+- Documented the Compose service and network topology, CPU and NVIDIA
+  serving, and model store layouts. [Architecture](instructions/architecture.md)
+- Clarified Open Terminal package installation, which files survive runner
+  replacement, and what transfers with a deployment backup.
+  [Chat packages](terminal-server.md#install-packages-for-a-chat) ·
+  [Backup contents](transfer.md#archive-contents)
+- Corrected archive verification and restore behavior, and documented the
+  loopback publishing limitation on older Docker Engine releases.
+  [Restore behavior](transfer.md#restore-behavior) ·
+  [Local network access](local-network.md#remove-local-network-publishing)
+
 ## 2026-11-25 16:55 CET — Chat-scoped APT packages
 
 - Added the `install_chat_packages` Open Terminal tool. It runs APT in a

@@ -183,7 +183,8 @@ RUN_DOCKER_TESTS=1 RUN_GPU_TESTS=1 .venv/bin/loaf test -v
 The individual cases check the source and alias Modelfiles, recovery of a
 missing manifest, explicit replay of a new definition, and recovery from an
 invalid definition that prevents WebUI startup. The inference case checks
-the 16,384-token default and full GPU placement. The transfer case switches
+authenticated model discovery through WebUI, the 16,384-token default
+and full GPU placement. The transfer case switches
 to the connected profile, checks WebUI health on a temporary loopback port,
 and mirrors the model store with `--delete`. It verifies that the added
 alias disappears and both connected containers keep their IDs.
@@ -237,6 +238,68 @@ internal workspace bridges for comparison. Set
 Local HTTP and WebSocket proxy tests require `aiohttp`. The local
 command-timeout test requires the Open Terminal Python package pinned
 in the terminal image and `httpx`.
+
+## Fast chat check with compact images
+
+From the checkout root, run the short authenticated chat check against a
+built standalone executable. It uses SmolLM2-135M-Instruct Q2_K with one
+88 MB weight file and 1,024 context tokens. It checks sign-in enforcement,
+model discovery, a completed reply, saved chat creation, and device
+placement. Use the full [model workflow](#full-isolated-gpu-workflow) for
+the Ministral, long-context, and transfer regression checks.
+[Model and quantization](https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF)
+
+```bash
+python3 python-package/tests/release_handoff.py dist/loaf --chat-only
+python3 python-package/tests/release_handoff.py dist/loaf --chat-only --gpu
+```
+
+The fixture selects the candidate's bundled `loaf-ollama-cpu` or
+`loaf-ollama-cuda13` recipe and uses upstream Open WebUI slim for SQLite
+and chat. The candidate runs `loaf build` with those settings. For a
+separate test deployment, select the same settings in `config.ini` and
+run `loaf build`. A compatible NVIDIA host driver and container runtime
+are required for the GPU check.
+[Ollama build selection](configuration.md#select-an-ollama-build-recipe) ·
+[Open WebUI image variants](https://docs.openwebui.com/getting-started/quick-start/#image-variants)
+
+When the Docker builder can use a cached Ollama 0.40.18 source image, pass
+its reference with `--ollama-source`. The image must contain the runtime
+files for the selected recipe.
+
+## Check a release candidate
+
+Run the compact handoff against the exact standalone executable you intend
+to release. The GitHub and Gitea release jobs run it before uploading
+draft assets. It needs a connected Linux amd64 preparation host with a
+local rootful Docker daemon and Compose. The destination is a disposable
+Debian container with its own Docker Engine, an empty image and volume
+store, and no external network. The outer daemon must allow the
+destination container to run its nested daemon with `--privileged`.
+[Release workflow](releases.md)
+
+```bash
+python3 python-package/tests/release_handoff.py dist/loaf
+```
+
+The check copies a real backup through a read-only mount. The destination
+runs the bundled executable's setup, restore, and CPU offline commands.
+The HTTP check signs in with the restored account, reads the saved
+conversation, and generates a follow-up. It then damages one blob
+in the disposable destination, checks that preflight still sees the model,
+and confirms that inference fails. The fixture has one chat model and the
+three core images.
+
+Use `--keep PATH` to retain the synthetic backup and its test login in a
+new directory on a disk-backed filesystem. The rehearsal uses the release
+executable's backup compression setting, which defaults to gzip level 4.
+Use `--compression LEVEL` to override it with a level from 0 through 9.
+
+```bash
+mkdir -p backup
+python3 python-package/tests/release_handoff.py dist/loaf \
+    --keep backup/release-handoff-fixture
+```
 
 ## Check the model example specifiers
 

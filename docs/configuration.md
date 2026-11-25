@@ -8,8 +8,8 @@ Run commands from the project directory unless a step says otherwise.
 
 | Service | Image directory | Runtime role |
 | --- | --- | --- |
-| `ollama-online` | [ollama-online](../python-package/src/loaf/data/docker/ollama-online/Dockerfile) | Model downloads and exports in the download profile |
-| `ollama-offline` | [ollama-offline](../python-package/src/loaf/data/docker/ollama-offline/Dockerfile) | Startup imports and inference in the offline profile |
+| `ollama-online` | [ollama-online](../python-package/src/loaf/data/docker/ollama-online/) | Model downloads and exports in the download profile |
+| `ollama-offline` | [ollama-offline](../python-package/src/loaf/data/docker/ollama-offline/) | Startup imports and inference in the offline profile |
 | `open-webui` | [open-webui](../python-package/src/loaf/data/docker/open-webui/Dockerfile) | Browser interface; offline profile |
 | `ollama-connected` | Same image as `ollama-offline` | Startup imports and inference with outbound internet access |
 | `open-webui-online` | Same image as `open-webui` | Browser interface with outbound internet access |
@@ -79,6 +79,30 @@ repository stored on the Docker host.
 [Terminal server setup](terminal-server.md#enable-and-connect) · [Package mirror](terminal-server.md#package-mirror-for-image-builds)
 [Chat packages](terminal-server.md#install-packages-for-a-chat)
 
+### Select an Ollama build recipe
+
+Set `[images] ollama_image` in `config/config.ini`, then run `loaf build`
+on the connected preparation host. The packaged Compose project builds
+the selected recipe for both the downloader and the inference backend.
+The same values work with the `OLLAMA_IMAGE` override for direct Compose use.
+
+| `ollama_image` | Runtime |
+| --- | --- |
+| `loaf-ollama-cpu` | CPU only. Serve with `loaf offline --cpu` or `loaf online --cpu`. |
+| `loaf-ollama-cuda13` | CPU and CUDA 13. GPU serving requires a compatible NVIDIA driver and container runtime. |
+| `ollama/ollama:latest` | Full upstream Ollama image. Other image references also work. |
+
+The compact recipes copy runtime files from Ollama 0.40.18. The first
+build can fetch the full upstream source image. The annotated sizes in
+`config.ini` refer to the resulting images. `loaf upgrade` refreshes the
+images used by the selected recipe.
+[Ollama Dockerfile](../python-package/src/loaf/data/docker/ollama/Dockerfile) ·
+[Docker multi-stage builds](https://docs.docker.com/build/building/multi-stage/)
+
+With the packaged Compose project, older INIs that select
+`local/loaf-ollama-cpu-test:0.40.18` or `local/loaf-ollama-cuda-test:0.40.18`
+resolve to the corresponding bundled recipe.
+
 ### Overrides
 
 - CLI options override the matching INI values. Use `--no-export` and
@@ -124,7 +148,8 @@ The archive includes the project's `config.ini`. Backups made from a
 checkout also include its source files and Git history. Keep credentials in
 the appropriate application or host settings. Docker image tag namespaces,
 volume mount paths, and offline network isolation are managed by the launcher.
-Use `--archive` to choose a specific backup folder for one invocation.
+Use `--archive` to choose a specific backup folder or archive file for one
+restore.
 
 ## WebUI settings
 
@@ -161,8 +186,10 @@ Ollama model rejects a follow-up after tool results.
 
 Choose the authentication mode before creating users in a fresh WebUI volume.
 A separate versioned deployment gives you a fresh volume for single-user mode.
-Anyone who can reach the instance can use it, so keep the default loopback
-binding for private local use. [Open WebUI single-user mode](https://docs.openwebui.com/getting-started/quick-start/#single-user-mode-no-login) · [Versioned deployments](launcher.md#run-a-versioned-deployment)
+Anyone who can reach an instance without sign-in can use it. Keep the default
+loopback binding and check the Docker version's loopback behavior before using
+this mode on a connected host. [Open WebUI single-user mode](https://docs.openwebui.com/getting-started/quick-start/#single-user-mode-no-login) ·
+[Docker loopback publishing](local-network.md#remove-local-network-publishing)
 
 ## Networking and offline operation
 

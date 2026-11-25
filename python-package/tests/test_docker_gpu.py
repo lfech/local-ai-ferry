@@ -3,6 +3,7 @@
 from copy import deepcopy
 import json
 from pathlib import Path
+from secrets import token_urlsafe
 import tempfile
 from textwrap import dedent
 import unittest
@@ -11,6 +12,7 @@ from uuid import uuid4
 
 from loaf import cli, transfer
 from tests.docker_support import CPU_TESTS, GPU_TESTS, command, compose_command, compose_config
+from tests.webui_chat import WebUIChat
 
 
 CACHED_MODEL = "hf.co/mistralai/Ministral-3-3B-Reasoning-2512-GGUF:Q4_K_M"
@@ -97,7 +99,7 @@ class ModelWorkflowTests(unittest.TestCase):
             "docker", "run", "--rm", "--pull", "never", "--network", "none", "--read-only",
             "--mount", f"type=volume,source={self.seed_volume},target=/seed,volume-nocopy,readonly",
             "--mount", f"type=volume,source={volume},target=/target,volume-nocopy",
-            "--entrypoint", "/bin/cp", transfer.IMAGES[2], "-a", "/seed/.", "/target",
+            "--entrypoint", "/bin/cp", transfer.IMAGES[2], "-a", "--reflink=auto", "/seed/.", "/target",
         ])
         return compose
 
@@ -136,6 +138,7 @@ class ModelWorkflowTests(unittest.TestCase):
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with opener.open(f"http://{address}/health", timeout=15) as response:
             self.assertTrue(json.load(response)["status"])
+        return f"http://{address}"
 
     def container_id(self, compose, profile, service):
         container = self.invoke(compose, profile, "ps", "--all", "--quiet", service).strip()
@@ -161,7 +164,10 @@ class ModelWorkflowTests(unittest.TestCase):
     def test_offline_inference_uses_the_selected_device_at_default_context(self):
         compose = self.new_deployment()
         self.workflow(compose, "offline")
-        self.assert_webui_healthy(compose, "offline")
+        webui = WebUIChat(self.assert_webui_healthy(compose, "offline"))
+        webui.require_sign_in()
+        webui.sign_up({"email": "inference@example.invalid", "password": token_urlsafe(24)})
+        webui.require_model(DISPLAY_NAME)
         self.assertIn(DISPLAY_NAME, self.model_names(compose, "offline"))
         # Keep the long prompt for the GPU context regression check.
         prompt = "Reply with a short greeting."

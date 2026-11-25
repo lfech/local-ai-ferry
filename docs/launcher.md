@@ -279,6 +279,10 @@ backup archive is kept. The active `dist/loaf` from an in-place restore
 is kept with its root launcher link. Lock files stay in place so commands can coordinate
 cleanup with active work.
 
+If cleanup reports an invalid project configuration, correct it and retry.
+Cleanup needs to resolve the configured terminal key path before deleting
+anything, including a key stored inside a generated directory.
+
 Use the original standalone executable to run setup again after a full
 clean. In a source checkout, run the source setup command to recreate
 the virtualenv. [Quick Setup](../README.md#quick-setup)
