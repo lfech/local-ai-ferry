@@ -23,7 +23,10 @@ the BSD 3-Clause terms for this project.
 - Open WebUI Tether (optional desktop app) — Open WebUI Enterprise
   License with a personal-use exception
   https://github.com/open-webui/tether/blob/main/LICENSE
-- SmolLM2-135M-Instruct and its Q2_K GGUF — Apache-2.0
+- Granite 4.0 H 350M and its Q4_K_M GGUF, the default model — Apache-2.0
+  https://huggingface.co/ibm-granite/granite-4.0-h-350m
+  https://huggingface.co/ibm-granite/granite-4.0-h-350m-GGUF
+- SmolLM2-135M-Instruct and its Q2_K GGUF, the release test model — Apache-2.0
   https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct
   https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF
 - Ministral 3 3B Reasoning 2512 GGUF — Apache-2.0

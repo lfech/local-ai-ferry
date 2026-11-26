@@ -4,11 +4,14 @@ from configparser import ConfigParser, Error as INIError
 from dataclasses import dataclass
 from ipaddress import ip_address
 import json
+import os
 from pathlib import Path
 import re
 
 
 CONFIG_NAME = "config.ini"
+# The system layer between the packaged defaults and a project's config/.
+SYSTEM_CONFIG_DIR = Path("/etc/loaf")
 DEFAULT_WAIT_TIMEOUT = 300
 DEFAULT_COMPRESSION_LEVEL = 4
 OPEN_TERMINAL_IMAGE = "ghcr.io/open-webui/open-terminal:0.17.20-slim"
@@ -29,8 +32,8 @@ class Settings:
     version: str = ""
     models_file: Path | None = None
     wait_timeout: int = DEFAULT_WAIT_TIMEOUT
-    ollama_image: str = "ollama/ollama:latest"
-    webui_image: str = "ghcr.io/open-webui/open-webui:main"
+    ollama_image: str = "loaf-ollama-cuda13"
+    webui_image: str = "ghcr.io/open-webui/open-webui:v0.13.4-slim"
     terminal_server_image: str = OPEN_TERMINAL_IMAGE
     context_length: int = 16384
     startup_timeout: int = 60
@@ -148,6 +151,12 @@ def optional_path_value(value: str) -> Path | None:
     return Path(value) if value else None
 
 
+def system_config_value(value: str) -> Path | None:
+    if value and not Path(value).is_absolute():
+        raise ValueError("expected an absolute directory, or blank to skip the system configuration")
+    return Path(value) if value else None
+
+
 def image_value(value: str) -> str:
     if not value or any(character.isspace() for character in value):
         raise ValueError("expected a nonempty image reference without spaces")
@@ -179,7 +188,10 @@ def apt_source_file_value(value: str) -> Path | None:
 
 
 SECTIONS = {
-    "launcher": {"version": version_value, "models_file": optional_path_value, "wait_timeout": positive_int},
+    "launcher": {
+        "version": version_value, "models_file": optional_path_value, "wait_timeout": positive_int,
+        "system_config": system_config_value,
+    },
     "images": {
         "ollama_image": image_value, "webui_image": image_value, "terminal_server_image": image_value,
     },
@@ -215,7 +227,39 @@ def load(*directories: Path) -> Settings:
     values = {}
     for directory in dict.fromkeys(directories):
         values.update(_read_values(directory / CONFIG_NAME))
+    # system_config selects a layer and is not a deployment setting.
+    values.pop("system_config", None)
     return Settings(**values)
+
+
+def system_directory() -> Path | None:
+    """The default system configuration. Tests use LOAF_SYSTEM_CONFIG_DIR to replace it."""
+    configured = os.environ.get("LOAF_SYSTEM_CONFIG_DIR")
+    if configured is None:
+        return SYSTEM_CONFIG_DIR
+    return Path(configured) if configured else None
+
+
+def layers(defaults: Path, local: Path) -> tuple[Path, ...]:
+    """Return the packaged defaults, the system configuration and the project's configuration.
+
+    Later directories override earlier ones. Only the project's file can move or skip the system layer.
+    """
+    system = system_directory()
+    values = _read_values(local / CONFIG_NAME)
+    if "system_config" in values:
+        system = values["system_config"]
+    if system is not None and "system_config" in _read_values(system / CONFIG_NAME):
+        raise ConfigError(f"{system / CONFIG_NAME}: set [launcher] system_config only in a project's config.ini.")
+    return tuple(dict.fromkeys(directory for directory in (defaults, system, local) if directory is not None))
+
+
+def shared_system_deployment(layer_directories: tuple[Path, ...], version: str) -> Path | None:
+    """Return the system configuration when this project uses the same Docker namespace as the system deployment."""
+    if len(layer_directories) < 3 or not (layer_directories[1] / CONFIG_NAME).is_file():
+        return None
+    system = load(*layer_directories[:2])
+    return layer_directories[1] if namespace(system.version) == namespace(version) else None
 
 
 def read_terminal_secret(path: Path) -> bytes:

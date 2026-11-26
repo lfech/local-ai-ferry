@@ -1,0 +1,9 @@
+#!/bin/sh
+# Remove the bytecode compiled for the package's Python modules.
+set -e
+if command -v py3clean >/dev/null 2>&1; then
+    py3clean -p loaf
+else
+    find /usr/lib/python3/dist-packages/loaf -type d -name __pycache__ -prune -exec rm -rf {} +
+fi
+exit 0

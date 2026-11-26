@@ -1,0 +1,21 @@
+[Unit]
+Description=Local AI Ferry offline deployment
+Documentation=man:loaf(1)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+WorkingDirectory=/var/lib/loaf
+ExecStart=/usr/bin/loaf --system offline --attach
+ExecStop=/usr/bin/loaf --system stop
+StandardOutput=null
+StandardError=journal
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

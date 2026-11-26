@@ -2,7 +2,7 @@
 # Application data persists at /app/backend/data through the Compose volume.
 
 # --- Upstream application and local-backend defaults ---
-ARG OPEN_WEBUI_IMAGE=ghcr.io/open-webui/open-webui:main
+ARG OPEN_WEBUI_IMAGE=ghcr.io/open-webui/open-webui:v0.13.4-slim
 FROM ${OPEN_WEBUI_IMAGE}
 
 # Disable the unused API backend, automatic online fetches and telemetry.

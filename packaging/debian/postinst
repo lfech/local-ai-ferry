@@ -1,0 +1,26 @@
+#!/bin/sh
+# Prepare the system deployment directories and its terminal server key.
+set -e
+if [ "$1" = configure ]; then
+    group=root
+    if getent group docker >/dev/null; then
+        group=docker
+    fi
+    # Root, members of the docker group and the systemd service share the system deployment.
+    chown "root:$group" /etc/loaf
+    chmod 0750 /etc/loaf
+    install -d -m 2770 -o root -g "$group" /var/lib/loaf /var/lib/loaf/backup
+    if [ ! -e /etc/loaf/terminal-server.key ]; then
+        loaf --system setup --terminal-server-key >/dev/null
+        chgrp "$group" /etc/loaf/terminal-server.key
+        chmod 0640 /etc/loaf/terminal-server.key
+    fi
+    # Compile now so that root never leaves untracked bytecode in dist-packages.
+    if command -v py3compile >/dev/null 2>&1; then
+        py3compile -p loaf
+    fi
+    if [ -d /run/systemd/system ]; then
+        systemctl --system daemon-reload >/dev/null || true
+    fi
+fi
+exit 0

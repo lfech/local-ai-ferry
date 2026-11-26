@@ -8,27 +8,37 @@ Use Debian 12 or 13, amd64, with Python 3.10 or newer. The default serving
 mode requires a compatible NVIDIA GPU. A preparation host can serve on CPU
 with `loaf online --cpu` or `loaf offline --cpu`. [CPU serving](launcher.md#serve-on-cpu)
 These steps use the native, system-wide Docker Engine. Use `sudo` for package
-installation, runtime configuration and service administration.
+installation, runtime configuration and service administration. Debian 12
+ships Docker 20.10 and Compose 1.29, so it needs Docker's repository. The
+`loaf` Debian package is an alternative to the source and standalone
+installations. [Debian package](installation.md#debian-package)
 
 ## Debian in WSL2
 
 On Windows, use a Debian WSL2 distribution with systemd enabled. For GPU
-inference, install an NVIDIA Windows driver that supports WSL2, then run
+inference, install an NVIDIA Windows driver from the 580 branch or newer with
+WSL2 support, then run
 `nvidia-smi` inside Debian to check GPU passthrough. Install Docker Engine
 inside that distribution. The native Debian GPU driver installation below
 applies to a bare-metal Debian host. [Microsoft WSL systemd guide](https://learn.microsoft.com/en-us/windows/wsl/systemd) · [NVIDIA CUDA on WSL](https://docs.nvidia.com/cuda/wsl-user-guide/index.html)
 
 ## Prepare Debian before disconnecting it
 
-For GPU inference on native Debian, first install a compatible NVIDIA driver using the
+The default CUDA 13 Ollama build needs NVIDIA driver 580 or newer, and the
+CUDA 12 build needs 550 or newer. Debian 13's own driver package, version
+550, works with the CUDA 12 build. Debian 12's package, version 535, is older
+than Ollama supports, so use NVIDIA's repository there.
+[Ollama build selection](configuration.md#select-an-ollama-build-recipe)
+
+For GPU inference on native Debian, first install the driver using the
 [NVIDIA Debian driver guide](https://docs.nvidia.com/datacenter/tesla/driver-installation-guide/latest/debian.html),
-reboot, and confirm that this command lists the GPU:
+reboot, and confirm that this command lists the GPU and driver version:
 
 ```bash
 nvidia-smi
 ```
 
-On Debian 13, [install Docker with loaf](#install-docker-and-cache-its-packages).
+On Debian 12 or 13, [install Docker with loaf](#install-docker-and-cache-its-packages).
 
 ### Install Docker from Docker's repository
 
@@ -84,7 +94,7 @@ This works before the `loaf` console command is installed.
 
 ```bash
 PYTHONPATH=python-package/src python3 -m loaf setup
-.venv/bin/loaf --help
+./loaf --help
 ```
 
 If you select Python with pyenv, run the first command with that interpreter.
@@ -109,20 +119,26 @@ For offline recovery, see [Disconnected installation](installation.md#disconnect
 
 ### Install Docker and cache its packages
 
-On a connected Debian 13 host, run setup with the Docker flag:
+On a connected Debian 12 or 13 host, run setup with the Docker flag:
 
 ```bash
 PYTHONPATH=python-package/src python3 -m loaf setup --with-docker-deps
 ```
 
-Setup caches Debian's `docker.io`, `docker-cli`, `docker-compose`,
-`docker-buildx`, and their required packages under
-`install-cache/deb/docker/trixie-<architecture>/`. It installs Docker
-from that cache when the Engine, CLI, Compose, or Buildx is missing.
-Use the same Debian release and package architecture on the target.
+On Debian 13, setup caches Debian's `docker.io`, `docker-cli`,
+`docker-compose`, `docker-buildx`, and their required packages. Debian 12's
+own Docker is too old, so setup caches `docker-ce`, `docker-ce-cli`,
+`containerd.io`, `docker-compose-plugin` and `docker-buildx-plugin` from
+Docker's repository. It checks Docker's signing key against a pinned SHA-256
+and resolves the packages with a private APT state, without changing the
+host's sources. The cache is `install-cache/deb/docker/<release>-<architecture>/`.
+Setup installs Docker from that cache when the Engine, CLI, Compose, or
+Buildx is missing. Use the same Debian release and package architecture on
+the target. The download needs `ca-certificates`.
 After installation, enable Docker with `sudo systemctl enable --now docker`
 and give your login [Docker access](#docker-access).
 [Debian Docker packages](https://packages.debian.org/trixie/docker.io) ·
+[Docker's Debian repository](https://docs.docker.com/engine/install/debian/) ·
 [Offline installation](installation.md#disconnected-debian-installation)
 
 ## Use a prepared archive
@@ -136,7 +152,7 @@ Then start or resume inference. [Debian restore](transfer.md#debian-restore)
 ```
 
 Backend startup applies saved Modelfiles automatically. For a model-only
-archive, use `.venv/bin/loaf import --archive PATH` on an existing deployment.
+archive, use `./loaf import --archive PATH` on an existing deployment.
 [Model transfer](transfer.md#transfer-models-between-existing-deployments)
 
 ## Verify and open WebUI
@@ -164,9 +180,9 @@ On a connected Debian host, choose your models in a local `config/models.ini`
 or use the packaged selection. Prepare them after installing `loaf`.
 
 ```bash
-.venv/bin/loaf build
-.venv/bin/loaf download
-.venv/bin/loaf offline
+./loaf build
+./loaf download
+./loaf offline
 ```
 
 To try the 8 GB example, set `models_file = model-examples/models.8gb.ini`
@@ -179,15 +195,15 @@ another computer, use [Debian backup](transfer.md#debian-backup).
 ## Stop and inspect
 
 ```bash
-.venv/bin/loaf link-docker-project
+./loaf link-docker-project
 (
     cd docker-project
     docker compose --profile offline exec ollama-offline ollama ps
     docker compose --profile offline logs --tail 50 ollama-offline
 )
-.venv/bin/loaf stop
+./loaf stop
 ```
 
 The final command removes service containers. Collect their logs first or use
-`.venv/bin/loaf stop -n` to keep them. Start again with `.venv/bin/loaf offline`.
+`./loaf stop -n` to keep them. Start again with `./loaf offline`.
 Data remains in the volumes. [Stop options](launcher.md#stop-and-remove-containers)

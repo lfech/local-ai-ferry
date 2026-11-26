@@ -73,6 +73,11 @@ In WSL2, use a Windows NVIDIA driver with WSL2 support. For both native Debian
 and Debian in WSL2, configure the NVIDIA Container Toolkit on the Docker Engine
 host. [Debian setup](debian.md)
 
+The default `loaf-ollama-cuda13` build needs NVIDIA driver 580 or newer.
+`nvidia-smi` on the host shows the driver version. For driver 550 to 579, set
+`[images] ollama_image = loaf-ollama-cuda12` and run `loaf build` while
+connected. [Ollama build selection](configuration.md#select-an-ollama-build-recipe)
+
 ```bash
 (
     cd docker-project
@@ -153,6 +158,21 @@ To set the working directory for the model, use the **Working Directory**
 folder button next to the terminal selector below the chat input.
 [Terminal workspace folders](terminal-server.md#use-the-terminal-from-a-model)
 
+## Build requests additional privileges
+
+Buildx 0.37.2 and newer check each local file a Compose build reads.
+Compose before 5.7.0 grants only the build contexts. Buildx also allows files
+under its working directory, which is the project directory when `loaf` runs
+Compose. The packaged images keep their Dockerfiles and default inputs inside
+their contexts.
+
+A terminal `apt_source_file` outside the project directory can still stop
+`loaf build` with `additional privileges requested`, or with a prompt for
+read access in a terminal. Move the file into the project, for example under
+`config/`, or update Docker Compose to 5.7.0 or newer.
+[Package mirror](terminal-server.md#package-mirror-for-image-builds) ·
+[Compose build inputs](https://github.com/docker/compose/commit/43a5d5a253)
+
 ## Launcher busy or interrupted
 
 Wait for the other launcher in this checkout to finish. The `.run.lock` file can
@@ -168,6 +188,6 @@ change, check the session's [Docker access](debian.md#docker-access).
 
 Run `loaf` from the checkout or from the directory containing your
 `docker-project` link. Use `--project-dir PATH` to select either location.
-Use `.venv/bin/loaf` or activate `.venv` with `source .venv/bin/activate`.
+Use `./loaf` or activate `.venv` with `source .venv/bin/activate`.
 If the project moved, run the [installer](debian.md#install-the-loaf-command)
 again.

@@ -14,16 +14,17 @@ from pathlib import Path, PurePosixPath
 import posixpath
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
 from tempfile import NamedTemporaryFile, TemporaryDirectory, TemporaryFile
 from typing import Callable
 
-from . import config
+from . import config, locks
 from .progress import Progress, TrackedStream
 from .setup import (
-    INSTALL_CACHE, PYTHON_PACKAGE_DIR, PYTHON_WHEEL_DIR, TOOLKIT_DIR, WHEEL_CACHE_RECORD,
+    INSTALL_CACHE, PYTHON_PACKAGE_DIR, PYTHON_WHEEL_DIR, TEST_WHEEL_RECORD, TOOLKIT_DIR, WHEEL_CACHE_RECORD,
     docker_installer_files, file_digest, install_backup_host_packages, new_terminal_key, prepare_python_wheels,
     toolkit_files,
 )
@@ -38,7 +39,7 @@ CHECKOUT_RESERVED_PATHS = {RESTORED_BACKUP_DIR, BUNDLE_MANIFEST, "dist", "docker
 EXECUTABLE_HEADER = b"#!/bin/bash\n# loaf standalone backup launcher v1\n"
 CONFIG_SUFFIXES = {".ini", ".model", ".list", ".sources"}
 MODEL_ARCHIVE_NAME = "loaf-volumes.tar.gz"
-COMPONENTS = ("volumes", "images", "project")
+COMPONENTS = ("volumes", "images", "project", "source")
 MEMBERS = tuple(f"{component}.tar" for component in COMPONENTS)
 CHECKSUMS = "sha256.json"
 TERMINAL_METADATA = "terminal.json"
@@ -233,6 +234,11 @@ def read_bundle(directory: Path, *, verify: bool = True) -> BackupBundle:
     return BackupBundle(archive, version, executable)
 
 
+def file_modes(directory: Path) -> tuple[int, int]:
+    """Return the modes for new private files and executables, readable by a shared directory's group."""
+    return (0o640, 0o750) if locks.shared_directory(directory) else (0o600, 0o700)
+
+
 def backup_bundle(project: Path, destination: Path, prepare_volumes: Callable[[], None], *,
                   version: str, executable: Path | None = None, **options) -> None:
     if destination.is_relative_to(project / ".git"):
@@ -242,83 +248,98 @@ def backup_bundle(project: Path, destination: Path, prepare_volumes: Callable[[]
     elif not standalone_executable(executable):
         raise TransferError(f"The build did not produce a standalone executable at {executable}.")
     destination.parent.mkdir(parents=True, exist_ok=True)
+    private, runnable = file_modes(destination.parent)
     with TemporaryDirectory(prefix=".loaf-backup-", dir=destination.parent) as folder:
         bundle = Path(folder) / destination.name
-        bundle.mkdir(mode=0o700)
+        bundle.mkdir()
+        bundle.chmod(runnable | (bundle.stat().st_mode & stat.S_ISGID))
         copy = bundle / "loaf"
         shutil.copyfile(executable, copy)
-        copy.chmod(0o700)
+        copy.chmod(runnable)
         archive = bundle / f"{destination.name}.tar.gz"
         manifest = {"archive": archive.name, "loaf_sha256": file_digest(copy), "version": version}
         (bundle / BUNDLE_MANIFEST).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        (bundle / BUNDLE_MANIFEST).chmod(private)
         backup(project, archive, prepare_volumes, namespace=config.namespace(version), **options)
         bundle.rename(destination)
 
 
+def checkout_paths(project: Path) -> set[Path] | None:
+    """List the checkout's tracked and unignored files, or None outside a Git checkout."""
+    git_dir = project / ".git"
+    if not git_dir.is_dir() or git_dir.is_symlink():
+        return None
+    # Scope Git trust to this checkout and avoid repository fsmonitor hooks.
+    files = subprocess.check_output(
+        ["git", "-c", f"safe.directory={project.resolve().as_posix()}",
+         "-c", "core.fsmonitor=false", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+        cwd=project,
+    )
+    return {Path(os.fsdecode(name)) for name in files.split(b"\0") if name}
+
+
+def default_components(project: Path) -> tuple[str, ...]:
+    """Back up the source tree only from a checkout."""
+    return COMPONENTS if checkout_paths(project) is not None else tuple(c for c in COMPONENTS if c != "source")
+
+
 def archive_project(project: Path, destination: Path, *, exclude_file: Path | None = None,
                     config_dir: Path | None = None) -> None:
-    git_dir = project / ".git"
-    has_checkout = git_dir.is_dir() and not git_dir.is_symlink()
-    if not has_checkout and not (project / "docker-project/compose.yml").is_file():
-        raise TransferError("Backup needs a Git checkout or a deployment prepared by standalone loaf setup.")
-    paths = set()
-    if has_checkout:
-        # Scope Git trust to this checkout and avoid repository fsmonitor hooks.
-        files = subprocess.check_output(
-            ["git", "-c", f"safe.directory={project.resolve().as_posix()}",
-             "-c", "core.fsmonitor=false", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
-            cwd=project,
-        )
-        paths = {Path(os.fsdecode(name)) for name in files.split(b"\0") if name}
-        bundle_dirs = {
-            path.parent for path in paths
-            if path.name == BUNDLE_MANIFEST and path.parent != Path(".") and (project / path.parent / "loaf").is_file()
-        }
-        paths = {path for path in paths if not any(path.is_relative_to(bundle) for bundle in bundle_dirs)}
+    """Archive settings, saved Modelfiles and installer caches, the same for every installation."""
     config_dir = config_dir or project / "config"
-    paths = {path for path in paths if not path.is_relative_to(INSTALL_CACHE)}
-    environment = project / ".venv"
-    if environment.is_symlink():
-        raise TransferError("Backup needs .venv to be a local directory.")
+    # Settings can come entirely from the system or packaged layers, but the directory must be a deployment.
+    if not (config_dir.is_dir() or (project / "docker-project").is_symlink() or checkout_paths(project) is not None):
+        raise TransferError("Backup needs a deployment prepared by loaf setup or a Git checkout.")
+    paths = set()
     packages = toolkit_files(project)
     wheels = project / PYTHON_WHEEL_DIR
     if (project / PYTHON_PACKAGE_DIR / "pyproject.toml").is_file():
         prepare_python_wheels(project)
-        record = wheels / WHEEL_CACHE_RECORD
+    # The optional test wheels from loaf setup tests share the cache with their own record.
+    for record in (wheels / WHEEL_CACHE_RECORD, wheels / TEST_WHEEL_RECORD):
         if record.is_file() and not record.is_symlink():
             paths.add(record.relative_to(project))
     # Include the prepared installer files from the otherwise ignored cache.
     paths.update(path.relative_to(project) for path in wheels.glob("*.whl") if path.is_file() and not path.is_symlink())
     paths.update(path.relative_to(project) for path in docker_installer_files(project))
 
-    def exclude_secret(member):
-        return None if project / member.name == exclude_file else member
-
     with Progress("Archive project.tar") as progress, destination.open("wb") as output:
         stream = TrackedStream(output, progress)
         with tarfile.open(fileobj=stream, mode="w|", bufsize=COPY_BUFFER, copybufsize=COPY_BUFFER) as archive:
-            if has_checkout:
-                archive.add(git_dir, arcname=".git", filter=exclude_secret)
-            if not has_checkout or config_dir != project / "config":
-                paths = {path for path in paths if not path.is_relative_to("config")}
-                for path in sorted(config_dir.rglob("*")):
-                    if path.suffix in CONFIG_SUFFIXES and path.is_file() and path.resolve() != exclude_file:
-                        archive.add(path, arcname=(Path("config") / path.relative_to(config_dir)).as_posix())
-            if environment.is_dir():
-                archive.add(environment, arcname=".venv", filter=exclude_secret)
+            for path in sorted(config_dir.rglob("*")):
+                if path.suffix in CONFIG_SUFFIXES and path.is_file() and path.resolve() != exclude_file:
+                    archive.add(path, arcname=(Path("config") / path.relative_to(config_dir)).as_posix())
             for package in packages:
                 if package.resolve() != exclude_file:
                     archive.add(package.resolve(), arcname=(TOOLKIT_DIR / package.name).as_posix())
             for relative in sorted(paths):
-                if (
-                    relative.name.startswith(TERMINAL_KEY_STAGING)
-                    or relative.parts[0] == ".venv"
-                ):
-                    continue
+                archive.add(project / relative, arcname=relative.as_posix(), recursive=False)
+
+
+def archive_source(project: Path, destination: Path, *, exclude_file: Path | None = None) -> None:
+    """Archive the Git history and working tree. Settings and installers belong to the project component."""
+    paths = checkout_paths(project)
+    if paths is None:
+        raise TransferError("The source component needs a Git checkout. Omit source for this deployment.")
+    bundle_dirs = {
+        path.parent for path in paths
+        if path.name == BUNDLE_MANIFEST and path.parent != Path(".") and (project / path.parent / "loaf").is_file()
+    }
+    project_parts = {"config", INSTALL_CACHE.name, ".venv"}
+
+    def exclude_secret(member):
+        return None if project / member.name == exclude_file else member
+
+    with Progress("Archive source.tar") as progress, destination.open("wb") as output:
+        stream = TrackedStream(output, progress)
+        with tarfile.open(fileobj=stream, mode="w|", bufsize=COPY_BUFFER, copybufsize=COPY_BUFFER) as archive:
+            archive.add(project / ".git", arcname=".git", filter=exclude_secret)
+            for relative in sorted(paths):
                 path = project / relative
-                if path == exclude_file:
+                if (relative.parts[0] in project_parts or relative.name.startswith(TERMINAL_KEY_STAGING)
+                        or path == exclude_file or any(relative.is_relative_to(bundle) for bundle in bundle_dirs)):
                     continue
-                if relative == Path("loaf") and path.is_symlink() and path.readlink() == RESTORED_LAUNCHER:
+                if relative == Path("loaf") and path.is_symlink():
                     continue
                 if path.exists() or path.is_symlink():
                     archive.add(path, arcname=relative.as_posix(), recursive=False)
@@ -635,7 +656,7 @@ def backup(
     destination: Path,
     prepare_volumes: Callable[[], None],
     *,
-    components: tuple[str, ...] = COMPONENTS,
+    components: tuple[str, ...] | None = None,
     namespace: str = "",
     compression_level: int = config.DEFAULT_COMPRESSION_LEVEL,
     exclude_project_file: Path | None = None,
@@ -645,9 +666,10 @@ def backup(
 ) -> None:
     if destination.is_relative_to(project / ".git"):
         raise TransferError("Choose a backup directory outside .git.")
+    components = components or default_components(project)
     members = tuple(f"{component}.tar" for component in COMPONENTS if component in components)
     if not members or set(components) - set(COMPONENTS):
-        raise TransferError("Select backup components from images, volumes and project.")
+        raise TransferError("Select backup components from images, volumes, project and source.")
     include_terminal = include_terminal and "volumes" in components
     exclude_project_file = exclude_project_file or project / config.TERMINAL_SECRET
     if include_terminal:
@@ -658,6 +680,9 @@ def backup(
         if "project" in components:
             print("Collecting project files…", file=sys.stderr, flush=True)
             archive_project(project, staging / "project.tar", exclude_file=exclude_project_file, config_dir=config_dir)
+        if "source" in components:
+            print("Collecting source files…", file=sys.stderr, flush=True)
+            archive_source(project, staging / "source.tar", exclude_file=exclude_project_file)
         if "images" in components:
             images = image_names(namespace)
             if include_terminal_image:
@@ -698,7 +723,7 @@ def backup(
             metadata = staging / CHECKSUMS
             metadata.write_text(json.dumps(checksums, indent=2) + "\n", encoding="utf-8")
             archive.add(metadata, arcname=CHECKSUMS)
-        pending.chmod(0o600)
+        pending.chmod(file_modes(destination.parent)[0])
         pending.replace(destination)
 
 
@@ -789,17 +814,20 @@ def verify_backup(source: Path, namespace: str) -> None:
         print(f"  {image}  {', '.join(sorted(supported))}")
 
 
-def stage_project_files(source: Path, target: Path, *, installers: bool = False) -> None:
-    """Stage only the files a standalone deployment can use."""
+def stage_project_files(source: Path, target: Path, *, select: str = "config") -> None:
+    """Stage settings, the Debian installers or, for a recovered checkout, settings and all installer caches."""
     with tarfile.open(source, "r:") as archive:
         for member in archive:
             path = PurePosixPath(member.name)
-            if installers:
+            settings = path.is_relative_to("config") and path.suffix in CONFIG_SUFFIXES
+            if select == "installers":
                 selected = path.is_relative_to(INSTALL_CACHE / "deb") and (
                     path.suffix == ".deb" or path.name == "Packages"
                 )
+            elif select == "all":
+                selected = settings or path.is_relative_to(INSTALL_CACHE)
             else:
-                selected = path.is_relative_to("config") and path.suffix in CONFIG_SUFFIXES
+                selected = settings
             if not selected:
                 continue
             if ".." in path.parts or not member.isfile():
@@ -848,15 +876,16 @@ def prepare_bundle_setup(bundle: BackupBundle, project: Path, *, installers: boo
             if "project" not in components:
                 raise TransferError("The backup has no project component containing cached host installers.")
             files = staging / "files"
-            stage_project_files(staging / "project.tar", files, installers=True)
+            stage_project_files(staging / "project.tar", files, select="installers")
             publish_project_files(project_file_targets(files, project))
         return terminal[0] if terminal is not None else None
 
 
-def stage_configuration(recovered: Path, defaults: Path, destination: Path, version: str) -> config.Settings:
+def stage_configuration(recovered: Path, lower: tuple[Path, ...], destination: Path, version: str) -> config.Settings:
+    """Load recovered settings over the lower configuration layers and keep the backup's version."""
     target = recovered / config.CONFIG_NAME
     current = recovered if target.is_file() else destination
-    settings = config.load(defaults, current)
+    settings = config.load(*lower, current)
     if settings.version == version:
         return settings
     parser = ConfigParser(interpolation=None)
@@ -867,7 +896,7 @@ def stage_configuration(recovered: Path, defaults: Path, destination: Path, vers
     recovered.mkdir(exist_ok=True)
     with target.open("w", encoding="utf-8") as output:
         parser.write(output)
-    return config.load(defaults, recovered)
+    return config.load(*lower, recovered)
 
 
 def stage_checkout(source: Path, checkout: Path) -> None:
@@ -881,14 +910,7 @@ def stage_checkout(source: Path, checkout: Path) -> None:
         target = checkout / path
         if target.is_symlink() or target.resolve() != target:
             raise TransferError(f"Checkout path goes through a link: {member.name!r}")
-        if (member.issym() and path.parent == PurePosixPath(".venv/bin")
-                and re.fullmatch(r"python[0-9.]*", path.name)
-                and re.fullmatch(r"(?:/.+/bin/)?python[0-9.]*", member.linkname)):
-            # venv records the original host interpreter. Preserve the link as
-            # metadata without using it as an extraction destination.
-            checked = data_filter(member.replace(linkname="."), directory).replace(linkname=member.linkname)
-        else:
-            checked = data_filter(member, directory)
+        checked = data_filter(member, directory)
         return checked if member.issym() else checked.replace(mode=member.mode & 0o777)
 
     checkout.mkdir()
@@ -980,7 +1002,7 @@ def publish_backup_layout(bundle: BackupBundle, project: Path, staging: Path,
 
 def restore(project: Path, source: Path, *, namespace: str = "", terminal_key: Path | None = None,
             workspace_driver: str = "local", workspace_options: str = "{}",
-            configuration: tuple[Path, Path, str] | None = None, in_place_bundle: BackupBundle | None = None,
+            configuration: tuple[tuple[Path, ...], Path, str] | None = None, in_place_bundle: BackupBundle | None = None,
             full_checkout: bool = False, with_docker_deps: bool = False,
             components: tuple[str, ...] | None = None, require_volumes: bool = False) -> RestoredBackup:
     # Stage files in the project so the source can be on read-only media.
@@ -988,7 +1010,12 @@ def restore(project: Path, source: Path, *, namespace: str = "", terminal_key: P
         staging = Path(folder)
         print(f"Checking and unpacking {source}…", file=sys.stderr, flush=True)
         chosen = components if components is not None else COMPONENTS
-        save = tuple(f"{part}.tar" for part in chosen if part != "project" or configuration is not None)
+        if "source" in (components or ()) and not full_checkout:
+            raise TransferError("Restore the source component with setup --all in the copied backup folder.")
+        # The source tree is only for setup --all. Settings need a configuration destination.
+        needed = {"volumes", "images", *(("project",) if configuration is not None else ()),
+                  *(("source",) if full_checkout else ())}
+        save = tuple(f"{part}.tar" for part in chosen if part in needed)
         if "volumes" in chosen:
             save += (TERMINAL_METADATA,)
         available = unpack_payloads(source, staging, save=save)
@@ -996,8 +1023,10 @@ def restore(project: Path, source: Path, *, namespace: str = "", terminal_key: P
         if missing:
             raise TransferError(f"{source.name} does not contain the requested components: {', '.join(sorted(missing))}.")
         restoring = available.intersection(chosen)
-        if full_checkout and "project" not in restoring:
-            raise TransferError("Setup --all requires the project component from a source checkout backup.")
+        if not full_checkout:
+            restoring -= {"source"}
+        elif "source" not in restoring:
+            raise TransferError("Setup --all requires the source component from a source checkout backup.")
         if require_volumes and "volumes" not in restoring:
             raise TransferError("Restore --import requires the volumes component.")
         images = staging / "images.tar"
@@ -1008,15 +1037,17 @@ def restore(project: Path, source: Path, *, namespace: str = "", terminal_key: P
         files = []
         checkout = staging / "checkout"
         project_files = checkout if full_checkout else staging
-        if "project" in restoring and configuration is not None:
-            defaults, destination, version = configuration
-            if full_checkout:
-                stage_checkout(staging / "project.tar", checkout)
-                if (checkout / "config").is_symlink() or (checkout / "config" / config.CONFIG_NAME).is_symlink():
-                    raise TransferError("The checkout configuration must use local files.")
-            else:
+        if full_checkout:
+            stage_checkout(staging / "source.tar", checkout)
+            if "project" in restoring:
+                stage_project_files(staging / "project.tar", checkout, select="all")
+            if (checkout / "config").is_symlink() or (checkout / "config" / config.CONFIG_NAME).is_symlink():
+                raise TransferError("The checkout configuration must use local files.")
+        if configuration is not None and ("project" in restoring or full_checkout):
+            lower, destination, version = configuration
+            if not full_checkout:
                 stage_project_files(staging / "project.tar", staging)
-            settings = stage_configuration(project_files / "config", defaults, destination, version)
+            settings = stage_configuration(project_files / "config", lower, destination, version)
             if not full_checkout:
                 files = project_file_targets(staging / "config", destination)
             terminal_key = config.terminal_secret_path(project, settings.terminal_server_secret_file)
@@ -1167,7 +1198,7 @@ def export_models(
         with (raw.open("rb") as payload, gzip.open(pending, "wb", compresslevel=compression_level) as output,
               Progress("Compress models", raw.stat().st_size) as progress):
             copy_payload(payload.read, output, progress)
-        pending.chmod(0o600)
+        pending.chmod(file_modes(destination.parent)[0])
         pending.replace(destination)
 
 

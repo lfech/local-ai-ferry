@@ -22,12 +22,14 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
+      - name: Install the Debian package checker
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends lintian
       - name: Build and check release assets
         run: bash scripts/build-release.sh "$GITHUB_REF_NAME" "$RUNNER_TEMP/loaf-release"
-      - name: Rehearse an offline handoff with the release executable
-        run: python3 python-package/tests/release_handoff.py "$RUNNER_TEMP/loaf-release/loaf"
-        env:
-          BUILDX_BAKE_ENTITLEMENTS_FS: "0"
+      - name: Rehearse an offline handoff with the release executable and Debian package
+        run: |
+          python3 python-package/tests/release_handoff.py "$RUNNER_TEMP/loaf-release/loaf" \
+            --deb "$RUNNER_TEMP/loaf-release/"loaf_*_all.deb
       - name: Attach assets to a draft release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -35,7 +37,7 @@ jobs:
           cd "$RUNNER_TEMP/loaf-release"
           if draft=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft); then
             if [ "$draft" = true ]; then
-              gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber ./loaf LICENSE.txt ./*.whl ./*.tar.gz SHA256SUMS
+              gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber ./loaf LICENSE.txt ./*.whl ./*.deb ./*.tar.gz SHA256SUMS
             else
               echo "Release $GITHUB_REF_NAME is already published."
             fi
@@ -44,5 +46,6 @@ jobs:
             notes=$(git for-each-ref --format='%(contents)' "refs/tags/$GITHUB_REF_NAME")
             gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --notes "$notes" \
               "$RUNNER_TEMP/loaf-release/loaf" "$RUNNER_TEMP/loaf-release/LICENSE.txt" "$RUNNER_TEMP/loaf-release/"*.whl \
+              "$RUNNER_TEMP/loaf-release/"*.deb \
               "$RUNNER_TEMP/loaf-release/"*.tar.gz "$RUNNER_TEMP/loaf-release/SHA256SUMS"
           fi

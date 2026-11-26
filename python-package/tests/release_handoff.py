@@ -30,21 +30,23 @@ def run(*args, cwd=None, env=None, input=None, capture=False, timeout=180):
     ).stdout
 
 
-def copy_to_media(bundle, media):
+def copy_to_media(bundle, media, deb=None):
     run("docker", "volume", "create", media, capture=True)
     run("docker", "run", "-d", "--name", media, "--pull", "never", "--network", "none",
         "--mount", f"type=volume,source={media},target=/handoff",
         "--entrypoint", "sleep", COLD_IMAGE, "infinity", capture=True)
     try:
         run("docker", "cp", f"{bundle}/.", f"{media}:/handoff")
+        if deb is not None:
+            run("docker", "cp", str(deb), f"{media}:/handoff/loaf.deb")
     finally:
         subprocess.run(["docker", "rm", "-f", media], check=False, capture_output=True, timeout=30)
 
 
-def cold_handoff(bundle, name, namespace, port, fixture):
+def cold_handoff(bundle, name, namespace, port, fixture, deb=None):
     media = name + "-media"
     try:
-        copy_to_media(bundle, media)
+        copy_to_media(bundle, media, deb)
         run("docker", "run", "-d", "--name", name, "--privileged", "--network", "none", "--pull", "never",
             "--mount", f"type=volume,source={media},target=/handoff,readonly",
             "--mount", "type=volume,destination=/var/lib/docker",
@@ -73,6 +75,13 @@ def cold_handoff(bundle, name, namespace, port, fixture):
         target("docker", "version", "--format", "{{.Server.Version}}")
         target("docker", "compose", "version", "--short")
         target("docker", "info", "--format", "Storage driver: {{.Driver}}")
+        if deb is not None:
+            # The fixture's Docker comes from static binaries, so its Debian packages are absent.
+            target("dpkg", "--force-depends", "-i", "/handoff/loaf.deb")
+            if "Installation: Debian package" not in target("loaf", "version", capture=True):
+                raise AssertionError("The installed loaf does not report the Debian package.")
+            target("loaf", "backup", "--verify", "--archive", "/handoff")
+            print("Debian package check passed. The system launcher verified the transferred backup offline.")
 
         launcher = ("env", "XDG_DATA_HOME=/work/cache", "/handoff/loaf")
         target(*launcher, "setup", timeout=300)
@@ -115,7 +124,7 @@ def cold_handoff(bundle, name, namespace, port, fixture):
         subprocess.run(["docker", "volume", "rm", media], check=False, capture_output=True, timeout=30)
 
 
-def rehearse(executable, root, compression, retain, *, chat_only, ollama_image, ollama_source):
+def rehearse(executable, root, compression, retain, *, chat_only, ollama_image, ollama_source, deb=None):
     source = root / "source"
     source.mkdir()
     loaf = source / "loaf"
@@ -189,7 +198,7 @@ def rehearse(executable, root, compression, retain, *, chat_only, ollama_image, 
             print(f"Retained backup: {bundle}", flush=True)
         cold_handoff(bundle, version + "-cold", namespace, port, {
             "credentials": credentials, "account": account, "chat_id": chat_id, "messages": messages,
-        })
+        }, deb)
     finally:
         data = source / "docker-project"
         subprocess.run([
@@ -211,11 +220,15 @@ def main():
     parser.add_argument("--gpu", action="store_true", help="Use the CUDA 13 fixture for --chat-only")
     parser.add_argument("--compression", type=int, choices=range(10),
                         help="Override the release executable's backup gzip level")
+    parser.add_argument("--deb", type=Path, help="Install this loaf Debian package in the disconnected destination")
     parser.add_argument("--ollama-source",
                         help="Use a matching Ollama v0.40.18 image as the source of compact runtime files")
     args = parser.parse_args()
     if args.gpu and not args.chat_only:
         parser.error("--gpu requires --chat-only. The cold handoff uses CPU inference.")
+    if args.deb and args.chat_only:
+        parser.error("--deb requires the cold handoff. Omit --chat-only.")
+    deb = args.deb.resolve(strict=True) if args.deb else None
     executable = args.executable.resolve(strict=True)
     retain = args.keep.resolve() if args.keep else None
     if retain and (retain.exists() or not retain.parent.is_dir()):
@@ -227,7 +240,7 @@ def main():
             cwd=FIXTURES, timeout=900)
     with TemporaryDirectory(prefix=".loaf-handoff-", dir=retain.parent if retain else None) as folder:
         rehearse(executable, Path(folder).resolve(), args.compression, retain,
-                 chat_only=args.chat_only, ollama_image=ollama_image, ollama_source=args.ollama_source)
+                 chat_only=args.chat_only, ollama_image=ollama_image, ollama_source=args.ollama_source, deb=deb)
     check = "Authenticated chat smoke" if args.chat_only else "Cold release handoff"
     print(f"{check} passed in {monotonic() - started:.1f}s.")
 

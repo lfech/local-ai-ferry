@@ -312,7 +312,7 @@ bridges for comparison. Those bridges retain a host address. The override
 applies only to tests.
 [Docker bridge gateway modes](https://docs.docker.com/engine/network/port-publishing/#gateway-modes)
 
-The online and offline checks run in separate disposable Compose projects.
+The online and offline checks run concurrently in separate disposable Compose projects.
 Each verifies the current Open WebUI connection and exercises a saved connection
 with the old URL. It makes terminal and file requests for two signed-in users
 and rejects a third user.

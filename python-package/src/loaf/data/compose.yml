@@ -61,11 +61,11 @@ services:
     # Consume the locally built image; pulling base images is an explicit build.
     pull_policy: never
     build:
-      context: ${LOAF_DOCKER_DIR:-./docker}/ollama-online
-      dockerfile: ../ollama/Dockerfile
+      # Keep each Dockerfile inside its context: Compose grants Buildx read access to contexts.
+      context: ${LOAF_DOCKER_DIR:-./docker}/ollama
       target: ollama-online
       args: &ollama-build-args
-        OLLAMA_IMAGE: ${OLLAMA_IMAGE:-${LOAF_INI_OLLAMA_IMAGE:-ollama/ollama:latest}}
+        OLLAMA_IMAGE: ${OLLAMA_IMAGE:-${LOAF_INI_OLLAMA_IMAGE:-loaf-ollama-cuda13}}
         OLLAMA_SOURCE:
     volumes:
       - ollama:/ollama
@@ -84,8 +84,7 @@ services:
     <<: *ollama-gpu
     profiles: [offline]
     build:
-      context: ${LOAF_DOCKER_DIR:-./docker}/ollama-offline
-      dockerfile: ../ollama/Dockerfile
+      context: ${LOAF_DOCKER_DIR:-./docker}/ollama
       target: ollama-offline
       args: *ollama-build-args
     networks: [inference]
@@ -96,7 +95,7 @@ services:
     build:
       context: ${LOAF_DOCKER_DIR:-./docker}/open-webui
       args:
-        OPEN_WEBUI_IMAGE: ${OPEN_WEBUI_IMAGE:-${LOAF_INI_WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:main}}
+        OPEN_WEBUI_IMAGE: ${OPEN_WEBUI_IMAGE:-${LOAF_INI_WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:v0.13.4-slim}}
     depends_on:
       ollama-offline:
         condition: service_healthy

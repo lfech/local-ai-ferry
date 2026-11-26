@@ -21,8 +21,8 @@ For a fresh deployment, use the release executable and run setup.
 [Full checkout recovery](transfer.md#debian-restore) ·
 [Release executable](releases.md#run-the-executable)
 
-On Debian 13, use the following setup command when the backup has Docker
-installers for the same release and package architecture:
+On Debian 12 or 13, use the following setup command when the backup has
+Docker installers for the same release and package architecture:
 
 ```bash
 ./loaf setup --with-docker-deps
@@ -52,6 +52,41 @@ If the archive omitted the Open Terminal bearer key and setup created a new
 one, update the saved terminal connection after starting WebUI.
 [Terminal setup](terminal-server.md#enable-and-connect)
 
+## Debian package
+
+On Debian 12 or 13, install the release's `loaf_<version>_all.deb` with apt.
+It uses the system Python and installs `loaf` as a normal Debian
+application. Debian 13 provides Docker from its archive. Debian 12 needs
+Docker's repository for Engine 26 or newer and Compose 2.26.1 or newer.
+[Docker installation](debian.md#install-docker-from-dockers-repository)
+
+```bash
+sha256sum --check --ignore-missing SHA256SUMS
+sudo apt install ./loaf_0.2.2_all.deb
+loaf version
+```
+
+The package operates the system deployment. Its settings are in `/etc/loaf`
+and its data, backups and lock are in `/var/lib/loaf`. Root, members of the
+`docker` group and the `loaf` systemd service can operate it. Its backups in
+`/var/lib/loaf/backup` are readable by that group, so any member can restore
+them. The terminal server key is `/etc/loaf/terminal-server.key`. Select a portable deployment
+directory with `loaf --project-dir PATH`. A portable deployment reads
+`/etc/loaf` below its own `config/config.ini`.
+[Settings layers](configuration.md#project-configuration)
+
+To restore a copied backup into the system deployment, run
+`loaf restore --archive PATH` with the backup folder. Start offline serving at
+boot after building or restoring the images:
+
+```bash
+sudo systemctl enable --now loaf.service
+```
+
+`man loaf` and `loaf docs` show the documentation for the installed release.
+Purging the package removes the generated key and empty directories. Backups
+and the Docker volumes with models and chats remain.
+
 ## Host integrations
 
 ### systemd
@@ -65,7 +100,7 @@ deployment and removes its service containers.
 [Docker access](debian.md#docker-access) · [systemd service options](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html)
 
 ```bash
-.venv/bin/loaf integration systemd > open-webui.service
+./loaf integration systemd > open-webui.service
 systemd-analyze verify ./open-webui.service
 sudo install -m 0644 open-webui.service /etc/systemd/system/open-webui.service
 sudo systemctl daemon-reload
@@ -78,7 +113,7 @@ Generate YAML for the selected model list and WebUI address. Use `--models-file`
 to choose another model INI.
 
 ```bash
-.venv/bin/loaf integration continue > continue.yaml
+./loaf integration continue > continue.yaml
 ```
 
 Enable **API Keys** under **Settings → Authentication** in the Open WebUI

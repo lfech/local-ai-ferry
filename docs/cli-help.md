@@ -16,6 +16,7 @@ paths given on the command line start at the shell's current directory.
 | --- | --- |
 | `-h`, `--help` | Print help for `loaf`, a command, or an integration and exit. |
 | `--project-dir PATH` | Select the checkout or deployment. Defaults to the current directory. |
+| `--system` | Operate the system deployment with settings in `/etc/loaf` and data in `/var/lib/loaf`. The Debian package uses it unless `--project-dir` or `--config-dir` selects a project. [Debian package](installation.md#debian-package) |
 | `-v`, `--verbose` | Show external commands where available. With `test`, show individual test names. |
 
 The standalone executable also accepts `./loaf --license` to print its
@@ -47,10 +48,19 @@ server key when it is missing. [Installation](installation.md)
 
 Uses `--config-dir PATH` and `--dry-run`.
 
-- `--with-docker-deps` caches Docker Engine, Compose and Buildx packages on Debian 13 and installs them as needed.
+- `--with-docker-deps` caches Docker Engine, Compose and Buildx packages on Debian 12 or 13 and installs them as needed. [Docker packages](debian.md#install-docker-and-cache-its-packages)
 - `--archive PATH` selects a backup folder or its archive when running standalone setup. With `--with-docker-deps`, setup can recover the matching installers from that backup.
 - `--terminal-server-key` creates the configured key only, with owner-only permissions. It preserves an existing key.
 - `--all` restores the archived source checkout and Docker data in the copied backup folder. The backup must contain the source files. [Full checkout recovery](transfer.md#debian-restore)
+
+In the system deployment, setup creates the terminal server key, readable by
+root and the `docker` group. The Debian package's dependencies replace
+`--with-docker-deps`. `tests`, `--all` and `--archive` need a project.
+
+`loaf setup tests` caches the pinned test packages as wheels and installs
+them into the virtualenv that runs `loaf`. It needs Python 3.11 or newer and
+a source checkout, and accepts only `--dry-run` and the global flags.
+[Test packages](launcher.md#test-packages)
 
 ### install
 
@@ -67,6 +77,18 @@ Remove the runtime cache and recognized generated temporary files. Uses
 `--dry-run`. [Cleanup and preserved files](launcher.md#clean-generated-files)
 
 - `--full` also removes generated installation files, including the install cache and project virtualenv, when eligible for cleanup.
+
+### version
+
+Print the loaf release, how it was installed, the Python interpreter, the
+deployment data directory and the default deployment. Takes the global flags.
+
+### docs
+
+List the guides bundled with this release, or print one with
+`loaf docs NAME`. `loaf docs loaf.1` prints the manual page, for example
+`loaf docs loaf.1 | man -l -`. Standalone setup also writes the guides to
+`docs/` in the deployment. [Bundled guides](launcher.md#read-the-bundled-guides)
 
 ### link-docker-project
 
@@ -142,8 +164,9 @@ Merge a model-only archive into the Ollama store. Uses `--config-dir PATH`,
 ### backup
 
 Create a dated backup folder containing the archive, verification manifest
-and standalone executable. List `images`, `volumes` and `project` in any
-combination, or omit them to save all three. Uses `--config-dir PATH`, `--version VERSION`,
+and standalone executable. List `images`, `volumes`, `project` and `source` in
+any combination, or omit them to save every available component. `source` is
+available in a source checkout. Uses `--config-dir PATH`, `--version VERSION`,
 `--dry-run`, and `--backup-dir PATH`. Use `-a` or `--attach` when creating a
 backup. [Backup contents](transfer.md#archive-contents)
 
@@ -157,7 +180,8 @@ backup. [Backup contents](transfer.md#archive-contents)
 ### restore
 
 Restore any combination of `images`, `volumes` and `project` from a verified
-backup. Omit the names to restore every available component. Deployment volume
+backup. Omit the names to restore every available component. `setup --all`
+applies `source`. Deployment volume
 restore requires new or empty volumes. Uses `--config-dir PATH`,
 `--version VERSION`, `--dry-run`, and `-a` or `--attach`. `--archive PATH`
 selects a specific backup folder or archive. `--backup-dir PATH` selects the

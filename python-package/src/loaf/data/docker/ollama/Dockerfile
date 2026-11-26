@@ -1,5 +1,5 @@
 # Ollama downloader and serving images. BuildKit builds only the selected runtime.
-ARG OLLAMA_IMAGE=ollama/ollama:latest
+ARG OLLAMA_IMAGE=loaf-ollama-cuda13
 ARG OLLAMA_SOURCE=ollama/ollama:0.40.18
 FROM ${OLLAMA_SOURCE} AS upstream
 
@@ -14,6 +14,9 @@ COPY --from=upstream /usr/lib/ollama/lib*.so* /usr/lib/ollama/*LICENSE* \
 ENV LD_LIBRARY_PATH=/usr/lib/ollama
 ENTRYPOINT ["/usr/bin/ollama"]
 CMD ["serve"]
+
+FROM loaf-ollama-cpu AS loaf-ollama-cuda12
+COPY --from=upstream /usr/lib/ollama/cuda_v12 /usr/lib/ollama/cuda_v12
 
 FROM loaf-ollama-cpu AS loaf-ollama-cuda13
 COPY --from=upstream /usr/lib/ollama/cuda_v13 /usr/lib/ollama/cuda_v13

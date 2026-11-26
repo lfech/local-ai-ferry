@@ -48,7 +48,8 @@ mkdir -p "$bundle/wheels" "$bundle/python-licenses" "$dist"
 if [[ $mode == --binary-only ]]; then
     source="$stage/source"
     mkdir -p "$source/python-package" "$source/scripts"
-    tar -cf - -C python-package --exclude=__pycache__ --exclude='*.egg-info' \
+    # Follow the package's links to README.md and docs/ so that the wheel holds the guides.
+    tar -chf - -C python-package --exclude=__pycache__ --exclude='*.egg-info' \
         pyproject.toml README.md LICENSE.txt THIRD_PARTY_NOTICES.txt src |
         tar -xf - -C "$source/python-package"
     cp -- scripts/release-launcher.sh scripts/release-runtime.sh "$source/scripts/"
@@ -219,7 +220,12 @@ run_logged bash -eu -c '
     "$launcher" setup --dry-run
     "$launcher" setup
     test -f config/config.ini
-    test -f config/models.ini
+    # The model list comes from the system or packaged layer until the project adds one.
+    test ! -e config/models.ini
+    test -f docs/README.md
+    test -f docs/.loaf-docs
+    "$launcher" version | grep -q "^Installation: standalone executable "
+    "$launcher" docs readme | grep -q "^# Local AI Ferry"
     test ! -e .venv
     test ! -e .git
     test ! -e python-package
@@ -236,10 +242,13 @@ if [[ $mode == --binary-only ]]; then
     mv -fT -- "$pending/loaf" "$output/loaf"
     printf 'Standalone executable ready at %s\n' "$output/loaf"
 else
+    echo "Build the Debian package…"
+    run_logged env SOURCE_DATE_EPOCH="$(git log -1 --format=%ct HEAD)" LOAF_BUILD_PYTHON="$host_python" \
+        bash "$source/scripts/build-deb.sh" "$dist/"*.whl "$dist"
     (
         cd "$dist"
-        sha256sum -- loaf LICENSE.txt *.whl *.tar.gz > SHA256SUMS
+        sha256sum -- loaf LICENSE.txt *.whl *.deb *.tar.gz > SHA256SUMS
     )
-    cp -- "$dist/loaf" "$dist/LICENSE.txt" "$dist/"*.whl "$source_archive" "$dist/SHA256SUMS" "$output/"
+    cp -- "$dist/loaf" "$dist/LICENSE.txt" "$dist/"*.whl "$dist/"*.deb "$source_archive" "$dist/SHA256SUMS" "$output/"
     printf 'Release assets ready at %s\n' "$output"
 fi

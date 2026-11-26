@@ -85,6 +85,17 @@ class DocumentationTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(local_link_problems(path), [])
 
+    def test_command_reference_covers_every_command_and_global_flag(self):
+        from loaf import cli
+
+        reference = (ROOT / "docs/cli-help.md").read_text(encoding="utf-8")
+        for command in cli.COMMAND_HELP:
+            with self.subTest(command=command):
+                self.assertIn(f"\n### {command}\n", reference)
+        for flag in cli.GLOBAL_OPTIONS:
+            with self.subTest(flag=flag):
+                self.assertIn(f"`{flag}", reference)
+
     def test_root_readme_links_every_guide(self):
         targets = {unquote(link.path) for link in markdown_links(ROOT / "README.md") if not (link.scheme or link.netloc)}
         self.assertTrue(guides())

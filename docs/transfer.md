@@ -59,9 +59,11 @@ a store. Start the same serving profile again after the copy.
 
 ## Select deployment components
 
-Use any combination of `images`, `volumes` and `project` after `backup` or
-`restore`. With no component names, backup saves all three and restore
-recovers everything present in the archive.
+Use any combination of `images`, `volumes`, `project` and `source` after
+`backup`, and of the first three after `restore`. With no component names,
+backup saves every available component and restore recovers everything
+present in the archive except `source`. `source` exists in a source checkout
+and only `setup --all` applies it.
 
 ```bash
 loaf backup images project
@@ -74,7 +76,7 @@ Only a backup that includes `volumes` stops the project services. Restoring
 volumes without images requires the matching local `local/ollama-online`
 helper image. Restoring `project` recovers settings and Modelfiles. Use
 `./loaf setup --all` for the source checkout from a bundle containing
-`project`. [Debian restore](#debian-restore)
+`source`. [Debian restore](#debian-restore)
 
 ## Archive contents
 
@@ -99,9 +101,14 @@ binary that launched it. [Local binary build](releases.md#build-and-check-locall
 | --- | --- |
 | `volumes.tar` | Ollama and Open WebUI volumes, plus the selected deployment's terminal workspace volumes when included. |
 | `images.tar` | The three core Docker images and the matching Open Terminal image when available locally. |
-| `project.tar` | Saved configuration, Modelfiles and available installer files. Backups made from a source checkout also include its working files, Git history and virtualenv. |
+| `project.tar` | Saved configuration, Modelfiles and the cached installers: Python wheels, NVIDIA and Docker Debian packages. Every installation produces the same content. |
+| `source.tar` | Git history and the working files of a source checkout, without settings, installer caches or the virtualenv. |
 | `terminal.json` | Optional terminal workspace inventory and bearer key included with `volumes`. |
 | `sha256.json` | SHA-256 digests of all payloads. |
+
+Backups are readable only by their owner. In a setgid directory, such as the
+system deployment's `/var/lib/loaf/backup`, they are also readable by the
+directory's group.
 
 The default directory is `backup/` in the project. Set `[transfer]`
 `backup_dir` in `config.ini` for a persistent choice or pass
@@ -225,7 +232,7 @@ readable and writable by their owner on filesystems that enforce Unix permission
 ## Debian restore
 
 Copy the complete trusted backup folder to a writable directory on the
-destination. Use a login with Docker access. On Debian 13, use
+destination. Use a login with Docker access. On Debian 12 or 13, use
 `./loaf setup --with-docker-deps` in place of the first setup command when
 installing Docker from the backup's matching Debian package cache.
 [Docker access](debian.md#docker-access) · [Disconnected Debian installation](installation.md#disconnected-debian-installation)
@@ -242,8 +249,10 @@ To recover the source checkout and Docker data together, enter the copied
 folder from a source checkout backup and run `./loaf setup --all`. The
 command recovers the archived files, including `python-package/`, `docs/`,
 Git history and cached installers. As with a minimal restore, Docker
-volumes must be new or empty. The archived virtualenv retains references to
-the source machine. Use `./loaf` as the launcher on the destination.
+volumes must be new or empty. Backups leave the host-specific virtualenv
+behind. Use `./loaf` as the launcher on the destination, and run
+`PYTHONPATH=python-package/src python3 -m loaf setup` to rebuild `.venv`
+from the cached wheels when you develop there.
 
 After an in-place restore, the backup archive, launcher copy and manifest
 are in `backup/`. The root launcher points to `dist/loaf` in both restore

@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import posixpath
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -66,6 +67,8 @@ class TransferTests(unittest.TestCase):
         package.mkdir()
         (package / "pyproject.toml").touch()
         (self.wheels / "setuptools-example.whl").write_bytes(b"cached build wheel")
+        (self.wheels / "aiohttp-example.whl").write_bytes(b"cached test wheel")
+        (self.wheels / setup.TEST_WHEEL_RECORD).write_text("{}", encoding="utf-8")
         self.launcher_wheel = self.wheels / "local_ai_ferry-example.whl"
         self.fail_wheel_export = False
         (self.project / ".venv").mkdir()
@@ -182,8 +185,8 @@ class TransferTests(unittest.TestCase):
         self.assertTrue(os.access(self.bundle / "loaf", os.X_OK))
         self.assertEqual(transfer.read_bundle(self.bundle).archive, self.archive)
         progress = self.progress.getvalue()
-        for phase in ("Archive project.tar", "Save volumes.tar", "Save images.tar",
-                      "Compress project.tar", "Compress volumes.tar", "Compress images.tar"):
+        for phase in ("Archive project.tar", "Archive source.tar", "Save volumes.tar", "Save images.tar",
+                      "Compress project.tar", "Compress source.tar", "Compress volumes.tar", "Compress images.tar"):
             self.assertIn(phase, progress)
         self.assertIn("100%", progress)
         self.assertNotIn("\r", progress)
@@ -191,16 +194,26 @@ class TransferTests(unittest.TestCase):
             self.assertEqual(bundle.getnames(), [*transfer.MEMBERS, transfer.CHECKSUMS])
             self.assertEqual(bundle.extractfile("volumes.tar").read(), self.volumes)
             self.assertEqual(bundle.extractfile("images.tar").read(), self.images)
+            with tarfile.open(fileobj=io.BytesIO(bundle.extractfile("source.tar").read())) as source:
+                self.assertIn(".git/HEAD", source.getnames())
+                self.assertEqual(source.extractfile("compose.yml").read(), b"name: edited\nservices: {}\n")
+                self.assertFalse([name for name in source.getnames()
+                                  if name.split("/")[0] in ("install-cache", ".venv", "config")])
+                self.assertNotIn(".env", source.getnames())
+                self.assertIn("offline-images.tar", source.getnames())
+                self.assertIn("legacy/offline-images.tar", source.getnames())
+                self.assertFalse(any(name.startswith(("backup/", "transfer disk/")) for name in source.getnames()))
             with tarfile.open(fileobj=io.BytesIO(bundle.extractfile("project.tar").read())) as project:
-                self.assertIn(".git/HEAD", project.getnames())
-                self.assertEqual(project.extractfile("compose.yml").read(), b"name: edited\nservices: {}\n")
+                self.assertFalse([name for name in project.getnames() if name.startswith((".git", ".venv"))])
+                self.assertNotIn("compose.yml", project.getnames())
                 self.assertIn(f"{setup.PYTHON_WHEEL_DIR}/setuptools-example.whl", project.getnames())
                 self.assertIn(f"{setup.PYTHON_WHEEL_DIR}/{setup.WHEEL_CACHE_RECORD}", project.getnames())
+                self.assertIn(f"{setup.PYTHON_WHEEL_DIR}/aiohttp-example.whl", project.getnames())
+                self.assertIn(f"{setup.PYTHON_WHEEL_DIR}/{setup.TEST_WHEEL_RECORD}", project.getnames())
                 self.assertEqual(
                     project.extractfile(self.launcher_wheel.relative_to(self.project).as_posix()).read(),
                     b"fresh launcher wheel",
                 )
-                self.assertEqual(project.extractfile(".venv/pyvenv.cfg").read(), b"fixture virtualenv")
                 self.assertEqual(
                     project.extractfile(self.toolkit.relative_to(self.project).as_posix()).read(), b"fixture deb",
                 )
@@ -209,12 +222,13 @@ class TransferTests(unittest.TestCase):
                 self.assertIn(f"{docker_cache}/docker.io_fixture.deb", project.getnames())
                 self.assertNotIn(f"{setup.INSTALL_CACHE}/scratch.txt", project.getnames())
                 self.assertNotIn(".env", project.getnames())
-                self.assertIn("offline-images.tar", project.getnames())
-                self.assertIn("legacy/offline-images.tar", project.getnames())
                 self.assertFalse(any(name.startswith(("backup/", "transfer disk/")) for name in project.getnames()))
                 with TemporaryDirectory() as recovered:
                     options = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
                     project.extractall(recovered, **options)
+                    # A recovered checkout combines the source tree with the project's settings and installers.
+                    with tarfile.open(fileobj=io.BytesIO(bundle.extractfile("source.tar").read())) as source:
+                        source.extractall(recovered, **options)
                     recovered_toolkit = Path(recovered) / setup.TOOLKIT_DIR / self.toolkit.name
                     self.assertEqual(recovered_toolkit.read_bytes(), self.toolkit.read_bytes())
                     restored_head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=recovered)
@@ -228,6 +242,23 @@ class TransferTests(unittest.TestCase):
             [["image", "ls"], ["image", "save"], ["image", "load"]],
         )
         self.assertFalse(list(self.project.glob(".loaf-restore-*")))
+
+    def test_backups_are_private_unless_the_directory_shares_them_with_its_group(self):
+        def mode(path):
+            return stat.S_IMODE(path.stat().st_mode) & 0o777
+
+        for shared in (False, True):
+            with self.subTest(shared=shared):
+                shutil.rmtree(self.backup_dir, ignore_errors=True)
+                self.backup_dir.mkdir()
+                self.backup_dir.chmod(0o2770 if shared else 0o700)
+                self.assertEqual(self.invoke("backup", "project"), 0, self.progress.getvalue())
+                bundle, = self.backup_dir.iterdir()
+                private, runnable = (0o640, 0o750) if shared else (0o600, 0o700)
+                self.assertEqual((mode(bundle), mode(bundle / "loaf")), (runnable, runnable))
+                self.assertEqual(mode(bundle / transfer.BUNDLE_MANIFEST), private)
+                self.assertEqual(mode(next(bundle.glob("*.tar.gz"))), private)
+                self.assertEqual(self.invoke("backup", "--verify", "--archive", str(bundle), custom=False), 0)
 
     def test_each_component_set_creates_and_restores_only_its_payloads(self):
         settings = self.project / "config/config.ini"
@@ -643,8 +674,8 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(recovered.stat().st_mode & 0o777, 0o755)
         self.assertEqual(os.readlink(self.bundle / "docs/guide-link.md"), "guide.md")
         self.assertEqual((self.bundle / "docs/guide-link.md").read_bytes(), b"Source documentation\n")
-        self.assertEqual(os.readlink(self.bundle / ".venv/bin/python3"), "/usr/bin/python3")
-        self.assertEqual(os.readlink(self.bundle / ".venv/bin/python3.13"), "python3")
+        # Backups leave the host-specific virtualenv behind. Setup rebuilds it from the cached wheels.
+        self.assertFalse((self.bundle / ".venv").exists())
         self.assertEqual((self.bundle / ".git/HEAD").read_bytes(), (self.project / ".git/HEAD").read_bytes())
         self.assertTrue((self.bundle / cli.config.TERMINAL_SECRET).is_file())
         self.assertFalse((self.bundle / ".env").exists())
@@ -1203,6 +1234,141 @@ class ModelTransferTests(unittest.TestCase):
             self.assertFalse((target / "models/blobs/obsolete").exists())
             self.assertFalse((target / "config/obsolete.model").exists())
             self.assertTrue((target / "outside-model-store").is_file())
+
+
+def write_members(path, *members):
+    """Write (name, kind, value) entries: kind is dir, file, symlink, hardlink or device."""
+    with tarfile.open(path, "w") as archive:
+        for name, kind, value in members:
+            member = tarfile.TarInfo(name)
+            data = None
+            if kind == "dir":
+                member.type = tarfile.DIRTYPE
+            elif kind == "file":
+                member.size = len(value)
+                data = io.BytesIO(value)
+            elif kind == "symlink":
+                member.type, member.linkname = tarfile.SYMTYPE, value
+            elif kind == "hardlink":
+                member.type, member.linkname = tarfile.LNKTYPE, value
+            else:
+                member.type = tarfile.CHRTYPE
+            archive.addfile(member, data)
+
+
+class ArchiveValidationTests(unittest.TestCase):
+    """Restore refuses unsafe archive contents before Docker or the project changes."""
+
+    def setUp(self):
+        folder = TemporaryDirectory(prefix="loaf-archive-")
+        self.addCleanup(folder.cleanup)
+        self.root = Path(folder.name)
+        self.path = self.root / "payload.tar"
+
+    def test_volume_payload_accepts_links_inside_one_volume(self):
+        workspace = transfer.workspace_prefix("") + "a" * 64
+        write_members(
+            self.path, ("ollama", "dir", None), ("ollama/models", "file", b"data"),
+            ("ollama/copy", "hardlink", "ollama/models"), ("ollama/latest", "symlink", "/elsewhere"),
+            ("webui", "dir", None), (workspace, "dir", None),
+        )
+        transfer.validate_volume_payload(self.path, (workspace,))
+
+    def test_volume_payload_rejects_paths_types_and_links_outside_the_volumes(self):
+        workspace = transfer.workspace_prefix("") + "a" * 64
+        base = (("ollama", "dir", None), ("webui", "dir", None))
+        for label, members, workspaces, message in (
+            ("unknown volume", [("other", "dir", None)], (), "Unexpected path"),
+            ("parent segment", [("ollama/../webui/x", "file", b"")], (), "Unexpected path"),
+            ("duplicate entry", [("ollama/a", "file", b""), ("ollama/a", "file", b"")], (), "Unexpected path"),
+            ("foreign workspace", [(workspace, "dir", None)], (), "Unexpected path"),
+            ("top-level file", [], (), None),
+            ("device file", [("ollama/console", "device", None)], (), "Unexpected file type"),
+            ("hard link to another volume", [("ollama/key", "hardlink", "webui/data.db")], (), "Invalid hard link"),
+            ("hard link with parent segment", [("ollama/key", "hardlink", "ollama/../webui/db")], (), "Invalid hard link"),
+            ("missing workspace", [], (workspace,), "missing terminal workspace data"),
+        ):
+            with self.subTest(label):
+                if message is None:
+                    write_members(self.path, ("ollama", "file", b""), ("webui", "dir", None))
+                    message = "Unexpected file type"
+                else:
+                    write_members(self.path, *base, *members)
+                with self.assertRaisesRegex(transfer.TransferError, message):
+                    transfer.validate_volume_payload(self.path, workspaces)
+
+    def test_payload_archive_rejects_unexpected_members_and_manifests(self):
+        payload = b"volumes"
+        digest = sha256(payload).hexdigest()
+        manifest = json.dumps({"volumes.tar": digest}).encode()
+        valid = (("volumes.tar", "file", payload), (transfer.CHECKSUMS, "file", manifest))
+        for label, members, message in (
+            ("directory member", [("volumes.tar", "dir", None)], "Unexpected member"),
+            ("duplicate payload", [*valid, ("volumes.tar", "file", payload)], "Unexpected member"),
+            ("unknown payload", [*valid, ("notes.txt", "file", b"")], "Unexpected member"),
+            ("oversized manifest", [valid[0], (transfer.CHECKSUMS, "file", b" " * 4097)], "Unexpected member"),
+            ("manifest syntax", [valid[0], (transfer.CHECKSUMS, "file", b"{")], "Invalid sha256.json"),
+            ("manifest type", [valid[0], (transfer.CHECKSUMS, "file", b"[]")], "Invalid sha256.json"),
+            ("missing manifest", [valid[0]], "no SHA-256 manifest"),
+            ("changed payload", [("volumes.tar", "file", b"changed"), valid[1]], "verification failed for volumes.tar"),
+            ("terminal data alone", [("terminal.json", "file", b"{}"), (transfer.CHECKSUMS, "file", json.dumps(
+                {"terminal.json": sha256(b"{}").hexdigest()}).encode())], "without the volumes component"),
+        ):
+            with self.subTest(label):
+                write_members(self.path, *members)
+                archive = self.root / "backup.tar.gz"
+                with self.path.open("rb") as source, gzip.open(archive, "wb") as target:
+                    shutil.copyfileobj(source, target)
+                with self.assertRaisesRegex(transfer.TransferError, message), redirect_stderr(io.StringIO()):
+                    transfer.unpack_payloads(archive, self.root, save=())
+
+    def model_members(self, manifest_value, blob=b"weights", *, size=None, digest=None):
+        digest = digest or f"sha256:{sha256(blob).hexdigest()}"
+        manifest = manifest_value if isinstance(manifest_value, bytes) else json.dumps(manifest_value or {
+            "config": {"digest": digest, "size": len(blob) if size is None else size}, "layers": [],
+        }).encode()
+        return [
+            ("models", "dir", None), ("models/blobs", "dir", None),
+            (f"models/blobs/{digest.replace(':', '-')}", "file", blob),
+            ("models/manifests/registry.ollama.ai/library/example/latest", "file", manifest),
+        ]
+
+    def test_plain_model_manifest_requires_complete_blobs(self):
+        write_members(self.path, *self.model_members(None), ("config", "dir", None),
+                      ("config/example.model", "file", b"FROM /ollama/models/blobs/x\n"))
+        transfer.validate_model_archive(self.path)
+
+        missing = self.model_members(None)
+        del missing[2]
+        for label, members, message in (
+            ("missing blob", missing, "Missing or incomplete blob"),
+            ("size mismatch", self.model_members(None, size=1), "Missing or incomplete blob"),
+            ("invalid digest", self.model_members(None, digest="md5:abc"), "Invalid blob digest"),
+            ("oversized manifest", self.model_members(b" " * (transfer.COPY_BUFFER + 1)), "exceeds 1 MiB"),
+            ("manifest type", self.model_members(b"[]"), "Expected a model manifest object"),
+            ("missing models", [("config", "dir", None)], "missing the models directory"),
+            ("top-level file", [("models", "file", b"")], "Expected a directory"),
+            ("link outside v2 tags", [("models", "dir", None), ("models/x", "symlink", "/etc")],
+             "Unexpected model archive member"),
+            ("file below a file", [("models", "dir", None), ("models/a", "file", b""), ("models/a/b", "file", b"")],
+             "non-directory parent"),
+        ):
+            with self.subTest(label):
+                write_members(self.path, *members)
+                with self.assertRaisesRegex(transfer.TransferError, message):
+                    transfer.validate_model_archive(self.path)
+
+    @unittest.skipUnless(hasattr(tarfile, "data_filter"), "Requires Python tar extraction filters.")
+    def test_checkout_refuses_reserved_absolute_and_duplicate_paths(self):
+        for name in ("/etc/passwd", "docs/../../outside", "dist/loaf", "backup/x", ".loaf-restore-x/y",
+                     "loaf", "docs"):
+            with self.subTest(name):
+                members = [("docs", "dir", None), (name, "dir" if name == "docs" else "file", None if name == "docs" else b"")]
+                write_members(self.path, *members)
+                checkout = self.root / "checkout"
+                shutil.rmtree(checkout, ignore_errors=True)
+                with self.assertRaisesRegex(transfer.TransferError, "Invalid checkout path"):
+                    transfer.stage_checkout(self.path, checkout)
 
 
 class ProgressTests(unittest.TestCase):

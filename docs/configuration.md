@@ -8,8 +8,8 @@ Run commands from the project directory unless a step says otherwise.
 
 | Service | Image directory | Runtime role |
 | --- | --- | --- |
-| `ollama-online` | [ollama-online](../python-package/src/loaf/data/docker/ollama-online/) | Model downloads and exports in the download profile |
-| `ollama-offline` | [ollama-offline](../python-package/src/loaf/data/docker/ollama-offline/) | Startup imports and inference in the offline profile |
+| `ollama-online` | [ollama](../python-package/src/loaf/data/docker/ollama/), stage `ollama-online` | Model downloads and exports in the download profile |
+| `ollama-offline` | [ollama](../python-package/src/loaf/data/docker/ollama/), stage `ollama-offline` | Startup imports and inference in the offline profile |
 | `open-webui` | [open-webui](../python-package/src/loaf/data/docker/open-webui/Dockerfile) | Browser interface; offline profile |
 | `ollama-connected` | Same image as `ollama-offline` | Startup imports and inference with outbound internet access |
 | `open-webui-online` | Same image as `open-webui` | Browser interface with outbound internet access |
@@ -31,11 +31,27 @@ and the [default model list](../python-package/src/loaf/data/config/models.ini).
 The checkout has editable copies in [config/](../config/). Its working
 `config.ini` enables the terminal server. The packaged settings default to disabled.
 
-`loaf` loads the packaged `config.ini`, then applies keys from the project's
-`config/config.ini`. Keys you omit inherit their packaged values. A local
-`models.ini` supplies the full model list. If it is absent, `loaf` uses the
-packaged list. Pass `loaf --config-dir PATH` to select a different override
-directory. `loaf` validates settings before Docker starts.
+Settings come in three layers. Later layers override individual keys of
+earlier ones, so the project has the final say:
+
+1. the packaged defaults,
+2. the system settings in `/etc/loaf/config.ini`,
+3. the project's `config/config.ini`.
+
+Only a project's `config.ini` can move the system layer with `[launcher]
+system_config = PATH`. Set it blank to skip the system settings. The model
+list comes from the highest layer that has `models.ini`: the project, then
+`/etc/loaf`, then the packaged list. Pass `loaf --config-dir PATH` to select
+a different project directory. `loaf` validates every layer before Docker
+starts. `loaf status` lists the settings files in use.
+[System deployment](installation.md#debian-package)
+
+Standalone setup writes a `config/config.ini` with every key commented out,
+so system settings and later packaged defaults stay in effect. When
+`/etc/loaf` has settings and the project uses the same deployment version,
+both operate the same Docker containers and volumes. `setup` and `status`
+warn about this. Set `[launcher] version` in the project for a separate
+deployment. Tests replace the system directory with `LOAF_SYSTEM_CONFIG_DIR`.
 
 In a linked workspace with no local `config/`, copy the defaults to customize them.
 
@@ -88,20 +104,29 @@ The same values work with the `OLLAMA_IMAGE` override for direct Compose use.
 
 | `ollama_image` | Runtime |
 | --- | --- |
+| `loaf-ollama-cuda13` | Default. CPU and CUDA 13. GPU serving requires NVIDIA driver 580 or newer and a working container runtime. |
+| `loaf-ollama-cuda12` | CPU and CUDA 12 for NVIDIA drivers from 550 to 579. GPUs with compute capability 5.0 to 6.2 need driver 570 or newer. Debian 13's own driver package qualifies. |
 | `loaf-ollama-cpu` | CPU only. Serve with `loaf offline --cpu` or `loaf online --cpu`. |
-| `loaf-ollama-cuda13` | CPU and CUDA 13. GPU serving requires a compatible NVIDIA driver and container runtime. |
-| `ollama/ollama:latest` | Full upstream Ollama image. Other image references also work. |
+| `ollama/ollama:latest` | Full upstream Ollama image with CUDA 12 and 13 and the same driver requirements. Other image references also work. |
 
 The compact recipes copy runtime files from Ollama 0.40.18. The first
 build can fetch the full upstream source image. The annotated sizes in
 `config.ini` refer to the resulting images. `loaf upgrade` refreshes the
 images used by the selected recipe.
 [Ollama Dockerfile](../python-package/src/loaf/data/docker/ollama/Dockerfile) ·
+[CUDA driver requirements](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html) ·
+[Ollama NVIDIA requirements](https://docs.ollama.com/gpu) ·
 [Docker multi-stage builds](https://docs.docker.com/build/building/multi-stage/)
 
-With the packaged Compose project, older INIs that select
-`local/loaf-ollama-cpu-test:0.40.18` or `local/loaf-ollama-cuda-test:0.40.18`
-resolve to the corresponding bundled recipe.
+### Select the WebUI image
+
+The default `webui_image` is Open WebUI v0.13.4 slim. It supports accounts,
+chats and Ollama models with the default SQLite database. It omits local
+embeddings, speech and PDF or Office document processing. Its retrieval
+features need PostgreSQL with pgvector. Select
+`ghcr.io/open-webui/open-webui:main` for the full image before preparing a
+host that needs these features offline.
+[Open WebUI image variants](https://docs.openwebui.com/getting-started/quick-start/#image-variants)
 
 ### Overrides
 
@@ -228,9 +253,12 @@ computer from external networks.
 
 ## Extra features
 
-Basic chat uses the downloaded Ollama model. Custom embeddings, speech models,
-tools, Python requirements and document features may need additional caches or
-packages prepared before disconnection. See the
+Basic chat uses the downloaded Ollama model. The default slim WebUI image
+has no local embedding, speech or document processing.
+[WebUI image](#select-the-webui-image)
+With the full image, custom embeddings, speech models, tools, Python
+requirements and document features may need additional caches or packages
+prepared before disconnection. See the
 [Open WebUI offline guide](https://docs.openwebui.com/tutorials/maintenance/offline-mode/).
 Image input is a separate functional check even when a vision projector is
 present in the model.

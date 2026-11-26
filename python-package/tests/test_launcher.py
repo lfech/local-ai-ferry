@@ -507,6 +507,51 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(compose.files, files + ((DATA / "compose.cpu.yml",) if cpu else ()))
                 self.assertEqual("Ollama on CPU" in steps[-1].description, cpu)
 
+    def test_misplaced_arguments_and_options_name_the_supported_commands(self):
+        for arguments, message in (
+            ((), "A command is required"),
+            (("offline", "extra"), "Unexpected arguments for offline"),
+            (("offline", "systemd"), "Use the integration name with loaf integration"),
+            (("integration",), "integration requires a name"),
+            (("backup", "logs"), "Unknown backup component logs"),
+            (("backup", "images", "images"), "Specify each backup component once"),
+            (("offline", "-n"), "only supported by stop"),
+            (("restore", "--verify"), "--verify is only supported by backup"),
+            (("backup", "images", "--verify"), "--verify checks the whole deployment backup"),
+            (("backup", "volumes", "--no-terminal-server"), "creating a backup that includes images"),
+            (("export", "--delete"), "--delete is supported by import"),
+            (("build", "--cpu"), "--cpu is only supported by"),
+            (("restore", "volumes", "--models-only", "--cpu"), "--cpu applies when starting inference"),
+            (("offline", "--with-docker-deps"), "--with-docker-deps is only supported by setup"),
+            (("offline", "--all"), "--all and --terminal-server-key are only supported by setup"),
+            (("setup", "--terminal-server-key", "--all"), "--terminal-server-key is for key setup only"),
+            (("setup", "--all", "--config-dir", "config"), "Omit --config-dir"),
+            (("offline", "--badges"), "--badges is only supported by test"),
+            (("offline", "--full"), "--full is only supported by clean"),
+            (("offline", "--backup-dir", "backup"), "--backup-dir is only supported by backup"),
+            (("backup", "--verify", "--attach"), "--attach is available for Compose"),
+            (("clean", "--version", "v2"), "Unexpected option for clean"),
+            (("restore", "--backup-dir", "a", "--archive", "b"), "Use either --backup-dir or --archive"),
+            (("offline", "--archive", "a.tar.gz"), "--archive is for standalone setup"),
+            (("offline", "--import"), "--import/--no-import are only supported by deployment restore"),
+            (("restore", "images", "--import"), "--import requires the volumes component"),
+            (("backup", "images", "--export"), "--export requires the volumes component"),
+            (("build", "--wait-timeout", "5"), "--wait-timeout is only supported by commands that start services"),
+            (("setup", "extra"), "setup accepts only the tests argument"),
+            (("setup", "tests", "--all"), "setup tests installs only the test packages"),
+            (("install", "tests", "--archive", "backup"), "setup tests installs only the test packages"),
+            (("setup", "tests", "--version", "v2"), "Unexpected option for setup"),
+        ):
+            with (
+                self.subTest(arguments=arguments), redirect_stderr(io.StringIO()) as errors,
+                patch("loaf.cli.subprocess.run", side_effect=AssertionError("subprocess")) as run,
+                self.assertRaises(SystemExit) as raised,
+            ):
+                self.invoke(*arguments)
+            self.assertEqual(raised.exception.code, 2)
+            self.assertIn(message, errors.getvalue())
+            run.assert_not_called()
+
     def test_cpu_option_is_rejected_when_creating_a_backup(self):
         with redirect_stderr(io.StringIO()) as errors, self.assertRaises(SystemExit) as raised:
             self.invoke("backup", "--cpu")

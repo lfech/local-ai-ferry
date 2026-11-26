@@ -16,7 +16,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.10", "3.13"]
+        # 3.11 and 3.13 are the system Pythons of Debian 12 and 13.
+        python: ["3.10", "3.11", "3.13"]
     env:
       RUN_DOCKER_TESTS: "0"
       RUN_GPU_TESTS: "0"
@@ -31,10 +32,22 @@ jobs:
           python-version: ${{ matrix.python }}
 
       - name: Run the Docker-free suite
+        env:
+          # The terminal components run on Python 3.12 and 3.13; setup tests requires 3.11 or newer.
+          SETUP_TESTS: ${{ matrix.python == '3.13' }}
         run: |
           python -m venv "$RUNNER_TEMP/test-venv"
           "$RUNNER_TEMP/test-venv/bin/python" -m pip install --editable ./python-package
+          if [ "$SETUP_TESTS" = true ]; then
+            "$RUNNER_TEMP/test-venv/bin/loaf" setup tests
+          fi
           "$RUNNER_TEMP/test-venv/bin/loaf" test -v
+
+      - name: Build the Debian package and install it on Debian 12 and 13
+        if: matrix.python == '3.13'
+        run: |
+          cd python-package
+          RUN_DOCKER_TESTS=1 "$RUNNER_TEMP/test-venv/bin/python" -m unittest -v tests.test_debian
 
       - name: Build and smoke-test the wheel
         run: |

@@ -5,18 +5,19 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
-from platform import freedesktop_os_release
+from platform import freedesktop_os_release, libc_ver
 import re
 import secrets
 import shlex
 import shutil
 import subprocess
 import sys
+import sysconfig
 from tempfile import NamedTemporaryFile, TemporaryDirectory, mkdtemp
 from typing import Iterable, Iterator
 from urllib.request import urlopen
 
-from . import assets, config
+from . import assets, config, docs
 
 
 PYTHON_PACKAGE_DIR = Path("python-package")
@@ -24,8 +25,20 @@ INSTALL_CACHE = Path("install-cache")
 PYTHON_WHEEL_DIR = INSTALL_CACHE / "wheels"
 TOOLKIT_DIR = INSTALL_CACHE / "deb/nvidia"
 DOCKER_DEB_DIR = INSTALL_CACHE / "deb/docker"
-DOCKER_PACKAGES = ("docker-cli", "docker-compose", "docker.io", "docker-buildx")
+DOCKER_PACKAGES = {
+    # Debian 13 packages Docker Engine 26, Compose 2.26 and Buildx itself.
+    "trixie": ("docker-cli", "docker-compose", "docker.io", "docker-buildx"),
+    # Debian 12's own Docker is too old, so these come from Docker's repository.
+    "bookworm": ("docker-ce", "docker-ce-cli", "containerd.io", "docker-compose-plugin", "docker-buildx-plugin"),
+}
+DOCKER_REPOSITORY_SUITES = {"bookworm"}
+DOCKER_REPOSITORY = "https://download.docker.com/linux/debian"
+DOCKER_KEY_URL = f"{DOCKER_REPOSITORY}/gpg"
+# Docker's release key, fingerprint 9DC8 5822 9FC7 DD38 854A E2D8 8D81 803C 0EBF CD88.
+DOCKER_KEY_SHA256 = "1500c1f56fa9e26b9b8f42452a553675796ade0807cdce11975eb98170b3a570"
 WHEEL_CACHE_RECORD = ".loaf-wheel-cache.json"
+TEST_REQUIREMENTS = PYTHON_PACKAGE_DIR / "tests/requirements.txt"
+TEST_WHEEL_RECORD = ".loaf-test-wheel-cache.json"
 TOOLKIT_PACKAGES = (
     "nvidia-container-toolkit",
     "nvidia-container-toolkit-base",
@@ -77,31 +90,67 @@ def bundled_release() -> Path | None:
     return directory if (directory / ".loaf-release").is_file() else None
 
 
+LOCAL_CONFIG_HEADER = (
+    "# Settings for this deployment. They override the system settings (default /etc/loaf),\n"
+    "# which override the packaged defaults. Uncomment a key to change it here.\n"
+    "# Set [launcher] system_config to another directory, or leave it blank to skip the system settings.\n"
+)
+SYSTEM_CONFIG_HEADER = (
+    "# System settings for loaf. They override the packaged defaults, and a deployment's\n"
+    "# config/config.ini overrides them. Uncomment a key to change it for the system deployment.\n"
+)
+SYSTEM_GROUP = "docker"
+
+
+def config_template(header: str, active: dict[tuple[str, str], str] | None = None) -> str:
+    """Comment out every packaged default so that lower configuration layers stay in effect."""
+    active = dict(active or {})
+    lines = header.splitlines()
+    section = ""
+    packaged = (assets.DATA_DIR / "config" / config.CONFIG_NAME).read_text(encoding="utf-8").splitlines()
+    for line in packaged[2:]:
+        if line.startswith("["):
+            section = line.strip("[]")
+        elif line and not line.startswith("#") and "=" in line:
+            key = line.split("=", 1)[0].strip()
+            value = active.pop((section, key), None)
+            line = f"{key} = {value}" if value is not None else f"# {line}"
+        lines.append(line)
+    if active:
+        raise ValueError(f"Unknown settings: {sorted(active)}")
+    return "\n".join(lines) + "\n"
+
+
 def setup_standalone(project: Path) -> None:
     directory = project / "config"
     if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
         raise SetupError(f"{directory} must be a local configuration directory.")
-    if not assets.compose_path(project).is_file():
+    link = project / assets.DOCKER_PROJECT
+    custom = any((path / "compose.yml").is_file() for path in (project, project / assets.CHECKOUT_DATA))
+    if not custom and (assets.loaf_data_link(link) or not (link.exists() or link.is_symlink())):
         assets.link_docker_project(project, dry_run=False)
     directory.mkdir(exist_ok=True)
-    for name in ("config.ini", "models.ini"):
-        source = assets.DATA_DIR / "config" / name
-        target = directory / name
-        try:
-            defaults = source.read_bytes()
-            with target.open("xb") as output:
-                output.write(defaults)
-        except FileExistsError:
-            if not target.is_file():
-                raise SetupError(f"{target} must be a configuration file.") from None
+    target = directory / config.CONFIG_NAME
+    try:
+        with target.open("x", encoding="utf-8") as output:
+            output.write(config_template(LOCAL_CONFIG_HEADER))
+    except FileExistsError:
+        if not target.is_file():
+            raise SetupError(f"{target} must be a configuration file.") from None
+    docs.export(project)
 
 
-def ensure_terminal_key(path: Path, archived_key: bytes | None = None) -> None:
+def ensure_terminal_key(path: Path, archived_key: bytes | None = None, *, group: str | None = None) -> None:
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         with NamedTemporaryFile(dir=path.parent, prefix=".loaf-terminal-key-") as pending:
             pending.write(archived_key if archived_key is not None else new_terminal_key())
             pending.flush()
+            if group is not None:
+                # The system deployment's key is readable by root and the Docker group.
+                with suppress(LookupError):
+                    shutil.chown(pending.name, group=group)
+                    os.chmod(pending.name, 0o640)
             try:
                 os.link(pending.name, path)
             except FileExistsError:
@@ -271,20 +320,63 @@ def install_toolkit(project: Path, *, allow_downloads: bool = True) -> None:
     print(f"NVIDIA toolkit installers ready in {cache}")
 
 
-def docker_cache(project: Path) -> Path:
+def docker_release() -> str:
     release = freedesktop_os_release()
     suite = release.get("VERSION_CODENAME", "")
-    if release.get("ID") != "debian" or suite != "trixie":
-        raise SetupError("--with-docker-deps requires Debian 13 (trixie). See docs/debian.md for other Docker installations.")
+    if release.get("ID") != "debian" or suite not in DOCKER_PACKAGES:
+        raise SetupError("--with-docker-deps requires Debian 12 (bookworm) or 13 (trixie). "
+                         "See docs/debian.md for other Docker installations.")
+    return suite
+
+
+def package_architecture() -> str:
     architecture = subprocess.check_output(["dpkg", "--print-architecture"], text=True).strip()
     if not re.fullmatch(r"[a-z0-9-]+", architecture):
         raise SetupError("Could not determine the Debian package architecture.")
-    return cache_directory(project, DOCKER_DEB_DIR / f"{suite}-{architecture}")
+    return architecture
 
 
-def download_docker_packages(cache: Path) -> None:
+def docker_cache(project: Path, suite: str) -> Path:
+    return cache_directory(project, DOCKER_DEB_DIR / f"{suite}-{package_architecture()}")
+
+
+def docker_sources(staging: Path, suite: str) -> list[str]:
+    """Return APT options for a private package state that leaves the host's sources unchanged."""
+    lists = staging / "lists"
+    (lists / "partial").mkdir(parents=True)
+    parts = staging / "sources.list.d"
+    parts.mkdir()
+    for source in sorted(Path("/etc/apt/sources.list.d").glob("*")):
+        if source.suffix in (".list", ".sources") and source.is_file():
+            text = source.read_text(encoding="utf-8", errors="replace")
+            # Docker's repository is added below with the pinned key.
+            if suite in DOCKER_REPOSITORY_SUITES and "download.docker.com" in text:
+                continue
+            (parts / source.name).write_text(text, encoding="utf-8")
+    if suite in DOCKER_REPOSITORY_SUITES:
+        try:
+            with urlopen(DOCKER_KEY_URL, timeout=30) as response:
+                key = response.read(1024 * 1024)
+        except OSError as exc:
+            raise SetupError(f"Cannot download Docker's repository key from {DOCKER_KEY_URL}: {exc}. "
+                             "Check the network connection and that ca-certificates is installed.") from exc
+        if sha256(key).hexdigest() != DOCKER_KEY_SHA256:
+            raise SetupError(f"Docker's repository key from {DOCKER_KEY_URL} does not match the pinned SHA-256.")
+        (staging / "docker.asc").write_bytes(key)
+        (parts / "loaf-docker.list").write_text(
+            f"deb [arch={package_architecture()} signed-by={staging / 'docker.asc'}] {DOCKER_REPOSITORY} {suite} stable\n",
+            encoding="utf-8",
+        )
+    return [
+        "-o", "Debug::NoLocking=true", "-o", "APT::Sandbox::User=root",
+        "-o", f"Dir::State::lists={lists}", "-o", f"Dir::Etc::sourceparts={parts}",
+        "-o", "Dir::Cache::pkgcache=", "-o", "Dir::Cache::srcpkgcache=",
+    ]
+
+
+def download_docker_packages(cache: Path, suite: str) -> None:
     """Resolve the package dependencies independently of the preparation host's installed packages."""
-    apt("update")
+    wanted = DOCKER_PACKAGES[suite]
     cache.parent.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(prefix=".loaf-docker-", dir=cache.parent) as folder:
         staging = Path(folder)
@@ -292,10 +384,12 @@ def download_docker_packages(cache: Path) -> None:
         status.touch()
         packages = staging / "packages"
         packages.mkdir()
+        options = [*docker_sources(staging, suite), "-o", f"Dir::State::status={status}",
+                   "-o", f"Dir::Cache::archives={packages}"]
+        subprocess.run(["apt-get", *options, "update"], check=True)
         subprocess.run([
-            "apt-get", "--yes", "--no-remove", "--no-install-recommends", "--download-only",
-            "-o", "Debug::NoLocking=true", "-o", f"Dir::State::status={status}",
-            "-o", f"Dir::Cache::archives={packages}", "install", *DOCKER_PACKAGES,
+            "apt-get", "--yes", "--no-remove", "--no-install-recommends", "--download-only", *options,
+            "install", *wanted,
         ], check=True)
         with (packages / "Packages").open("w", encoding="utf-8") as index:
             found = set()
@@ -304,7 +398,7 @@ def download_docker_packages(cache: Path) -> None:
                 found.update(re.findall(r"(?m)^Package: (\S+)$", control))
                 index.write(f"{control}\nFilename: ./{path.name}\nSize: {path.stat().st_size}\n"
                             f"SHA256: {file_digest(path)}\n\n")
-            if not set(DOCKER_PACKAGES) <= found:
+            if not set(wanted) <= found:
                 raise SetupError("APT did not download a complete Debian Docker package set.")
         partial = packages / "partial"
         if partial.is_dir():
@@ -312,7 +406,7 @@ def download_docker_packages(cache: Path) -> None:
         packages.rename(cache)
 
 
-def install_docker_packages(cache: Path) -> None:
+def install_docker_packages(cache: Path, packages: tuple[str, ...]) -> None:
     with TemporaryDirectory(prefix="loaf-docker-apt-") as folder:
         directory = Path(folder)
         sources = directory / "sources.list"
@@ -324,16 +418,17 @@ def install_docker_packages(cache: Path) -> None:
             "-o", f"Dir::State::lists={lists}", "-o", "APT::Get::List-Cleanup=false",
         )
         apt("update", *options)
-        apt("install", "--no-install-recommends", *options, *DOCKER_PACKAGES)
+        apt("install", "--no-install-recommends", *options, *packages)
 
 
 def prepare_docker(project: Path, *, allow_downloads: bool = True) -> None:
-    cache = docker_cache(project)
+    suite = docker_release()
+    cache = docker_cache(project, suite)
     if not cache.exists():
         if not allow_downloads:
             raise SetupError(f"Docker installers for this host are missing from the backup: {cache}.")
         print("Download Debian Docker packages and their dependencies…", file=sys.stderr, flush=True)
-        download_docker_packages(cache)
+        download_docker_packages(cache, suite)
     if not (cache / "Packages").is_file() or (cache / "Packages").is_symlink():
         raise SetupError(f"Incomplete Docker installer cache at {cache}.")
     print(f"Debian Docker installers ready in {cache}")
@@ -343,7 +438,7 @@ def prepare_docker(project: Path, *, allow_downloads: bool = True) -> None:
         print("Docker Engine, Compose and Buildx are already installed.")
     else:
         print("Install Debian Docker packages from the local cache…", file=sys.stderr, flush=True)
-        install_docker_packages(cache)
+        install_docker_packages(cache, DOCKER_PACKAGES[suite])
 
 
 def docker_installer_files(project: Path) -> Iterator[Path]:
@@ -456,8 +551,8 @@ def package_digest(source: Path) -> str:
     return digest.hexdigest()
 
 
-def wheels_are_current(wheels: Path, inputs: dict) -> bool:
-    manifest = wheels / WHEEL_CACHE_RECORD
+def wheels_are_current(wheels: Path, inputs: dict, record: str = WHEEL_CACHE_RECORD) -> bool:
+    manifest = wheels / record
     if manifest.is_symlink():
         return False
     try:
@@ -533,15 +628,56 @@ def prepare_python_wheels(project: Path, python: Path | None = None, *, allow_do
                 )
             print("Fetch missing Python requirements…", file=sys.stderr, flush=True)
             check_python_step(run_python_step([*command, "--", *requirements]))
-        built = sorted(staging.glob("*.whl"))
-        record = staging / WHEEL_CACHE_RECORD
-        record.write_text(json.dumps({
-            "inputs": inputs, "wheels": {wheel.name: file_digest(wheel) for wheel in built},
-        }), encoding="utf-8")
-        for wheel in built:
-            wheel.replace(wheels / wheel.name)
-        record.replace(wheels / record.name)
+        publish_wheels(staging, wheels, WHEEL_CACHE_RECORD, inputs)
     return wheels
+
+
+def publish_wheels(staging: Path, wheels: Path, record_name: str, inputs: dict) -> None:
+    """Move complete staged wheels into the cache, then record their digests."""
+    built = sorted(staging.glob("*.whl"))
+    record = staging / record_name
+    record.write_text(json.dumps({
+        "inputs": inputs, "wheels": {wheel.name: file_digest(wheel) for wheel in built},
+    }), encoding="utf-8")
+    for wheel in built:
+        wheel.replace(wheels / wheel.name)
+    record.replace(wheels / record.name)
+
+
+def install_test_packages(project: Path) -> None:
+    """Cache the optional test packages as wheels and install them into the running virtualenv."""
+    requirements = project / TEST_REQUIREMENTS
+    if not requirements.is_file():
+        raise SetupError(f"No test requirements at {requirements}. Run setup tests in the loaf source checkout.")
+    if sys.version_info < (3, 11):
+        raise SetupError("The terminal server API tests require Python 3.11 or newer, like the terminal image.")
+    if sys.prefix == sys.base_prefix:
+        raise SetupError("Run setup tests with the virtualenv that runs loaf test, for example .venv/bin/loaf setup tests.")
+    python = Path(sys.executable)
+    wheels = cache_directory(project, PYTHON_WHEEL_DIR)
+    inputs = {
+        "requirements": file_digest(requirements),
+        "python": [sys.version.split()[0], sys.implementation.name, sysconfig.get_platform(),
+                   sysconfig.get_config_var("SOABI"), list(libc_ver())],
+    }
+    if wheels_are_current(wheels, inputs, TEST_WHEEL_RECORD):
+        print("Reuse the cached test package wheels.", file=sys.stderr, flush=True)
+    else:
+        wheels.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(prefix=".loaf-wheels-", dir=wheels) as folder:
+            staging = Path(folder)
+            command = [*pip_command(python), "wheel", "--wheel-dir", str(staging), "--find-links", str(wheels),
+                       "--requirement", str(requirements)]
+            print("Cache the test package wheels…", file=sys.stderr, flush=True)
+            if run_python_step([*command, "--no-index"], env=local_pip_environment()).returncode:
+                print("Fetch the missing test packages and their requirements…", file=sys.stderr, flush=True)
+                check_python_step(run_python_step(command))
+            publish_wheels(staging, wheels, TEST_WHEEL_RECORD, inputs)
+    print("Install the test packages from the wheel cache…", file=sys.stderr, flush=True)
+    check_python_step(run_python_step([
+        *pip_command(python), "install", "--no-index", "--find-links", str(wheels), "--requirement", str(requirements),
+    ], env=local_pip_environment()))
+    print(f"Test packages ready in {sys.prefix}")
 
 
 def install_python(project: Path) -> None:
@@ -601,7 +737,18 @@ def install_python(project: Path) -> None:
     if previous:
         print(f"Previous virtualenv saved in {previous}")
     print(f"Python wheels ready in {wheels}")
-    print(f"Launcher ready: {shlex.quote(str(entry))}")
+    print(f"Launcher ready: {shlex.quote(str(link_checkout_launcher(project)))}")
+
+
+CHECKOUT_LAUNCHER = Path(".venv/bin/loaf")
+
+
+def link_checkout_launcher(project: Path) -> Path:
+    """Give a checkout the same ./loaf entry point as standalone and restored deployments."""
+    launcher = project / "loaf"
+    if not (launcher.exists() or launcher.is_symlink()):
+        launcher.symlink_to(CHECKOUT_LAUNCHER)
+    return launcher
 
 
 def install(project: Path, *, with_docker_deps: bool = False) -> None:

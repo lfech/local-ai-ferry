@@ -1,0 +1,11 @@
+#!/bin/sh
+# Purge removes the generated key and empty directories. Backups and Docker volumes stay.
+set -e
+if [ "$1" = purge ]; then
+    rm -f /etc/loaf/terminal-server.key /var/lib/loaf/.run.lock
+    rmdir --ignore-fail-on-non-empty /etc/loaf /var/lib/loaf/backup /var/lib/loaf 2>/dev/null || true
+fi
+if [ -d /run/systemd/system ]; then
+    systemctl --system daemon-reload >/dev/null || true
+fi
+exit 0

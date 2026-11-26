@@ -1,6 +1,7 @@
 """Check terminal-server options, per-account lifecycle and the terminal proxy."""
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, closing, redirect_stderr, redirect_stdout
 import hashlib
 import importlib.util
@@ -647,11 +648,17 @@ with urlopen(request, timeout=45) as response:
             self.assertEqual(target.stat().st_mode & 0o777, 0o600)
             self.assertEqual(workspace_shell("cat /workspace/code.c"), "persistent work")
 
-    def test_offline_workspaces_survive_a_cold_restart(self):
-        self.check_profile("offline", "open-webui", bridge_options=self.bridge_options())
-
-    def test_connected_workspaces_reopen_after_removing_the_uplink(self):
-        self.check_profile("online", "open-webui-online", bridge_options=self.bridge_options())
+    def test_offline_and_connected_workspaces_survive_a_cold_restart(self):
+        # Each profile uses its own Compose project, volumes and labels, so both run at once.
+        bridge_options = self.bridge_options()
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            checks = {
+                profile: executor.submit(self.check_profile, profile, webui, bridge_options=bridge_options)
+                for profile, webui in (("offline", "open-webui"), ("online", "open-webui-online"))
+            }
+            for profile, check in checks.items():
+                with self.subTest(profile=profile):
+                    check.result()
 
     def bridge_options(self):
         version = command(["docker", "version", "--format", "{{.Server.Version}}"]).strip()

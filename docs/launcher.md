@@ -14,13 +14,15 @@ the Compose project and configuration defaults. The test suite lives in
 
 ```bash
 PYTHONPATH=python-package/src python3 -m loaf install
-.venv/bin/loaf --help
+./loaf --help
 ```
 
 The release executable includes Python. Its setup prepares default
 configuration and links the packaged Docker project. Both forms of setup
 create the configured terminal server key when it is missing. After source setup,
-run `source .venv/bin/activate` or call `.venv/bin/loaf` directly.
+run `source .venv/bin/activate` or call `./loaf` directly. Source setup
+links `./loaf` to `.venv/bin/loaf` unless that path exists, so a checkout uses
+the same command as standalone and restored deployments.
 [Release executable](releases.md#run-the-executable)
 
 The runtime has no third-party dependencies. Setuptools is a build dependency.
@@ -30,7 +32,7 @@ package metadata. The `loaf` command and `python -m loaf` call the same launcher
 registered through a [console entry point](https://setuptools.pypa.io/en/latest/userguide/entry_point.html#console-scripts).
 
 `loaf --help` lists commands and global flags. Use `loaf COMMAND --help` for
-command flags. On Debian, use `.venv/bin/loaf` with a login that has
+command flags. On Debian, use `./loaf` with a login that has
 Docker access. [Command reference](cli-help.md) · [Docker access](debian.md#docker-access)
 
 ## Prepare Python installation offline
@@ -58,7 +60,7 @@ complete wheel directory for the selected Python lets pip work offline.
 
 ```bash
 PYTHONPATH=python-package/src python3 -m loaf install
-.venv/bin/loaf --help
+./loaf --help
 ```
 
 The launcher and its build backend use pure-Python wheels. The destination
@@ -72,7 +74,43 @@ python -m pip install --no-index --find-links install-cache/wheels local-ai-ferr
 Run `loaf link-docker-project` in the directory where you want to work.
 Use the source checkout for host setup and full backups when installing
 from a wheel. [Release executable setup](releases.md#run-the-executable)
+
+### Test packages
+
+The terminal server API tests need `aiohttp`, `httpx` and Open Terminal.
+Run `loaf setup tests` with the virtualenv that runs `loaf test`. It
+requires Python 3.11 or newer and a source checkout. It caches the pinned
+packages from
+[`tests/requirements.txt`](../python-package/tests/requirements.txt) and
+their requirements as wheels in `install-cache/wheels/`, with a separate
+cache record. Then it installs them from that directory only.
+
+```bash
+./loaf setup tests
+```
+
+Repeat runs reuse the cache when the pins and Python are unchanged. Setup
+tries local wheels first and fetches missing packages through pip's
+configured sources. Backups from the checkout carry the test wheels and
+their record. A recovered checkout with the same Python version and
+platform can install them offline. Some wheels are platform-specific.
+`loaf clean --full` removes them with the rest of the install cache.
 [pip local install reference](https://pip.pypa.io/en/stable/cli/pip_install/#examples)
+
+## Upgrade the standalone executable
+
+Replace the `loaf` file, then run `./loaf setup` in the deployment. Setup
+updates `docker-project` and the exported guides to the new release and keeps
+your settings. Build the images while connected with `./loaf build`, or load
+newer images from a backup. `./loaf version` shows the release in use.
+
+## Read the bundled guides
+
+Every installation carries the guides of its release. `loaf docs` lists them
+and `loaf docs NAME` prints one. Standalone setup writes them to `docs/` in the
+deployment, with links into `docker-project/`. A `docs/` directory that setup
+did not create stays untouched. The Debian package also installs the manual
+page for `man loaf`.
 
 ## Link the Docker project
 
@@ -88,8 +126,9 @@ From a fresh checkout, you can create the link before setup with
 
 `docker-project` is a symlink to the installed package's data directory. It
 exposes `compose.yml`, `docker/`, and the [packaged configuration](../python-package/src/loaf/data/config/).
-Repeating the command reuses the same link. If that path is occupied, `loaf`
-reports a conflict. Use `--dry-run` to preview the link or `--project-dir PATH`
+Repeating the command reuses the same link. A link to another loaf release
+is updated in place. `loaf` always uses its own deployment files, even
+before that update. Any other existing path is reported as a conflict. Use `--dry-run` to preview the link or `--project-dir PATH`
 to place it elsewhere.
 
 From a source checkout, `loaf build` and the other launcher commands find the

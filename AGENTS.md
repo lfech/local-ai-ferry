@@ -36,6 +36,7 @@ All relevant test runs shall be recorded into `docs/verification-record.md`.
 | Docker build contexts and direct Compose use | [Deployment data](python-package/src/loaf/data/), [Link the Docker project](docs/launcher.md#link-the-docker-project) |
 | Per-account Open Terminal setup, isolation and tests | [Terminal server](docs/terminal-server.md) |
 | Archive format and recovery | [Transfer](docs/transfer.md) |
+| Debian package and system deployment | [Installation](docs/installation.md#debian-package), [Package sources](packaging/debian/), [build-deb.sh](scripts/build-deb.sh) |
 | Operational problems | [Troubleshooting](docs/troubleshooting.md) |
 | Test commands, coverage and prerequisites | [Verification](docs/verification.md) |
 | Timestamped test outcomes and environments | [Verification record](docs/verification-record.md) |

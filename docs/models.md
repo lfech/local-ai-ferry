@@ -4,8 +4,12 @@
 
 Run these examples from the checkout.
 
-The default `config/models.ini` selects SmolLM2-135M-Instruct in Q2_K,
-an 88 MB chat model. [Published GGUF](https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/blob/main/SmolLM2-135M-Instruct-Q2_K.gguf)
+The default `config/models.ini` selects IBM's Granite 4.0 H 350M in Q4_K_M,
+a 223 MB chat model that can call tools. It is the smallest well-known model
+whose tool calls Ollama recognizes and returns reliably. Qwen3 0.6B in
+Q4_K_M, at 397 MB, is the next size, with more precise tool arguments.
+[Published GGUF](https://huggingface.co/ibm-granite/granite-4.0-h-350m-GGUF) ·
+[Qwen3 0.6B GGUF](https://huggingface.co/unsloth/Qwen3-0.6B-GGUF)
 
 The [16 GB VRAM selection](../config/model-examples/models.16gb.ini),
 [8 GB VRAM selection](../config/model-examples/models.8gb.ini) and

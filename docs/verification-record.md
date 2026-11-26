@@ -4,6 +4,95 @@
 
 Older entries use the current command and project names in examples.
 
+## 2026-11-26 12:11:52 +0100 — Installation channels, settings layers and the Debian package
+
+- On Debian 13.8 in WSL2 with Python 3.13.5, Docker Engine 26.1.5 and Compose
+  2.26.1-4, the Docker-free suite passed 242 of 288 cases with 46 skips. The
+  regular Docker suite and the Debian package tests passed all 40 cases in
+  53.8 seconds.
+- The full run with `RUN_DOCKER_TESTS=1` and `RUN_TERMINAL_SERVER_TESTS=1`
+  at 12:05 ran 288 cases in 291.1 seconds. It had one error and 7 skips:
+  the CPU/GPU model workflows (6) and the catalog check (1). The error came
+  from a backup check that refused a project without `config/`. After the
+  fix, the terminal backup round trip passed in 46.5 seconds and the
+  transfer suite passed.
+- `scripts/build-deb.sh` built `loaf_0.2.2_all.deb` from the wheel.
+  `lintian` 2.122.0 on Debian 13 reported no tags with `--pedantic
+  --display-info --fail-on error,warning`. The package installed, ran and
+  purged on Debian 12 with Python 3.11.2 and Debian 13 with Python 3.13.5.
+  The manual page passed `groff -ww`, and the purge kept a file in
+  `/var/lib/loaf/backup`. The Docker dependencies were forced, because the
+  containers have no Docker.
+- `loaf binary` built the standalone executable in 17 seconds, and its
+  self-check passed. In a deployment whose `docker-project` linked to a
+  removed earlier runtime, `offline --dry-run` used the current release's
+  Compose file and `setup` updated the link. A `project` backup from that
+  deployment verified with the installed Debian package's system launcher
+  in a Debian 13 container.
+- Not run: the release handoff with `--deb`, the GPU model workflow, and a
+  build with Compose 2.38.2 and Buildx 0.39.0.
+
+## 2026-11-26 10:47:35 +0100 — Test packages through setup
+
+- On Debian 13.8 in WSL2 with Python 3.13.5, `.venv/bin/loaf setup tests`
+  fetched and cached 56 test wheels in 26 seconds. The install step then
+  failed with a permission error. Between 10:37:06 and 10:37:09, root had
+  installed unpinned versions into `.venv`, including Open Terminal 0.18.6,
+  `aiohttp` 3.14.5 and `multidict` 7.2.1. pip could not replace these root-owned
+  files as the regular user and left the environment unchanged.
+- A new virtualenv on the same Python ran `loaf setup tests` offline from
+  the cache in 5 seconds. It installed `aiohttp` 3.11.16, `yarl` 1.19.0,
+  `httpx` 0.28.1 and Open Terminal 0.17.20. In that environment, the 6
+  provisioner and 1 runner cases passed, also with no display variables set.
+- The Docker-free suite passed 222 of 266 cases with 44 skips in that
+  virtualenv and in `.venv`. The skips covered the Docker, GPU, catalog and
+  terminal Docker opt-ins and the 2 host rsync fixtures. The documentation
+  checks passed and the Verify workflow parsed as YAML. The GitHub workflow
+  itself did not run.
+
+## 2026-11-26 10:28:28 +0100 — Test coverage and runtime review
+
+- On Debian 13.8 in WSL2 with Python 3.13.5, Docker Engine 26.1.5 and
+  Compose 2.26.1-4, `loaf test -v` with `RUN_DOCKER_TESTS=1` and
+  `RUN_TERMINAL_SERVER_TESTS=1` passed 246 of 262 cases in 318.7 seconds.
+  The 16 skips covered the CPU/GPU model workflows (6, not enabled), the
+  provisioner and runner API cases (7, no `aiohttp` or Open Terminal on the
+  host), the host rsync fixtures (2, no `rsync`), and the catalog check (1,
+  not enabled). Badges were not refreshed.
+- The 6 provisioner cases and the runner case passed inside
+  `local/open-terminal:latest` with the checkout mounted read-only and
+  networking disabled. The provisioner used Debian Python 3.13.5 with
+  `aiohttp` 3.11.16. The runner used the image's Python 3.12.16.
+- Before the changes, the Docker-free suite ran 257 cases in 11.8 seconds
+  with one failure: the editable install still carried v0.1.0 metadata and
+  an older `THIRD_PARTY_NOTICES.txt`. Reinstalling the editable package from
+  the wheel cache resolved it. The regular Docker suite ran 38 cases in 26.3
+  seconds. The terminal-server module ran 17 cases in 389.1 seconds,
+  including 153.1 seconds for the connected and 135.4 seconds for the
+  offline profile check. Run concurrently, both profile checks passed in
+  176.4 seconds.
+- From an empty data directory, the local full WebUI image reached
+  `/health` in 36.5 and 35.4 seconds. Open WebUI v0.13.4 slim took 26.3 and
+  25.8 seconds.
+- In-process line coverage of the Docker-free suite, measured with Python's
+  `trace` module: `config` 96.7%, `cli` 91.6%, `transfer` 88.5%,
+  `readiness` 86.5%, `setup` 70.0% and `locks` 68.3%. The provisioner did
+  not run. The new archive tests failed for each of 5 removed safety checks.
+- Not run: the GPU model workflow, the release handoff, and a build with
+  Compose 2.38.2 and Buildx 0.39.0.
+
+## 2026-11-26 10:05:32 +0100 — Build inputs and default images
+
+- All 20 documentation and configuration cases passed, including the
+  comparison of packaged, built-in, Compose and Dockerfile image defaults.
+  All 12 Compose contract cases passed, including the build input check.
+- With Compose 2.26.1-4, which uses the classic builder, `loaf build` ran
+  from a project directory outside the checkout through a `docker-project`
+  link. It built the downloader, serving and WebUI images through the
+  single Ollama context in 10 seconds, based on existing local images. Both
+  Ollama images contained their executable script. The temporary images
+  were removed. [Ollama build selection](configuration.md#select-an-ollama-build-recipe)
+
 ## 2026-11-25 23:28:20 +0100 — Test badge run
 
 `loaf test --badges` passed on Linux with Python 3.13.2.

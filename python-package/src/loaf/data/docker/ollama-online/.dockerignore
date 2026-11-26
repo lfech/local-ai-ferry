@@ -1,3 +1,0 @@
-# The shared Dockerfile uses only the export helper from this context.
-*
-!export-modelfiles.sh

@@ -20,17 +20,25 @@ def data_home() -> Path:
     return configured if configured.is_absolute() else Path.home() / ".local/share"
 
 
+def shared_directory(path: Path) -> bool:
+    """A setgid directory, such as the system deployment's, shares its files with the directory's group."""
+    return os.name != "nt" and path.is_dir() and bool(path.stat().st_mode & stat.S_ISGID)
+
+
 @contextmanager
 def lock_file(path: Path, message: str) -> Iterator[None]:
     # Do not follow symlinks or open special files when taking a lock.
     if path.is_symlink():
         raise OSError(f"Lock file must be a regular file: {path}")
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-    descriptor = os.open(path, flags | getattr(os, "O_BINARY", 0), 0o600)
+    shared = shared_directory(path.parent)
+    descriptor = os.open(path, flags | getattr(os, "O_BINARY", 0), 0o660 if shared else 0o600)
     try:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise OSError(f"Lock file must be a regular file: {path}")
+        if shared and info.st_uid == os.geteuid() and info.st_mode & 0o060 != 0o060:
+            os.fchmod(descriptor, 0o660)
         if os.name == "nt":
             import msvcrt
 

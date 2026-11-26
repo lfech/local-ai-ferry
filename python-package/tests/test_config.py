@@ -5,6 +5,7 @@ from hashlib import sha256
 import io
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -27,6 +28,22 @@ class ConfigTests(unittest.TestCase):
         settings = config.load(self.config_dir)
         self.assertEqual(settings, config.Settings())
         self.assertTrue(settings.auth)
+
+    def test_packaged_files_repeat_the_built_in_defaults(self):
+        defaults = config.Settings()
+        self.assertEqual(config.load(assets.DATA_DIR / "config"), defaults)
+        # Direct Compose calls and plain Docker builds use these fallbacks without loaf.
+        docker = assets.DATA_DIR / "docker"
+        for path, pattern, expected in (
+            (assets.DATA_DIR / "compose.yml", r"LOAF_INI_OLLAMA_IMAGE:-([^}]+)\}", defaults.ollama_image),
+            (assets.DATA_DIR / "compose.yml", r"LOAF_INI_WEBUI_IMAGE:-([^}]+)\}", defaults.webui_image),
+            (assets.DATA_DIR / "compose.yml", r"LOAF_TERMINAL_BASE_IMAGE:-([^}]+)\}", defaults.terminal_server_image),
+            (docker / "ollama/Dockerfile", r"ARG OLLAMA_IMAGE=(\S+)", defaults.ollama_image),
+            (docker / "open-webui/Dockerfile", r"ARG OPEN_WEBUI_IMAGE=(\S+)", defaults.webui_image),
+            (docker / "terminal-server/Dockerfile", r"ARG OPEN_TERMINAL_IMAGE=(\S+)", defaults.terminal_server_image),
+        ):
+            with self.subTest(path=path.name, pattern=pattern):
+                self.assertEqual(re.findall(pattern, path.read_text(encoding="utf-8")), [expected])
 
     def test_ini_reads_literal_paths_and_typed_values(self):
         self.path.write_text(
@@ -52,18 +69,6 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.port, 3201)
         self.assertFalse(settings.auth)
 
-    def test_previous_compact_ollama_tags_select_the_packaged_recipes(self):
-        for tag, recipe in (
-            ("local/loaf-ollama-cpu-test:0.40.18", "loaf-ollama-cpu"),
-            ("local/loaf-ollama-cuda-test:0.40.18", "loaf-ollama-cuda13"),
-        ):
-            with self.subTest(tag=tag):
-                self.path.write_text(f"[images]\nollama_image = {tag}\n", encoding="utf-8")
-                settings = config.load(self.config_dir)
-                packaged = cli.Compose(self.project, files=(assets.DATA_DIR / "compose.yml",), settings=settings)
-                self.assertEqual(packaged.variables()["LOAF_INI_OLLAMA_IMAGE"], recipe)
-                custom = cli.Compose(self.project, settings=settings)
-                self.assertEqual(custom.variables()["LOAF_INI_OLLAMA_IMAGE"], tag)
 
     def test_terminal_base_image_uses_the_images_section(self):
         defaults = self.project / "defaults"

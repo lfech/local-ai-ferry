@@ -1,7 +1,10 @@
 """Host setup probes and package selection without modifying the host."""
 
 from contextlib import redirect_stderr, redirect_stdout
-from io import StringIO
+from hashlib import sha256
+from io import BytesIO, StringIO
+import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -10,6 +13,7 @@ import unittest
 from unittest.mock import patch
 
 from loaf import cli, setup
+from tests import ROOT
 
 
 class SetupTests(unittest.TestCase):
@@ -100,6 +104,109 @@ class SetupTests(unittest.TestCase):
             self.assertEqual(list(project.iterdir()), [project / "compose.yml"])
         install.assert_not_called()
 
+    def test_setup_tests_installs_only_the_test_packages_under_the_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+
+            def install(path):
+                self.assertEqual(path, project)
+                with self.assertRaises(cli.AlreadyRunningError), cli.project_lock(project / ".run.lock"):
+                    self.fail("setup tests released its checkout lock")
+
+            with (
+                patch.object(setup, "install_test_packages", side_effect=install) as packages,
+                patch.object(setup, "install") as full_setup,
+                redirect_stdout(StringIO()) as output,
+            ):
+                self.assertEqual(cli.main(["--project-dir", directory, "setup", "tests", "--dry-run"]), 0)
+                self.assertFalse((project / ".run.lock").exists())
+                packages.assert_not_called()
+                self.assertEqual(cli.main(["--project-dir", directory, "install", "tests"]), 0)
+            packages.assert_called_once_with(project)
+            full_setup.assert_not_called()
+            self.assertIn(str(project / setup.PYTHON_WHEEL_DIR), output.getvalue())
+            self.assertFalse((project / cli.config.TERMINAL_SECRET).exists())
+
+    def test_setup_tests_reports_unusable_environments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            with redirect_stderr(StringIO()) as errors:
+                self.assertEqual(cli.main(["--project-dir", directory, "setup", "tests"]), 1)
+            self.assertIn("No test requirements", errors.getvalue())
+            requirements = project / setup.TEST_REQUIREMENTS
+            requirements.parent.mkdir(parents=True)
+            requirements.write_text("httpx==1\n", encoding="utf-8")
+            for version, base_prefix, message in (
+                ((3, 10, 14), "/usr", "require Python 3.11 or newer"),
+                ((3, 13, 5), sys.prefix, "virtualenv that runs loaf test"),
+            ):
+                with (
+                    self.subTest(message), patch.object(sys, "version_info", version),
+                    patch.object(sys, "base_prefix", base_prefix), patch.object(setup.subprocess, "run") as run,
+                    self.assertRaisesRegex(setup.SetupError, message),
+                ):
+                    setup.install_test_packages(project)
+                run.assert_not_called()
+
+    @unittest.skipIf(sys.version_info < (3, 11), "setup tests requires Python 3.11 or newer.")
+    def test_setup_tests_caches_wheels_and_installs_only_from_the_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            requirements = project / setup.TEST_REQUIREMENTS
+            requirements.parent.mkdir(parents=True)
+            requirements.write_text("aiohttp==1\n", encoding="utf-8")
+            wheels = project / setup.PYTHON_WHEEL_DIR
+            calls = []
+
+            def pip(command, **kwargs):
+                action = "install" if "install" in command else "wheel"
+                offline = "--no-index" in command
+                calls.append((action, offline))
+                self.assertEqual(command[command.index("--find-links") + 1], str(wheels))
+                if action == "install":
+                    self.assertTrue(offline)
+                    self.assertEqual(kwargs["env"]["PIP_CONFIG_FILE"], os.devnull)
+                elif offline and not (wheels / "aiohttp-1-py3-none-any.whl").is_file():
+                    return subprocess.CompletedProcess(command, 1, stdout="No matching distribution")
+                else:
+                    stage = Path(command[command.index("--wheel-dir") + 1])
+                    for name in ("aiohttp-1-py3-none-any.whl", "yarl-1-py3-none-any.whl"):
+                        (stage / name).write_bytes(requirements.read_bytes())
+                return subprocess.CompletedProcess(command, 0, stdout="pip log\n")
+
+            with (
+                patch.object(sys, "base_prefix", "/usr"), patch.object(sys, "prefix", "/project/.venv"),
+                patch.object(setup.subprocess, "run", side_effect=pip),
+                redirect_stdout(StringIO()), redirect_stderr(StringIO()) as status,
+            ):
+                setup.install_test_packages(project)
+                self.assertEqual(calls, [("wheel", True), ("wheel", False), ("install", True)])
+                self.assertEqual(sorted(path.name for path in wheels.iterdir()), [
+                    setup.TEST_WHEEL_RECORD, "aiohttp-1-py3-none-any.whl", "yarl-1-py3-none-any.whl",
+                ])
+                calls.clear()
+                setup.install_test_packages(project)
+                self.assertEqual(calls, [("install", True)])
+                self.assertIn("Reuse the cached test package wheels", status.getvalue())
+                calls.clear()
+                (wheels / "yarl-1-py3-none-any.whl").write_bytes(b"damaged")
+                setup.install_test_packages(project)
+                self.assertEqual(calls, [("wheel", True), ("install", True)])
+                self.assertTrue(setup.wheels_are_current(
+                    wheels, json.loads((wheels / setup.TEST_WHEEL_RECORD).read_text())["inputs"],
+                    setup.TEST_WHEEL_RECORD,
+                ))
+                self.assertFalse(setup.wheels_are_current(wheels, {}, setup.WHEEL_CACHE_RECORD))
+            self.assertFalse([path for path in wheels.iterdir() if path.name.startswith(".loaf-wheels-")])
+
+    def test_test_requirements_pin_the_bundled_open_terminal_version(self):
+        pins = dict(
+            line.split("==") for line in (ROOT / setup.TEST_REQUIREMENTS).read_text(encoding="utf-8").splitlines()
+            if line and not line.startswith("#")
+        )
+        self.assertEqual(set(pins), {"aiohttp", "yarl", "httpx", "open-terminal"})
+        self.assertEqual(pins["open-terminal"], cli.config.OPEN_TERMINAL_IMAGE.rsplit(":", 1)[1].removesuffix("-slim"))
+
     def test_setup_opts_in_to_docker_dependencies(self):
         with tempfile.TemporaryDirectory() as directory:
             project = self.quick_setup_project(directory)
@@ -136,10 +243,14 @@ class SetupTests(unittest.TestCase):
                 self.assertEqual(list(project.iterdir()), [project / "loaf"])
                 self.assertEqual(cli.main(command), 0)
                 configuration = project / "config/config.ini"
-                self.assertTrue(configuration.is_file())
-                self.assertTrue((project / "config/models.ini").is_file())
+                # Every key is commented so that system settings and packaged defaults stay in effect.
+                self.assertEqual(cli.config.load(project / "config"), cli.config.Settings())
+                self.assertIn("# ollama_image = ", configuration.read_text(encoding="utf-8"))
+                self.assertFalse((project / "config/models.ini").exists())
                 self.assertTrue((project / cli.config.TERMINAL_SECRET).is_file())
                 self.assertTrue((project / "docker-project/compose.yml").is_file())
+                self.assertEqual((project / "docs/.loaf-docs").read_text().strip(), cli.assets.release_version())
+                self.assertTrue((project / "docs/README.md").is_file())
                 configuration.write_text("# local changes\n", encoding="utf-8")
                 self.assertEqual(cli.main(command), 0)
             self.assertEqual(configuration.read_text(encoding="utf-8"), "# local changes\n")
@@ -163,29 +274,94 @@ class SetupTests(unittest.TestCase):
             self.assertFalse((project / "docker-project").is_symlink())
 
     def test_prepared_docker_packages_install_with_only_the_local_source(self):
-        with tempfile.TemporaryDirectory(prefix="checkout with spaces ") as directory:
-            project = Path(directory)
-            cache = project / setup.DOCKER_DEB_DIR / "trixie-amd64"
-            cache.mkdir(parents=True)
-            (cache / "Packages").touch()
+        for suite in ("trixie", "bookworm"):
+            with self.subTest(suite=suite), tempfile.TemporaryDirectory(prefix="checkout with spaces ") as directory:
+                project = Path(directory)
+                cache = project / setup.DOCKER_DEB_DIR / f"{suite}-amd64"
+                cache.mkdir(parents=True)
+                (cache / "Packages").touch()
 
-            def apt(mode, *args):
-                source = next(arg.split("=", 1)[1] for arg in args if arg.startswith("Dir::Etc::sourcelist="))
-                self.assertEqual(Path(source).read_text(encoding="utf-8"), f"deb [trusted=yes] {cache.as_uri()} ./\n")
-                self.assertIn("Dir::Etc::sourceparts=-", args)
-                if mode == "install":
-                    self.assertEqual(args[-len(setup.DOCKER_PACKAGES):], setup.DOCKER_PACKAGES)
+                def apt(mode, *args):
+                    source = next(arg.split("=", 1)[1] for arg in args if arg.startswith("Dir::Etc::sourcelist="))
+                    self.assertEqual(Path(source).read_text(encoding="utf-8"), f"deb [trusted=yes] {cache.as_uri()} ./\n")
+                    self.assertIn("Dir::Etc::sourceparts=-", args)
+                    if mode == "install":
+                        self.assertEqual(args[-len(setup.DOCKER_PACKAGES[suite]):], setup.DOCKER_PACKAGES[suite])
 
-            with (
-                patch.object(setup, "docker_cache", return_value=cache),
-                patch.object(setup.shutil, "which", return_value=None),
-                patch.object(setup, "download_docker_packages") as download,
-                patch.object(setup, "apt", side_effect=apt) as apt_calls,
-                redirect_stdout(StringIO()), redirect_stderr(StringIO()),
-            ):
-                setup.prepare_docker(project)
-            download.assert_not_called()
-            self.assertEqual([call.args[0] for call in apt_calls.call_args_list], ["update", "install"])
+                with (
+                    patch.object(setup, "docker_release", return_value=suite),
+                    patch.object(setup, "docker_cache", return_value=cache),
+                    patch.object(setup.shutil, "which", return_value=None),
+                    patch.object(setup, "download_docker_packages") as download,
+                    patch.object(setup, "apt", side_effect=apt) as apt_calls,
+                    redirect_stdout(StringIO()), redirect_stderr(StringIO()),
+                ):
+                    setup.prepare_docker(project)
+                download.assert_not_called()
+                self.assertEqual([call.args[0] for call in apt_calls.call_args_list], ["update", "install"])
+
+    def test_docker_downloads_use_a_private_state_and_the_pinned_repository_key(self):
+        key = b"-----BEGIN PGP PUBLIC KEY BLOCK-----\nfixture\n"
+        for suite in ("trixie", "bookworm"):
+            with self.subTest(suite=suite), tempfile.TemporaryDirectory() as directory:
+                cache = Path(directory) / setup.DOCKER_DEB_DIR / f"{suite}-amd64"
+                calls = []
+
+                def run(command, **kwargs):
+                    options = dict(arg.split("=", 1) for arg in command if "=" in arg and "::" in arg)
+                    parts = Path(options["Dir::Etc::sourceparts"])
+                    docker_list = parts / "loaf-docker.list"
+                    calls.append((command[-1] if command[-1] == "update" else "install", options, docker_list.is_file()
+                                  and docker_list.read_text(encoding="utf-8")))
+                    if command[-1] != "update":
+                        for name in setup.DOCKER_PACKAGES[suite]:
+                            (Path(options["Dir::Cache::archives"]) / f"{name}_1_amd64.deb").write_bytes(b"deb")
+                    return subprocess.CompletedProcess(command, 0)
+
+                def control(command, **kwargs):
+                    return f"Package: {Path(command[-1]).name.split('_')[0]}\nVersion: 1\n"
+
+                with (
+                    patch.object(setup.subprocess, "run", side_effect=run),
+                    patch.object(setup.subprocess, "check_output", side_effect=control),
+                    patch.object(setup, "package_architecture", return_value="amd64"),
+                    patch.object(setup, "urlopen", return_value=BytesIO(key)),
+                    patch.object(setup, "DOCKER_KEY_SHA256", sha256(key).hexdigest()),
+                ):
+                    setup.download_docker_packages(cache, suite)
+                self.assertEqual([call[0] for call in calls], ["update", "install"])
+                for _, options, docker_list in calls:
+                    self.assertEqual(options["Dir::Cache::pkgcache"], "")
+                    self.assertFalse(options["Dir::State::lists"].startswith("/var/lib/apt"))
+                    if suite == "bookworm":
+                        self.assertIn(f"signed-by=", docker_list)
+                        self.assertIn(f"] {setup.DOCKER_REPOSITORY} bookworm stable", docker_list)
+                    else:
+                        self.assertFalse(docker_list)
+                index = (cache / "Packages").read_text(encoding="utf-8")
+                for name in setup.DOCKER_PACKAGES[suite]:
+                    self.assertIn(f"Package: {name}\n", index)
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(setup.subprocess, "run") as run,
+            patch.object(setup, "package_architecture", return_value="amd64"),
+            patch.object(setup, "urlopen", return_value=BytesIO(b"replaced key")),
+            self.assertRaisesRegex(setup.SetupError, "does not match the pinned SHA-256"),
+        ):
+            setup.download_docker_packages(Path(directory) / "bookworm-amd64", "bookworm")
+        run.assert_not_called()
+
+    def test_docker_dependencies_support_debian_12_and_13_only(self):
+        for release, supported in (({"ID": "debian", "VERSION_CODENAME": "bookworm"}, True),
+                                   ({"ID": "debian", "VERSION_CODENAME": "trixie"}, True),
+                                   ({"ID": "debian", "VERSION_CODENAME": "bullseye"}, False),
+                                   ({"ID": "ubuntu", "VERSION_CODENAME": "noble"}, False)):
+            with self.subTest(release=release), patch.object(setup, "freedesktop_os_release", return_value=release):
+                if supported:
+                    self.assertEqual(setup.docker_release(), release["VERSION_CODENAME"])
+                else:
+                    with self.assertRaisesRegex(setup.SetupError, "Debian 12 .bookworm. or 13 .trixie."):
+                        setup.docker_release()
 
     def test_apt_python_installs_matching_venv_package(self):
         python = Path("/usr/bin/python3.13")

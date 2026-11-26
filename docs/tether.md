@@ -31,8 +31,8 @@ any required system packages before disconnecting.
 
 ## Connect to your deployment
 
-1. Start the prepared deployment with `.venv/bin/loaf offline` or
-   `.venv/bin/loaf online` and note the printed WebUI address.
+1. Start the prepared deployment with `./loaf offline` or
+   `./loaf online` and note the printed WebUI address.
 2. Open the address in a browser on the Tether computer and confirm you can
    sign in. For a local deployment the default is `http://localhost:3000`.
    From another computer, forward the port using the
@@ -42,7 +42,7 @@ any required system packages before disconnecting.
    in with your WebUI account. Choose **Not now** at the optional Open
    Terminal prompt for chat-only use.
 4. Select one of the deployment's models and send a short test message.
-   If you cannot connect, check the address and run `.venv/bin/loaf status`
+   If you cannot connect, check the address and run `./loaf status`
    on the serving host. If a Tether feature needs a newer WebUI build,
    see [image upgrades](launcher.md#modes) and the publisher's release notes.
    [Open WebUI connection walkthrough](https://docs.openwebui.com/ecosystem/tether/#get-started)

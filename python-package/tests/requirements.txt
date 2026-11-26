@@ -1,0 +1,7 @@
+# Packages for the optional terminal server API tests. Install them with loaf setup tests.
+# aiohttp and yarl match the provisioner's Debian Python in the Open Terminal image.
+# open-terminal matches the image tag in config.ini. pip resolves their requirements.
+aiohttp==3.11.16
+yarl==1.19.0
+httpx==0.28.1
+open-terminal==0.17.20

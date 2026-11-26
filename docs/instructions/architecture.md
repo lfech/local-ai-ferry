@@ -12,20 +12,34 @@ newer. The launcher uses the Python 3.10+ standard library. The standalone
 Linux amd64 executable supplies its own Python and deployment files.
 [Installation](../installation.md) · [Release executable](../releases.md#run-the-executable)
 
+Three channels deliver the same launcher: the repository for development,
+the standalone executable for portable deployment directories, and the
+Debian package for the system deployment. A deployment directory is the
+current directory or `--project-dir`. The system deployment uses `/etc/loaf`
+for settings and `/var/lib/loaf` for data, backups and the lock. The Debian
+package selects it by default, and `--system` selects it from any channel.
+Settings layer as packaged defaults, then `/etc/loaf`, then a project's
+`config/config.ini`, and later layers override earlier ones. Only a project
+can move or skip the system layer. Every channel carries the guides of its
+release for `loaf docs`.
+[Settings layers](../configuration.md#project-configuration) · [Debian package](../installation.md#debian-package)
+
 ## CLI and Compose profiles
 
 The Python package ships the [deployment data](../../python-package/src/loaf/data/)
-with one Compose file, three core build contexts, the optional terminal server
-context and the default configuration. The two Ollama contexts share a
-multi-stage Dockerfile for registry bases and the bundled CPU and CUDA 13
-recipes. [Ollama build selection](../configuration.md#select-an-ollama-build-recipe) ·
+with one Compose file, the Ollama and Open WebUI build contexts, the optional
+terminal server context and the default configuration. Both Ollama images
+build from one context with a multi-stage Dockerfile for registry bases and
+the bundled CPU, CUDA 12 and CUDA 13 recipes. Each Dockerfile and default build secret
+stays inside its context, which Compose always allows Buildx to read.
+[Ollama build selection](../configuration.md#select-an-ollama-build-recipe) ·
 [Terminal server](../terminal-server.md)
 `loaf link-docker-project` exposes the deployment tree for direct Compose calls.
 [Direct Compose commands](../launcher.md#link-the-docker-project)
 
 | Command | Behavior |
 | --- | --- |
-| `loaf setup` / `loaf install` | Standalone setup copies missing configuration and links the packaged deployment. Source checkout setup prepares the Python wheel cache, virtualenv and NVIDIA Container Toolkit on Debian. Both create the terminal bearer key if needed. [Installation](../installation.md) |
+| `loaf setup` / `loaf install` | Standalone setup copies missing configuration and links the packaged deployment. Source checkout setup prepares the Python wheel cache, virtualenv and NVIDIA Container Toolkit on Debian. Both create the terminal bearer key if needed. `setup tests` adds the pinned test packages to the wheel cache and the running virtualenv. [Installation](../installation.md) |
 | `loaf binary` | Build or update the standalone Linux amd64 executable at `dist/loaf` using the current source files. [Local binary build](../releases.md#build-and-check-locally) |
 | `loaf clean` | Clear the user runtime cache and project temporaries. `--full` also clears generated installation files. Git, backups, settings, credentials and Docker data are preserved. [Cleanup](../launcher.md#clean-generated-files) |
 | `loaf build` | Builds the downloader, Ollama serving and Open WebUI images. Includes the terminal image when enabled. |
@@ -36,6 +50,7 @@ recipes. [Ollama build selection](../configuration.md#select-an-ollama-build-rec
 | `loaf import` | Stops the downloader and synchronizes the archive into the Ollama volume. Supports optional deletion of destination-only data. |
 | `loaf offline` | Switches to Ollama on an internal network and WebUI with offline settings. |
 | `loaf backup` / `loaf restore` | Create or recover a deployment bundle with selectable images, volumes and project components. Use `--models-only` for model-store transfer. |
+| `loaf version` / `loaf docs` | Shows the release, installation and default deployment, or prints the bundled guides and manual page. |
 | `loaf status` | Checks deployment readiness and lists the project's containers. [Readiness checks](../launcher.md#check-readiness-with-status) |
 | `loaf stop` | Stops services and removes their Compose containers by default. Use `-n` or `--no-remove-containers` to keep stopped service containers and their logs. Images and volumes persist. [Shutdown options](../launcher.md#stop-and-remove-containers) |
 | `loaf integration <name>` | Prints a systemd unit, Continue configuration or Tether installation instructions. [Host integrations](../installation.md#host-integrations) |
@@ -94,7 +109,8 @@ Changing the selection leaves existing exports and registrations in place.
 
 Both serving profiles use the same Ollama image and startup wrapper.
 NVIDIA GPU inference is the default and requires a compatible host driver
-and container runtime. The Compose service definition supplies `gpus: all`
+and container runtime. The default CUDA 13 recipe needs driver 580 or newer,
+and the CUDA 12 recipe needs 550 or newer. The Compose service definition supplies `gpus: all`
 for Compose 2.30 and newer and a device reservation for 2.26.1 through 2.29.x.
 With `--cpu`, the launcher applies `compose.cpu.yml` to remove the GPU
 requests and hide GPU devices from Ollama. CPU serving uses the same image,
@@ -201,7 +217,8 @@ all available components. The archive uses the following members.
 | --- | --- |
 | `volumes.tar` | The `ollama` and `open-webui` volumes and the persistent per-account terminal volumes when included. |
 | `images.tar` | The three core Docker images and the matching shared Open Terminal image when available locally. Chat package images stay on the source host. Use `--no-terminal-server` to omit the terminal image. |
-| `project.tar` | Configuration, saved Modelfiles and cached installers. Backups from source checkouts retain working files, Git history and the project virtualenv. |
+| `project.tar` | Configuration, saved Modelfiles and cached installers, the same for every channel. |
+| `source.tar` | Git history and working files of a source checkout, without settings, installer caches or the virtualenv. |
 | `terminal.json` | With `volumes`, the per-account volume inventory and bearer key when `[terminal_server] include_in_backup = true`. |
 | `sha256.json` | The SHA-256 digest of each payload. |
 
@@ -242,9 +259,10 @@ inside a copied source checkout backup to recover the checkout and the Docker
 data included in the bundle in one operation. [Backup recovery](../transfer.md#debian-restore)
 
 Source setup caches Python wheels in `install-cache/wheels/` and matching
-NVIDIA Toolkit installers in `install-cache/deb/nvidia/`. On Debian 13,
-`--with-docker-deps` also prepares native Engine, CLI, Compose, Buildx and
-their required packages with a local APT index under
-`install-cache/deb/docker/`. Each Docker cache targets one Debian release and
+NVIDIA Toolkit installers in `install-cache/deb/nvidia/`. On Debian 12 or 13,
+`--with-docker-deps` also prepares Engine, CLI, Compose, Buildx and their
+required packages with a local APT index under `install-cache/deb/docker/`.
+Debian 13 uses its own Docker packages. Debian 12 uses Docker's repository,
+trusted through a pinned key, with a private APT state. Each Docker cache targets one Debian release and
 package architecture. Standalone setup can install matching packages from
 the backup with the same flag. [Debian installation](../installation.md#disconnected-debian-installation)

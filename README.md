@@ -35,15 +35,19 @@ Compose deployment and the `loaf` CLI.
 ## Quick Setup
 
 On Debian amd64, the release executable includes Python and the deployment
-files. Run `loaf setup` to prepare the default configuration. If you
+files. On Debian 12 or 13, the Debian package installs `loaf` as a system
+application instead. [Debian package](docs/installation.md#debian-package)
+Run `loaf setup` to prepare the default configuration. If you
 copied a backup, follow setup with `loaf restore`. [Download and bootstrap](docs/releases.md#run-the-executable)
 
 ### Setup from source
 
 Prepare a connected Debian host with Python 3.10 or newer. The deployment
-needs Docker Engine, Compose 2.26.1 or newer, and Buildx. On Debian 13, setup
-can install Docker as described below. For GPU inference, install a working
-NVIDIA driver on the serving host.
+needs Docker Engine, Compose 2.26.1 or newer, and Buildx. On Debian 12 or 13,
+setup can install Docker as described below. For GPU inference, install NVIDIA
+driver 580 or newer on the serving host, or
+[select the CUDA 12 build](docs/configuration.md#select-an-ollama-build-recipe)
+for driver 550 or newer.
 [Debian host setup](docs/debian.md) · [WSL2 setup](docs/debian.md#debian-in-wsl2)
 
 From the checkout root, run setup to install the launcher and prepare its
@@ -66,17 +70,17 @@ server. [Terminal server setup](docs/terminal-server.md#enable-and-connect)
 Build the images, download the selected models, and start offline serving.
 
 ```bash
-.venv/bin/loaf build
-.venv/bin/loaf download
-.venv/bin/loaf offline
+./loaf build
+./loaf download
+./loaf offline
 ```
 
 On a preparation machine without NVIDIA GPU access, use
-`.venv/bin/loaf offline --cpu` or `.venv/bin/loaf online --cpu`.
+`./loaf offline --cpu` or `./loaf online --cpu`.
 Test a chat on CPU and then back up the same deployment for the GPU target.
 [CPU serving](docs/launcher.md#serve-on-cpu)
 
-Use `.venv/bin/loaf upgrade` in place of `build` to refresh upstream images.
+Use `./loaf upgrade` in place of `build` to refresh upstream images.
 Edit `config/config.ini` for deployment settings or `config/models.ini` for
 the model selection.
 [Model selection](docs/launcher.md#select-models)
@@ -84,12 +88,12 @@ the model selection.
 
 Open the printed WebUI address, which defaults to **http://localhost:3000**.
 With the default settings, create the first admin account and send a test
-message to **SmolLM2-135M-Instruct**. [WebUI settings](docs/configuration.md#webui-settings)
+message to **Granite-4.0-H-350M**. [WebUI settings](docs/configuration.md#webui-settings)
 
 Once the test succeeds, create the transfer archive.
 
 ```bash
-.venv/bin/loaf backup
+./loaf backup
 ```
 
 Backup stops the project's services and saves the archive in `backup/` by
@@ -97,21 +101,21 @@ default. Backup includes the locally available Open Terminal image. Use
 `loaf backup --no-terminal-server` to skip the image. Set
 `[terminal_server] include_in_backup = true` to include terminal user volumes
 and the bearer key.
-Run `.venv/bin/loaf offline` to resume serving, adding `--cpu` on a CPU host.
+Run `./loaf offline` to resume serving, adding `--cpu` on a CPU host.
 [Backup and recovery](docs/transfer.md)
 
 ### If a command fails
 
 Fix the reported issue and retry the command that failed. Docker and Ollama
 can reuse completed layers and model files.
-Use `.venv/bin/loaf -v offline` to include the exact Compose commands in the output.
+Use `./loaf -v offline` to include the exact Compose commands in the output.
 
 | Failure | Where to check |
 | --- | --- |
 | Docker socket or Compose error | Check `docker version` and `docker compose version`. [Docker access](docs/debian.md#docker-access) |
 | Python, toolkit, or build error | Check the host prerequisites and Buildx. [Debian host setup](docs/debian.md) |
 | Model download or export fails | Check network access and the selected model INI. [Model troubleshooting](docs/troubleshooting.md#downloads-and-selection-files) |
-| Offline services fail to start | Run `.venv/bin/loaf status`. Check [GPU access](docs/troubleshooting.md#gpu-access) and [import logs](docs/troubleshooting.md#imports-and-startup). |
+| Offline services fail to start | Run `./loaf status`. Check [GPU access](docs/troubleshooting.md#gpu-access) and [import logs](docs/troubleshooting.md#imports-and-startup). |
 | WebUI is unreachable | Use the printed address and check the configured port. [Browser connection](docs/troubleshooting.md#browser-connection) |
 
 Use the [disconnected installation guide](docs/installation.md#disconnected-debian-installation)
@@ -121,7 +125,7 @@ when starting from a prepared archive.
 
 | Mode | What it does |
 | --- | --- |
-| `setup` / `install` | Prepare the deployment and its terminal key. Use `--terminal-server-key` for key setup alone or `--all` in a source checkout backup to recover the source and Docker data. [Setup options](docs/cli-help.md#setup) |
+| `setup` / `install` | Prepare the deployment and its terminal key. Use `--terminal-server-key` for key setup alone or `--all` in a source checkout backup to recover the source and Docker data. `setup tests` caches and installs the test packages. [Setup options](docs/cli-help.md#setup) |
 | `link-docker-project` | Create a `docker-project` symlink to the packaged Compose file, Dockerfiles, and default configuration. [Direct Compose commands](docs/launcher.md#link-the-docker-project) |
 | `integration` | Print a systemd unit, Continue YAML, or Tether installation instructions. [Host integrations](docs/installation.md#host-integrations) |
 | `build` / `upgrade` | Build the local images. Upgrade refreshes upstream base images first. |
@@ -130,8 +134,9 @@ when starting from a prepared archive.
 | `download` | Download selected models using the downloader. |
 | `online` / `offline` | Start Ollama and WebUI with the selected network profile. Add `--cpu` for CPU inference. |
 | `export` / `import` | Transfer the Ollama model store. Also available as `backup volumes --models-only` and `restore volumes --models-only`. [Model transfer](docs/transfer.md#transfer-models-between-existing-deployments) |
-| `backup` / `restore` | Select any combination of `images`, `volumes` and `project` for a deployment backup. [Component selection](docs/transfer.md#select-deployment-components) |
+| `backup` / `restore` | Select any combination of `images`, `volumes`, `project` and, from a checkout, `source`. [Component selection](docs/transfer.md#select-deployment-components) |
 | `backup --verify` | Check archive payload and bundled executable hashes, and report saved image platforms without Docker. |
+| `version` / `docs` | Show the release and installation, or read the bundled guides and manual page. [Bundled guides](docs/launcher.md#read-the-bundled-guides) |
 | `status` / `stop` | Check deployment readiness and list containers, or stop and remove containers across all profiles. [Keep stopped containers](docs/launcher.md#stop-and-remove-containers) |
 | `test` | Run the checkout's test suite. [Verification guide](docs/verification.md) |
 
@@ -157,8 +162,8 @@ separate. [Versioned deployments](docs/launcher.md#run-a-versioned-deployment)
 
 ## Choose models and context
 
-The default INI section `[models.default]` selects SmolLM2-135M-Instruct in
-Q2_K, an 88 MB chat model. Add a `[models.<name>]` section with a `model` value
+The default INI section `[models.default]` selects IBM's Granite 4.0 H 350M in
+Q4_K_M, a 223 MB chat model that can call tools. Add a `[models.<name>]` section with a `model` value
 for each model you want to use. Those sections replace the default selection.
 Add `name` to give WebUI a readable Ollama alias. Choose a different
 INI with `--models-file` or select another settings directory with `--config-dir`.

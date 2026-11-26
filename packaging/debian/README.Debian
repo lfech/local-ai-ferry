@@ -1,0 +1,30 @@
+loaf for Debian
+===============
+
+The package operates the system deployment. Its settings are in /etc/loaf and
+its data, backups and lock are in /var/lib/loaf. Settings layer in this order,
+and later layers override earlier ones:
+
+  1. the packaged defaults, shown with 'loaf docs configuration'
+  2. /etc/loaf/config.ini and an optional /etc/loaf/models.ini
+  3. a portable deployment's config/config.ini when selected with --project-dir
+
+Root, members of the docker group and the loaf systemd service can operate the
+system deployment. Backups in /var/lib/loaf/backup are readable by that group,
+so any member can restore them. The terminal server key is
+/etc/loaf/terminal-server.key.
+
+Start the offline deployment at boot after building or restoring its images:
+
+  sudo systemctl enable --now loaf.service
+
+Read the guides with 'loaf docs' and the manual page with 'man loaf'.
+Docker Engine 26 or newer and Compose 2.26.1 or newer are required. Debian 12
+needs Docker's apt repository for both. The default CUDA 13 Ollama build needs
+NVIDIA driver 580 or newer, which NVIDIA's repository provides. The CUDA 12
+build, ollama_image = loaf-ollama-cuda12, needs driver 550 or newer, such as
+Debian 13's own nvidia-driver package.
+
+Purging the package removes the terminal server key and empty directories.
+Backups in /var/lib/loaf/backup and the Docker volumes with models and chats
+remain.

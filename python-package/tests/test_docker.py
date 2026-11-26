@@ -76,16 +76,28 @@ class ComposeContractTests(unittest.TestCase):
     def test_only_core_images_have_local_build_contexts(self):
         builders = {name for name, service in self.services.items() if "build" in service}
         self.assertEqual(builders, {"ollama-online", "ollama-offline", "open-webui"})
-        for name in builders:
+        for name in ("ollama-online", "ollama-offline"):
             with self.subTest(service=name):
                 build = self.services[name]["build"]
-                context = Path(build["context"])
-                self.assertEqual(context.resolve(), (DOCKER_DIR / name).resolve())
-                dockerfile = context / build.get("dockerfile", "Dockerfile")
+                self.assertEqual(Path(build["context"]).resolve(), (DOCKER_DIR / "ollama").resolve())
+                self.assertEqual(build["target"], name)
+
+    def test_build_inputs_stay_inside_their_contexts(self):
+        # Compose before 5.7.0 grants Buildx read access only to build contexts.
+        # A Dockerfile or file secret elsewhere fails with Buildx 0.37.2 and newer.
+        rendered = compose_config(profiles=(*cli.PROFILES, "terminal"))
+        builds = {name: service["build"] for name, service in rendered["services"].items() if "build" in service}
+        self.assertEqual(set(builds), {"ollama-online", "ollama-offline", "open-webui", "terminal-server"})
+        for name, build in builds.items():
+            with self.subTest(service=name):
+                context = Path(build["context"]).resolve()
+                self.assertTrue(context.is_relative_to(DOCKER_DIR.resolve()))
+                dockerfile = (context / build.get("dockerfile", "Dockerfile")).resolve()
                 self.assertTrue(dockerfile.is_file())
-                if name.startswith("ollama-"):
-                    self.assertEqual(dockerfile.resolve(), DOCKER_DIR / "ollama/Dockerfile")
-                    self.assertEqual(build["target"], name)
+                self.assertTrue(dockerfile.is_relative_to(context), dockerfile)
+                for secret in build.get("secrets", ()):
+                    source = Path(rendered["secrets"][secret["source"]]["file"]).resolve()
+                    self.assertTrue(source.is_relative_to(context), source)
 
     def test_ollama_profiles_share_model_storage(self):
         self.assertEqual(self.rendered["volumes"]["ollama"]["name"], "ollama")
@@ -216,7 +228,7 @@ class ComposeContractTests(unittest.TestCase):
             step = cli.Step(cli.PROFILES, ("config", "--format", "json"))
             resolved = json.loads(compose_command(compose, step, env=env))
         services = resolved["services"]
-        self.assertEqual(Path(services["ollama-online"]["build"]["context"]), DOCKER_DIR / "ollama-online")
+        self.assertEqual(Path(services["ollama-online"]["build"]["context"]), DOCKER_DIR / "ollama")
         for name in ("ollama-online", "ollama-offline"):
             args = services[name]["build"]["args"]
             self.assertEqual(args["OLLAMA_IMAGE"], env["OLLAMA_IMAGE"])
@@ -241,7 +253,7 @@ class ComposeContractTests(unittest.TestCase):
             resolved = compose_config()
         self.assertEqual(resolved["volumes"]["ollama"]["name"], "ollama")
         self.assertEqual(resolved["services"]["open-webui"]["ports"][0]["published"], "3000")
-        self.assertEqual(Path(resolved["services"]["ollama-online"]["build"]["context"]), DOCKER_DIR / "ollama-online")
+        self.assertEqual(Path(resolved["services"]["ollama-online"]["build"]["context"]), DOCKER_DIR / "ollama")
 
 
 
@@ -279,8 +291,8 @@ class ShellHelperTests(unittest.TestCase):
         command([
             "docker", "run", "--rm", "--pull", "never", "--network", "none", "-i",
             "--env", "DISPOSABLE_SCRIPT_TEST=1",
-            "--mount", f"type=bind,source={DOCKER_DIR / 'ollama-online/export-modelfiles.sh'},target=/export.sh,readonly",
-            "--mount", f"type=bind,source={DOCKER_DIR / 'ollama-offline/start-ollama-offline.sh'},target=/start.sh,readonly",
+            "--mount", f"type=bind,source={DOCKER_DIR / 'ollama/export-modelfiles.sh'},target=/export.sh,readonly",
+            "--mount", f"type=bind,source={DOCKER_DIR / 'ollama/start-ollama-offline.sh'},target=/start.sh,readonly",
             "--entrypoint", "bash", transfer.IMAGES[0], "-s", "--", case,
         ], input=(TESTS_DIR / "script_checks.sh").read_text(encoding="utf-8"), timeout=90)
 

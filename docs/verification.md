@@ -6,12 +6,14 @@ Run the tests in Debian or Debian in WSL2, from the project directory with the
 [editable package installed in `.venv`](launcher.md#install-the-package).
 The suite uses Python's standard `unittest` runner.
 See the [verification record](verification-record.md) for dated results.
+Run `./loaf setup tests` once to install the packages for the
+terminal server API tests. [Test packages](launcher.md#test-packages)
 
 ## Run the fast suite
 
 ```bash
-.venv/bin/loaf test
-.venv/bin/loaf test -v
+./loaf test
+./loaf test -v
 ```
 
 The default report shows the count, duration, outcome and skips. Use `-v`
@@ -41,7 +43,8 @@ and its pass count. Each badge links to the environment and results.
 Run `loaf test --badges` to record the run, generate the SVGs in `docs/badges/`,
 and update the README links. Use `-v` to display individual results as usual.
 The [GitHub Verify workflow](../.github/workflows/verify.yml) runs
-the baseline on Python 3.10 and 3.13 and smoke-tests a wheel.
+the baseline on Python 3.10 and 3.13 and smoke-tests a wheel. On Python 3.13
+it runs `loaf setup tests` first, so the provisioner and runner tests run too.
 
 The badge total counts the test cases that executed in that run. For
 example, a run that passes four Open Terminal cases shows `4/4 passed` when
@@ -62,7 +65,7 @@ on optional packages and count toward the Open Terminal badge if they run.
 
 ```bash
 RUN_DOCKER_TESTS=0 RUN_GPU_TESTS=0 RUN_TERMINAL_SERVER_TESTS=0 \
-    RUN_CPU_TESTS=0 RUN_CATALOG_TESTS=0 .venv/bin/loaf test --badges
+    RUN_CPU_TESTS=0 RUN_CATALOG_TESTS=0 ./loaf test --badges
 ```
 
 Use the following selectors from `python-package/` to count each advanced
@@ -91,17 +94,19 @@ or override them for a run with the flags below. Transfer tests require Git.
 
 | Group | Coverage |
 | --- | --- |
-| Launcher and package | Top-level and command help, model-list parsing, Compose command order, foreground log following, default container removal and its opt-out, default and verbose output, deployment links, failure handling, concurrency, shell quoting, the installed entry points and test output. |
+| Launcher and package | Top-level and command help, rejected option combinations, model-list parsing, Compose command order, foreground log following, default container removal and its opt-out, default and verbose output, deployment links, failure handling, concurrency, shell quoting, the installed entry points and test output. |
 | Cleanup | Checks both scopes, dry-run, lock contention, symlink boundaries, and preservation of Git work, credentials and backup archives. |
 | Host setup | Checks APT-managed and pyenv interpreters, wheel reuse and refresh, virtualenv recovery, setup diagnostics, and the NVIDIA toolkit cache. Also checks that Docker setup is opt-in and uses only the prepared APT source when the cache is present. |
-| Configuration | Checks packaged defaults, local overrides, model file selection, INI validation, and resolved Compose settings. |
+| Configuration | Checks packaged defaults and their Compose and Dockerfile fallbacks, local overrides, model file selection, INI validation, and resolved Compose settings. |
 | Host integrations | Checks the generated systemd unit and Continue YAML against project paths, deployment version, WebUI settings and model selection. Checks that the Tether command prints installation steps and the official downloads link. |
-| Transfer | Uses real project files and archives with simulated Docker calls. Checks all seven deployment component combinations, verification, recovery of saved configuration and cached installers, and repeated component restores from a retained bundle. Also checks Modelfile replay and v2 model archives. The Docker suite checks the model-only merge and mirror commands against disposable Ollama volumes. |
+| Transfer | Uses real project files and archives with simulated Docker calls. Checks all fifteen deployment component combinations, verification, recovery of saved configuration and cached installers, and repeated component restores from a retained bundle. Also checks Modelfile replay, v1 and v2 model archives, and the rejection of unsafe payload, volume, model and checkout entries. The Docker suite checks the model-only merge and mirror commands against disposable Ollama volumes. |
 | Readiness | Checks Docker and Compose version reporting, Open Terminal image and key reporting, GPU and volume probes, recognition of the deployment's WebUI port, and relative Ollama v2 manifest links. |
 | Open WebUI tool history | Checks the optional compatibility filter for interrupted Ollama tool turns, including provider selection, preserved tool results, and repeated requests. |
-| Documentation | Checks local links, heading anchors and guide navigation. Parses Bash examples. |
+| Documentation | Checks local links, heading anchors and guide navigation. Parses Bash examples. Checks that the command reference covers every command and global flag. |
+| Deployment | Checks settings layers and `system_config`, system mode and the Debian default, the collision warning, shared locks in setgid directories, `docker-project` links from earlier releases, `loaf version`, and the bundled guides, their exported links and the manual page. |
+| Debian package | With Docker, builds the wheel and `.deb`, checks control fields, conffiles and files, then installs, runs and purges it on Debian 12 and 13. The manual page passes `groff` with warnings enabled. [Package checks](../python-package/tests/debian_package_checks.sh) |
 | Release tagging | Uses temporary Git repositories to check version selection, annotated tags, previews, and tag-only pushes and retries. Requires Python 3.11 or newer. |
-| Docker | Checks resolved Compose profiles, CPU and GPU device settings, and image settings. Tests each export and startup shell scenario, verifies container removal and the stop opt-out, and runs a two-volume archive round trip. |
+| Docker | Checks resolved Compose profiles, CPU and GPU device settings, image settings, and that each Dockerfile and build secret stays inside its build context. Tests each export and startup shell scenario, verifies container removal and the stop opt-out, and runs a two-volume archive round trip. |
 | CPU and GPU model workflows | Check downloaded model exports, offline Ministral inference, startup failure and recovery, explicit Modelfile replay, and model archive mirroring with the connected services running. |
 | Terminal server | Checks credential validation, HTTP and WebSocket proxying, account and chat storage, file browsing and chat deletion, development tools through Open WebUI, and backup and restore of the image, user volumes and key. Transfer tests also cover automatic image inclusion and `--no-terminal-server`. Docker-backed workflows are opt-in. |
 | Model catalog | Checks that the example/default model specifiers resolve to Ollama-compatible manifests. |
@@ -115,7 +120,7 @@ For a configured deployment, `loaf status` checks serving prerequisites and
 lists its containers. `loaf offline` prints its browser address.
 
 ```bash
-.venv/bin/loaf link-docker-project
+./loaf link-docker-project
 (
     cd docker-project
     docker compose --profile offline ps
@@ -143,8 +148,8 @@ loaded. [CPU serving](launcher.md#serve-on-cpu)
 Build the images while connected, then enable the Docker checks.
 
 ```bash
-.venv/bin/loaf build
-RUN_DOCKER_TESTS=1 .venv/bin/loaf test -v
+./loaf build
+RUN_DOCKER_TESTS=1 ./loaf test -v
 ```
 
 Use a local Docker daemon and the three project images. The Compose contract
@@ -177,7 +182,7 @@ Ministral and exports its Modelfiles once. Each serving workflow starts from
 a copy in its own volume and Compose project.
 
 ```bash
-RUN_DOCKER_TESTS=1 RUN_GPU_TESTS=1 .venv/bin/loaf test -v
+RUN_DOCKER_TESTS=1 RUN_GPU_TESTS=1 ./loaf test -v
 ```
 
 The individual cases check the source and alias Modelfiles, recovery of a
@@ -198,7 +203,7 @@ placement and the configured context. The model download and disk
 requirements apply to both modes.
 
 ```bash
-RUN_TERMINAL_SERVER_TESTS=1 RUN_CATALOG_TESTS=1 .venv/bin/loaf test --cpu -v
+RUN_TERMINAL_SERVER_TESTS=1 RUN_CATALOG_TESTS=1 ./loaf test --cpu -v
 ```
 
 ## Terminal server checks
@@ -213,8 +218,8 @@ before and after host disconnection. The serving cases drive
 Open WebUI's terminal proxy with two authorized accounts and a denied
 account, exercise GCC/G++, Python, and Sphinx workflows, and repeat the
 builds after a cold restart on the internal control network. The online and
-offline cases have separate Docker projects and volumes. They need no
-model or GPU.
+offline cases have separate Docker projects and volumes and run
+concurrently. They need no model or GPU.
 
 The serving cases use `http://terminal-server:8000` for saved connections
 and check the default and recent entries offered in the working-directory
@@ -237,7 +242,22 @@ internal workspace bridges for comparison. Set
 
 Local HTTP and WebSocket proxy tests require `aiohttp`. The local
 command-timeout test requires the Open Terminal Python package pinned
-in the terminal image and `httpx`.
+in the terminal image and `httpx`. `loaf setup tests` installs these
+versions. To test against the image's own interpreters instead, run both
+groups inside the built terminal image. Its Debian Python runs the
+provisioner and its Open Terminal Python runs the runner, with the
+checkout mounted read-only and no network.
+
+```bash
+for test in /usr/bin/python3:ProvisionerTests /usr/local/bin/python:RunnerTests; do
+    docker run --rm --pull never --network none --read-only --tmpfs /tmp \
+        --user "$(id -u):$(id -g)" -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 \
+        -e PYTHONPATH=/src/python-package/src:/src/python-package -w /src/python-package \
+        --mount "type=bind,source=$PWD,target=/src,readonly" \
+        --entrypoint "${test%%:*}" local/open-terminal:latest \
+        -m unittest -v "tests.test_terminal_server.${test#*:}"
+done
+```
 
 ## Fast chat check with compact images
 
@@ -307,19 +327,20 @@ This network test requests small public Ollama manifests for the distinct
 specifiers in the packaged model INIs and checkout examples.
 
 ```bash
-RUN_CATALOG_TESTS=1 .venv/bin/loaf test -v
+RUN_CATALOG_TESTS=1 ./loaf test -v
 ```
 
 Run all opt-in checks together.
 
 ```bash
-RUN_DOCKER_TESTS=1 RUN_GPU_TESTS=1 RUN_TERMINAL_SERVER_TESTS=1 RUN_CATALOG_TESTS=1 .venv/bin/loaf test -v
+RUN_DOCKER_TESTS=1 RUN_GPU_TESTS=1 RUN_TERMINAL_SERVER_TESTS=1 RUN_CATALOG_TESTS=1 ./loaf test -v
 ```
 
 ## Coverage limits
 
 The full CPU and GPU suites download and test Ministral. The compact handoff
-tests the same SmolLM2 quantization as the default selection. Catalog checks
+tests SmolLM2-135M-Instruct Q2_K, which is smaller than the default
+selection. Catalog checks
 verify the model references. Hardware fits for the example profiles are
 estimates. Native Debian GPU inference, interactive browser login, vision
 input, and Tether desktop installation and sign-in are outside direct test

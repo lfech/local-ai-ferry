@@ -19,9 +19,10 @@ class NoRedirect(HTTPRedirectHandler):
 
 def publish(tag: str, directory: Path) -> None:
     wheel, = directory.glob("*.whl")
+    package, = directory.glob("*.deb")
     source, = directory.glob("*.tar.gz")
     assets = {path.name: path for path in (
-        directory / "loaf", directory / "LICENSE.txt", wheel, source, directory / "SHA256SUMS",
+        directory / "loaf", directory / "LICENSE.txt", wheel, package, source, directory / "SHA256SUMS",
     )}
     for path in assets.values():
         if not path.is_file():

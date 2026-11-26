@@ -1,0 +1,18 @@
+Package: loaf
+Version: @VERSION@
+Architecture: all
+Maintainer: @MAINTAINER@
+Installed-Size: @INSTALLED_SIZE@
+Depends: python3 (>= 3.10), docker-ce-cli | docker-cli | docker.io, docker-compose-plugin (>= 2.26.1) | docker-compose (>= 2.26.1), docker-buildx-plugin | docker-buildx
+Recommends: docker-ce (>= 5:26) | docker.io (>= 26)
+Suggests: nvidia-container-toolkit
+Section: admin
+Priority: optional
+Homepage: @HOMEPAGE@
+Description: prepare, serve and transfer offline Ollama and Open WebUI deployments
+ Local AI Ferry runs Ollama and Open WebUI with Docker Compose, prepares models
+ while connected and moves complete deployments to offline Debian hosts.
+ .
+ The package operates the system deployment with settings in /etc/loaf and
+ data in /var/lib/loaf. Select a portable deployment directory with
+ --project-dir. Run 'loaf docs' for the bundled guides.

@@ -12,7 +12,7 @@ from . import assets, config, locks, setup, transfer
 
 
 STAGING_PREFIXES = (".loaf-backup-", ".loaf-restore-", ".loaf-toolkit-", ".loaf-badges-", ".loaf-bootstrap-",
-                    ".loaf-terminal-key-", ".loaf-wheels-", ".loaf-docker-", ".loaf-binary-")
+                    ".loaf-terminal-key-", ".loaf-wheels-", ".loaf-docker-", ".loaf-binary-", ".loaf-link-", ".loaf-docs-")
 FULL_PATHS = (".venv", "dist", "install-cache", "python-package/build", "python-package/dist")
 PROTECTED_NAMES = {".git", "backup", transfer.BUNDLE_MANIFEST, ".env", config.TERMINAL_SECRET.name}
 ARCHIVE_SUFFIXES = (".tar.gz", ".tgz", ".tar")
@@ -73,6 +73,9 @@ def project_targets(project: Path, runtime: Path, full: bool) -> set[Path]:
                 targets.update((package / "src").glob("*.egg-info"))
         if link is not None:
             targets.add(link)
+        launcher = project / "loaf"
+        if launcher.is_symlink() and launcher.readlink() == setup.CHECKOUT_LAUNCHER:
+            targets.add(launcher)
     return {path for path in targets if local_directory(path.parent) and (path.exists() or path.is_symlink())}
 
 
@@ -103,7 +106,7 @@ def protected_files(project: Path) -> set[Path]:
             and transfer.is_bundle(project / transfer.RESTORED_BACKUP_DIR)):
         paths.add(project / transfer.RESTORED_LAUNCHER)
     # An unreadable configuration can hide a key inside a cleanup target.
-    settings = config.load(project / "config")
+    settings = config.load(*config.layers(assets.DATA_DIR / "config", project / "config"))
     paths.add(config.terminal_secret_path(project, settings.terminal_server_secret_file))
     return paths
 

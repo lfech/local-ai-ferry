@@ -43,4 +43,12 @@ loaf = [
     "data/docker/*/*.sh",
     "data/docker/terminal-server/*.py",
     "data/docker/terminal-server/*.list",
+    # Links to the repository's README.md and docs/ in a checkout; the built package holds the files.
+    "data/README.md",
+    "data/docs/*.md",
+    "data/docs/instructions/architecture.md",
+    "data/docs/examples/*",
 ]
+
+[tool.setuptools.exclude-package-data]
+loaf = ["data/docs/*-record.md"]

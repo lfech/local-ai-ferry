@@ -5,7 +5,8 @@
 GitHub and Gitea create a draft release when you push a version tag.
 Each draft gets the `loaf` executable for Linux amd64, a separate
 `loaf-v<version>-source.tar.gz` of the tagged repository, an optional Python
-wheel, the standalone `LICENSE.txt`, and `SHA256SUMS`.
+wheel, the `loaf_<version>_all.deb` Debian package, the standalone
+`LICENSE.txt`, and `SHA256SUMS`.
 [GitHub releases](https://docs.github.com/en/repositories/releasing-projects-on-github)
 
 ## Quick release
@@ -75,7 +76,7 @@ with `loaf restore` when recovering a minimal deployment, or use
 For a fresh deployment, use `../loaf build` from the project directory.
 [Backup recovery](transfer.md#debian-restore)
 
-On Debian 13, run `../loaf setup --with-docker-deps` to have setup prepare
+On Debian 12 or 13, run `../loaf setup --with-docker-deps` to have setup prepare
 and install Docker. The host supplies the NVIDIA driver for GPU inference.
 Use a connected machine for uncached Debian packages, Docker images, and
 models. [Debian setup](debian.md) · [Disconnected installation](installation.md#disconnected-debian-installation)
@@ -161,6 +162,16 @@ bash scripts/build-release.sh v0.1.0 dist/release
 (cd dist/release && sha256sum -c SHA256SUMS)
 ```
 
+The release build also creates the Debian package from the wheel with
+[`scripts/build-deb.sh`](../scripts/build-deb.sh). It runs `lintian` when
+available. Set `LOAF_DEB_MAINTAINER` to the name and address for the
+package's `Maintainer` field. The release workflows install the package in
+the disconnected handoff destination. [Debian package](installation.md#debian-package)
+
+```bash
+bash scripts/build-deb.sh dist/release/local_ai_ferry-0.1.0-py3-none-any.whl dist/release
+```
+
 To use the optional wheel with an existing Python installation, verify the
 downloaded wheel against `SHA256SUMS`, then run:
 
@@ -168,7 +179,7 @@ downloaded wheel against `SHA256SUMS`, then run:
 sha256sum --check --ignore-missing SHA256SUMS
 python3 -m venv .venv
 .venv/bin/python -m pip install --no-index ./local_ai_ferry-0.1.0-py3-none-any.whl
-.venv/bin/loaf link-docker-project
+./loaf link-docker-project
 ```
 
 For source-based development, extract the separate archive:

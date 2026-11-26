@@ -1,3 +1,0 @@
-# The shared Dockerfile uses only the startup wrapper from this context.
-*
-!start-ollama-offline.sh

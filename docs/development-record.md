@@ -7,6 +7,114 @@ Git milestones use commit timestamps. Working-tree milestones use the
 associated verification time where it was recorded.
 Earlier entries use the current names for commands, paths and artifacts.
 
+## 2026-11-26 12:05 CET — Three installation channels, settings layers and the Debian package
+
+- Upgrades: a `docker-project` link to another loaf release no longer
+  supplies Compose files. The launcher uses its own deployment files, and
+  `setup` and `link-docker-project` update such links in place. Added
+  `loaf version`. [Upgrade the standalone executable](launcher.md#upgrade-the-standalone-executable)
+- Settings layers: packaged defaults, then `/etc/loaf`, then the project's
+  `config/config.ini`. Only a project can move or skip the system layer
+  with `[launcher] system_config`. The model list comes from the highest
+  layer with `models.ini`. `status` lists the settings files. `setup` and
+  `status` warn when a project and the system deployment share a Docker
+  namespace. Standalone setup writes a commented `config.ini` and no
+  longer copies `models.ini`. [Settings layers](configuration.md#project-configuration)
+- System deployment: `--system` selects `/etc/loaf` and `/var/lib/loaf`,
+  and the Debian package selects it by default. A setgid project directory
+  shares its lock with the directory's group. The system terminal key is
+  readable by root and the `docker` group.
+- Guides: every channel bundles the README, guides, architecture and
+  examples. `loaf docs` lists and prints them, and `loaf docs loaf.1`
+  prints the generated manual page. Standalone setup exports them to a
+  stamped `docs/` with links into `docker-project/` or to the release.
+  [Bundled guides](launcher.md#read-the-bundled-guides)
+- Debian package: `scripts/build-deb.sh` turns the wheel into
+  `loaf_<version>_all.deb` for Debian 12 and 13, with a conffile in
+  `/etc/loaf`, maintainer scripts, a disabled `loaf.service`, the manual
+  page and DEP-5 copyright. The release jobs build, check and attach it,
+  and the disconnected handoff installs it. [Debian package](installation.md#debian-package)
+- Backups: `project` now holds settings, Modelfiles and installer caches
+  for every channel. A checkout's Git history and working files form the
+  new `source` component, which only `setup --all` applies. Backups no
+  longer carry `.venv`. Checkout backups made before this change have no
+  `source` payload and cannot be used with `setup --all` of this version.
+  [Component selection](transfer.md#select-deployment-components)
+- A checkout's setup links `./loaf` to `.venv/bin/loaf`, and the guides use
+  `./loaf` throughout. The Verify workflow adds Python 3.11 and the Debian
+  package tests.
+- Open points: Debian's own NVIDIA drivers, 535 in Debian 12 and 550 in
+  Debian 13, are too old for the default CUDA 13 build. Debian 12 needs
+  Docker's repository. The package's `Maintainer` field uses a placeholder
+  until `LOAF_DEB_MAINTAINER` is set for releases.
+
+## 2026-11-26 10:47 CET — Test packages through setup
+
+- Added `loaf setup tests`. It caches `aiohttp`, `yarl`, `httpx` and Open
+  Terminal, pinned to the terminal image in `tests/requirements.txt`, together
+  with their requirements as wheels in `install-cache/wheels/`. It then
+  installs them from that directory into the virtualenv that runs
+  `loaf test`. A separate cache record holds the inputs and wheel digests.
+  Repeat and recovered runs install offline. [Test packages](launcher.md#test-packages)
+- Backups carry the test wheels and their record. The Python 3.13 Verify job
+  uses the command, so the provisioner and runner tests run in CI.
+- The command requires Python 3.11 or newer, like Open Terminal, and
+  accepts only `--dry-run` and the global flags.
+
+## 2026-11-26 10:20 CET — Review of test coverage and runtime
+
+- Added Docker-free tests for restore input that must be refused:
+  volume entries outside the restored volumes, device files and
+  cross-volume hard links, payload archives with unexpected members or
+  invalid hash manifests, incomplete v1 model manifests, and reserved or
+  absolute checkout paths. Each new test fails when its check is removed.
+  [Verification coverage](verification.md#verification-coverage)
+- Added a table-driven CLI test for 28 rejected option combinations. Each
+  exits with status 2 and its specific message before any subprocess.
+- Packaged settings must equal the built-in defaults, and the Compose and
+  Dockerfile image fallbacks must name the same images.
+- The GitHub Verify job on Python 3.13 installs the terminal image's
+  `aiohttp` and `yarl` versions so that the provisioner tests run on every
+  push. The verification guide shows how to run the provisioner and runner
+  tests inside the built terminal image. [Terminal server checks](verification.md#terminal-server-checks)
+- The offline and connected terminal workspace checks now run concurrently
+  as subtests of one test. Both keep their separate Compose projects.
+
+## 2026-11-26 10:06 CET — Build inputs inside their contexts and compact default images
+
+- Both Ollama images now build from the single `docker/ollama` context that
+  holds their Dockerfile, export helper and startup wrapper. Compose before
+  5.7.0 lets Buildx read only build contexts. With Buildx 0.37.2 and newer,
+  the earlier `../ollama/Dockerfile` reference failed whenever the deployment
+  data was outside the working directory, as with the standalone executable
+  and wheel installs. A Compose contract test keeps each Dockerfile and
+  build secret inside its context. [Build privileges](troubleshooting.md#build-requests-additional-privileges)
+- Removed `BUILDX_BAKE_ENTITLEMENTS_FS=0` from the GitHub release job. Its
+  handoff now builds the standalone executable's images the same way as an
+  operator's host.
+- The packaged `[images]` section now matches the checkout's: the bundled
+  `loaf-ollama-cuda13` recipe and Open WebUI v0.13.4 slim. The built-in,
+  Compose and Dockerfile fallbacks match, and a Docker-free test compares
+  them. Documented the NVIDIA driver 580 requirement and the features that
+  slim omits. [Ollama build selection](configuration.md#select-an-ollama-build-recipe) ·
+  [WebUI image](configuration.md#select-the-webui-image)
+
+## 2026-11-26 00:33 CET — Releases v0.2.0 to v0.2.2
+
+- Set the package version to 0.2.0, 0.2.1 and 0.2.2 in successive commits
+  and kept the release notes, titled for v0.2.0, in the annotated `v0.2.2`
+  tag. The temporary `commit.md` notes file has been removed.
+- `BUILDX_BAKE_ENTITLEMENTS_FS=0` was first set on the upload step, then
+  moved to the handoff step for v0.2.2. The v0.2.2 release job then passed
+  according to the author. The entry above replaces this workaround.
+- The runner image documentation lists Compose 2.38.2 and Buildx 0.39.0.
+  The upstream sources show that this Compose version grants Buildx read
+  access only to build contexts. Buildx therefore refuses the shared
+  Ollama Dockerfile, which was outside its context and the handoff's
+  working directory. This cause was derived from the sources and not
+  reproduced locally.
+  [Release workflow](../.github/workflows/release.yml)
+
 ## 2026-11-25 22:17 CET — Bundled Ollama build recipes
 
 - Packaged the compact CPU and CUDA 13 recipes in the Dockerfile shared by

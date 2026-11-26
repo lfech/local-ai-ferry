@@ -1,0 +1,4 @@
+# The Dockerfile copies only the export helper and the startup wrapper.
+*
+!export-modelfiles.sh
+!start-ollama-offline.sh
