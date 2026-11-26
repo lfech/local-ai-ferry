@@ -12,9 +12,12 @@ from . import assets, config, locks, setup, transfer
 
 
 STAGING_PREFIXES = (".loaf-backup-", ".loaf-restore-", ".loaf-toolkit-", ".loaf-badges-", ".loaf-bootstrap-",
-                    ".loaf-terminal-key-", ".loaf-wheels-", ".loaf-docker-", ".loaf-binary-", ".loaf-link-", ".loaf-docs-")
+                    ".loaf-terminal-key-", ".loaf-wheels-", ".loaf-docker-", ".loaf-binary-", ".loaf-link-", ".loaf-docs-",
+                    ".loaf-repository-")
 FULL_PATHS = (".venv", "dist", "install-cache", "python-package/build", "python-package/dist")
-PROTECTED_NAMES = {".git", "backup", transfer.BUNDLE_MANIFEST, ".env", config.TERMINAL_SECRET.name}
+PROTECTED_NAMES = {".git", "backup", transfer.CHECKSUMS, ".env", config.TERMINAL_SECRET.name}
+# Staged archive members inside backup and restore directories.
+STAGED_MEMBERS = {Path(name).name for name in transfer.MEMBER_NAMES}
 ARCHIVE_SUFFIXES = (".tar.gz", ".tgz", ".tar")
 
 
@@ -37,7 +40,7 @@ def project_targets(project: Path, runtime: Path, full: bool) -> set[Path]:
     link = managed_link(project, runtime)
     package = project / setup.PYTHON_PACKAGE_DIR
     source = local_directory(package) and (package / "src/loaf/__init__.py").is_file()
-    if not (source or link or transfer.is_bundle(project) or transfer.is_bundle(project / transfer.RESTORED_BACKUP_DIR)):
+    if not (source or link or transfer.is_bundle(project)):
         return set()
 
     targets = {project / ".test-artifacts", project / "__pycache__"}
@@ -101,10 +104,6 @@ def checkout_files(project: Path) -> set[Path]:
 
 def protected_files(project: Path) -> set[Path]:
     paths = checkout_files(project)
-    launcher = project / "loaf"
-    if (launcher.is_symlink() and launcher.readlink() == transfer.RESTORED_LAUNCHER
-            and transfer.is_bundle(project / transfer.RESTORED_BACKUP_DIR)):
-        paths.add(project / transfer.RESTORED_LAUNCHER)
     # An unreadable configuration can hide a key inside a cleanup target.
     settings = config.load(*config.layers(assets.DATA_DIR / "config", project / "config"))
     paths.add(config.terminal_secret_path(project, settings.terminal_server_secret_file))
@@ -153,7 +152,7 @@ def contains_saved_data(path: Path, runtime: Path) -> bool:
         if current.is_mount() or PROTECTED_NAMES.intersection(directories + filenames) or transfer.is_bundle(current):
             return True
         for name in filenames:
-            if name in transfer.PAYLOADS and any(
+            if name in STAGED_MEMBERS and any(
                 part.startswith((".loaf-backup-", ".loaf-restore-")) for part in current.parts
             ):
                 continue

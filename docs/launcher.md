@@ -149,10 +149,13 @@ name = Qwen3-4B-Chat
 model = hf.co/Qwen/Qwen3-4B-GGUF:Q5_K_M
 ```
 
-The optional `name` creates an Ollama alias that WebUI can display. Use
+The optional `name` sets the name that Ollama and WebUI show. Use
 letters, digits, dots, underscores or hyphens, plus an optional tag such as
-`:latest`. Download pulls the source and creates the alias. Export refreshes
-the alias from the cached source and saves its Modelfile for offline import.
+`:latest`. Download pulls the source, creates the name and removes the long
+`hf.co/...` name, so WebUI lists the model once. The model data stays with the
+new name. To keep the long name too, add another entry for the same `model`
+without `name`. Export saves the Modelfile of each selected name for offline
+import. Run download again after adding a `name` to an already cached model.
 
 Set `[launcher] models_file` in a [local `config.ini`](configuration.md#project-configuration) for a persistent selection,
 or pass `--models-file PATH` for one run. The selected INI supplies the entire
@@ -286,7 +289,7 @@ For example, use `v1-2-3` for version 1.2.3.
 ```bash
 loaf --version v1-2-3 build
 loaf --version v1-2-3 download
-loaf --version v1-2-3 export
+loaf --version v1-2-3 backup models
 loaf --version v1-2-3 offline
 ```
 
@@ -314,8 +317,7 @@ temporary files and Python bytecode from the selected project.
 build and release files, and the packaged Docker link. Both modes preserve
 Git history and working files, saved backups, configuration, credentials,
 and Docker data. A generated directory that contains Git work or a
-backup archive is kept. The active `dist/loaf` from an in-place restore
-is kept with its root launcher link. Lock files stay in place so commands can coordinate
+backup archive is kept. Lock files stay in place so commands can coordinate
 cleanup with active work.
 
 If cleanup reports an invalid project configuration, correct it and retry.

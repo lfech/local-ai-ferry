@@ -1,4 +1,4 @@
-"""Transfer built images, named volumes and the project in one archive."""
+"""Transfer deployment data in one archive whose first member lists its typed contents."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import gzip
 from hashlib import sha256
+import io
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -21,35 +22,49 @@ import tarfile
 from tempfile import NamedTemporaryFile, TemporaryDirectory, TemporaryFile
 from typing import Callable
 
-from . import config, locks
+from . import assets, config, locks
 from .progress import Progress, TrackedStream
 from .setup import (
     INSTALL_CACHE, PYTHON_PACKAGE_DIR, PYTHON_WHEEL_DIR, TEST_WHEEL_RECORD, TOOLKIT_DIR, WHEEL_CACHE_RECORD,
-    docker_installer_files, file_digest, install_backup_host_packages, new_terminal_key, prepare_python_wheels,
-    toolkit_files,
+    docker_installer_files, file_digest, prepare_python_wheels, toolkit_files,
 )
 
 
-ARCHIVE_NAME = "local-ai-ferry.tar.gz"
+ARCHIVE_FORMAT = "loaf-archive"
+ARCHIVE_VERSION = config.ARCHIVE_VERSION
+MANIFEST = "loaf.json"
+MANIFEST_LIMIT = 1024 * 1024
 BUNDLE_NAME = "local-ai-ferry"
-BUNDLE_MANIFEST = "backup.json"
-RESTORED_BACKUP_DIR = "backup"
-RESTORED_LAUNCHER = Path("dist/loaf")
-CHECKOUT_RESERVED_PATHS = {RESTORED_BACKUP_DIR, BUNDLE_MANIFEST, "dist", "docker-project", "loaf", ".run.lock"}
+CHECKSUMS = "SHA256SUMS"
+LAUNCHER = "loaf"
 EXECUTABLE_HEADER = b"#!/bin/bash\n# loaf standalone backup launcher v1\n"
+# Archive types in backup and restore order. Each type has one destination.
+TYPES = ("source", "config", "installers", "images", "models", "webui", "chats")
+ALIASES = {"project": ("config", "installers"), "volumes": ("models", "webui", "chats")}
+# Types without namespaced Docker resources or settings can restore into another deployment version.
+PORTABLE_TYPES = ("source", "installers", "models")
+# Types whose capture requires stopped services. Models use a consistent snapshot instead.
+SERVICE_TYPES = ("webui", "chats")
+CHAT_VOLUMES = "chats/volumes.tar"
+CHAT_IMAGES = "chats/images.tar"
+CHAT_KEY = "chats/terminal-server.key"
+MEMBER_NAMES = frozenset({*(f"{kind}.tar" for kind in TYPES), CHAT_VOLUMES, CHAT_IMAGES, CHAT_KEY})
+CHECKOUT_RESERVED_PATHS = {CHECKSUMS, "backup", "dist", "docker-project", LAUNCHER, ".run.lock"}
 CONFIG_SUFFIXES = {".ini", ".model", ".list", ".sources"}
-MODEL_ARCHIVE_NAME = "loaf-volumes.tar.gz"
-COMPONENTS = ("volumes", "images", "project", "source")
-MEMBERS = tuple(f"{component}.tar" for component in COMPONENTS)
-CHECKSUMS = "sha256.json"
-TERMINAL_METADATA = "terminal.json"
-PAYLOADS = (*MEMBERS, TERMINAL_METADATA)
 TERMINAL_KEY_STAGING = ".loaf-terminal-key-"
 IMAGES = ("local/ollama-online:latest", "local/ollama-offline:latest", "local/open-webui:latest")
 VOLUMES = {"ollama": "ollama", "open-webui": "webui"}
 # Match the ownership labels set by the terminal provisioner.
 WORKSPACE_PROJECT_LABEL = "loaf.tool-server.project"
 WORKSPACE_OWNER_LABEL = "loaf.tool-server.workspace"
+CHAT_PROJECT_LABEL = "loaf.terminal.chat-project"
+CHAT_ID_LABEL = "loaf.terminal.chat-id"
+CHAT_OWNER_LABEL = "loaf.terminal.chat-owner"
+CHAT_IMAGE_PROJECT_LABEL = "loaf.terminal.apt-project"
+CHAT_IMAGE_TEMPORARY_LABEL = "loaf.terminal.apt-temporary"
+CHAT_IMAGE_REPOSITORY = "local/loaf-terminal-chat"
+# Temporary chats keep their folders only while the provisioner runs.
+UNSAVED_CHAT_PREFIXES = ("temporary:", "local:", "channel:")
 COPY_BUFFER = 1024 * 1024
 MANIFEST_LIST_TYPE = "application/vnd.ollama.manifest.list.v2+json"
 
@@ -57,7 +72,6 @@ MANIFEST_LIST_TYPE = "application/vnd.ollama.manifest.list.v2+json"
 # clear only the mounts that this restore found empty.
 RESTORE_VOLUMES = """\
 set -eu
-set -- /transfer/ollama /transfer/webui "$@"
 for directory do
     entry=$(find "$directory" -mindepth 1 -print -quit)
     if [ -n "$entry" ]; then
@@ -118,75 +132,67 @@ def volume_names(namespace: str) -> dict[str, str]:
     return {f"{namespace}-{name}": target for name, target in VOLUMES.items()}
 
 
-def archive_name(namespace: str) -> str:
-    return f"{namespace}_{ARCHIVE_NAME}" if namespace else ARCHIVE_NAME
+def deployment_project(namespace: str) -> str:
+    return namespace or "local-inference"
 
 
-def backup_path(directory: Path, *, namespace: str = "", models_only: bool = False) -> Path:
-    timestamp = f"{datetime.now():%Y%m%d-%H%M}"
-    if models_only:
-        return directory / f"{timestamp}_{MODEL_ARCHIVE_NAME}"
-    name = "_".join(part for part in (timestamp, namespace, BUNDLE_NAME) if part)
+def expand_types(names, *, chats_available: bool = True) -> tuple[str, ...]:
+    """Resolve archive types and aliases. Chats need the WebUI data that owns their accounts and chats."""
+    selected = set()
+    for name in names:
+        if name in ALIASES:
+            selected.update(kind for kind in ALIASES[name] if kind != "chats" or chats_available)
+        elif name in TYPES:
+            selected.add(name)
+        else:
+            raise TransferError(f"Unknown archive type {name}. Use {', '.join(TYPES)}, project or volumes.")
+    if "chats" in selected:
+        selected.add("webui")
+    return tuple(kind for kind in TYPES if kind in selected)
+
+
+def default_backup_types(project: Path, *, chats: bool) -> tuple[str, ...]:
+    """Back up every available type. The source exists only in a checkout; chats are opt-in."""
+    checkout = checkout_paths(project) is not None
+    return tuple(kind for kind in TYPES if (kind != "source" or checkout) and (kind != "chats" or chats))
+
+
+def backup_path(directory: Path, *, namespace: str = "") -> Path:
+    name = "_".join(part for part in (f"{datetime.now():%Y%m%d-%H%M}", namespace, BUNDLE_NAME) if part)
     target = directory / name
     sequence = 2
-    while target.exists() or target.is_symlink() or target.with_suffix(".tar.gz").is_file():
+    while target.exists() or target.is_symlink():
         target = directory / f"{name}-{sequence}"
         sequence += 1
     return target
 
 
-def latest_backup(directory: Path, *, namespace: str = "", models_only: bool = False) -> Path | None:
-    name = MODEL_ARCHIVE_NAME if models_only else archive_name(namespace)
-    stem = name.removesuffix(".tar.gz")
-    suffix = "" if models_only else r"(?:-([0-9]+))?"
-    timestamped = re.compile(r"[0-9]{8}-[0-9]{4}_" + re.escape(stem) + suffix + r"\.tar\.gz")
-    archives = []
-    if models_only or (directory / BUNDLE_MANIFEST).is_file():
-        for path in directory.glob(f"*_{stem}*.tar.gz"):
-            if path.is_file() and (match := timestamped.fullmatch(path.name)):
-                sequence = match[1] if match.lastindex else None
-                archives.append((path.name[:13], int(sequence or "0"), path))
-    if not models_only:
-        prefix = re.escape(f"{namespace}_" if namespace else "")
-        folders = re.compile(r"([0-9]{8}-[0-9]{4})_" + prefix + re.escape(BUNDLE_NAME) + r"(?:-([0-9]+))?")
-        for path in directory.iterdir() if directory.is_dir() else ():
-            if path.is_dir() and (match := folders.fullmatch(path.name)):
-                archives.append((match[1], int(match[2] or "1"), path))
-    return max(archives)[2] if archives else None
-
-
-@dataclass(frozen=True)
-class BackupBundle:
-    archive: Path
-    version: str
-    executable: Path
-
-
-@dataclass(frozen=True)
-class RestoredBackup:
-    components: frozenset[str]
-    settings: config.Settings | None
+def latest_backup(directory: Path, *, namespace: str = "") -> Path | None:
+    prefix = re.escape(f"{namespace}_" if namespace else "")
+    folders = re.compile(r"([0-9]{8}-[0-9]{4})_" + prefix + re.escape(BUNDLE_NAME) + r"(?:-([0-9]+))?")
+    backups = []
+    for path in directory.iterdir() if directory.is_dir() else ():
+        if (match := folders.fullmatch(path.name)) and is_bundle(path):
+            backups.append((match[1], int(match[2] or "1"), path))
+    return max(backups)[2] if backups else None
 
 
 def is_bundle(directory: Path) -> bool:
-    return directory.is_dir() and (
-        (directory / BUNDLE_MANIFEST).exists()
-        or (directory / BUNDLE_MANIFEST).is_symlink()
-        or (not (directory / RESTORED_BACKUP_DIR / BUNDLE_MANIFEST).is_file()
-            and re.fullmatch(r"[0-9]{8}-[0-9]{4}_(?:.+_)?" + re.escape(BUNDLE_NAME) + r"(?:-[0-9]+)?", directory.name))
-    )
+    return (directory.is_dir() and (directory / CHECKSUMS).is_file() and not (directory / CHECKSUMS).is_symlink()
+            and (directory / LAUNCHER).is_file())
 
 
-def find_bundle(project: Path, selection: Path | None) -> Path | None:
+def find_bundle(directory: Path, selection: Path | None) -> Path | None:
+    """Return the selected backup folder, the current one, or the folder holding the running launcher."""
     if selection is not None:
         if is_bundle(selection):
             return selection
         return selection.parent if not selection.is_dir() and is_bundle(selection.parent) else None
-    if is_bundle(project):
-        return project
-    executable = os.environ.get("LOAF_RELEASE_EXECUTABLE")
-    if executable and is_bundle(directory := Path(executable).parent):
+    if is_bundle(directory):
         return directory
+    executable = os.environ.get("LOAF_RELEASE_EXECUTABLE")
+    if executable and is_bundle(folder := Path(executable).parent):
+        return folder
     return None
 
 
@@ -207,62 +213,215 @@ def release_executable(project: Path) -> Path:
     raise TransferError("Standalone release executable missing. Run backup with the release loaf or put it at dist/loaf.")
 
 
-def read_bundle(directory: Path, *, verify: bool = True) -> BackupBundle:
-    manifest = directory / BUNDLE_MANIFEST
-    if manifest.is_symlink() or not manifest.is_file():
-        raise TransferError(f"Backup manifest not found: {manifest}")
-    try:
-        data = json.loads(manifest.read_text(encoding="utf-8"))
-        name, digest, version = (data[key] for key in ("archive", "loaf_sha256", "version"))
-        if not isinstance(name, str) or not name.endswith(".tar.gz") or Path(name).name != name:
-            raise ValueError("Invalid archive file name.")
-        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
-            raise ValueError("Invalid executable hash.")
-        if not isinstance(version, str):
-            raise ValueError("Invalid deployment version.")
-        config.namespace(version)
-    except (KeyError, TypeError, ValueError) as exc:
-        raise TransferError(f"Invalid backup manifest: {manifest}") from exc
-    archive = directory / name
-    executable = directory / "loaf"
-    if archive.is_symlink() or not archive.is_file():
-        raise TransferError(f"Backup archive not found: {archive}")
-    if executable.is_symlink() or not standalone_executable(executable):
-        raise TransferError(f"Standalone backup executable missing or invalid: {executable}")
-    if verify and file_digest(executable) != digest:
-        raise TransferError(f"SHA-256 verification failed for {executable}.")
-    return BackupBundle(archive, version, executable)
-
-
 def file_modes(directory: Path) -> tuple[int, int]:
     """Return the modes for new private files and executables, readable by a shared directory's group."""
     return (0o640, 0o750) if locks.shared_directory(directory) else (0o600, 0o700)
 
 
-def backup_bundle(project: Path, destination: Path, prepare_volumes: Callable[[], None], *,
-                  version: str, executable: Path | None = None, **options) -> None:
-    if destination.is_relative_to(project / ".git"):
-        raise TransferError("Choose a backup directory outside .git.")
-    if executable is None:
-        executable = release_executable(project)
-    elif not standalone_executable(executable):
-        raise TransferError(f"The build did not produce a standalone executable at {executable}.")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    private, runnable = file_modes(destination.parent)
-    with TemporaryDirectory(prefix=".loaf-backup-", dir=destination.parent) as folder:
-        bundle = Path(folder) / destination.name
-        bundle.mkdir()
-        bundle.chmod(runnable | (bundle.stat().st_mode & stat.S_ISGID))
-        copy = bundle / "loaf"
-        shutil.copyfile(executable, copy)
-        copy.chmod(runnable)
-        archive = bundle / f"{destination.name}.tar.gz"
-        manifest = {"archive": archive.name, "loaf_sha256": file_digest(copy), "version": version}
-        (bundle / BUNDLE_MANIFEST).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-        (bundle / BUNDLE_MANIFEST).chmod(private)
-        backup(project, archive, prepare_volumes, namespace=config.namespace(version), **options)
-        bundle.rename(destination)
+# --- Archive manifest ---
 
+@dataclass(frozen=True)
+class Archive:
+    """An archive and, for a backup folder, its launcher and recorded checksum."""
+
+    path: Path
+    manifest: dict
+    executable: Path | None = None
+    digest: str | None = None
+
+    @property
+    def deployment(self) -> str:
+        return self.manifest["deployment"]
+
+    @property
+    def items(self) -> dict[str, dict]:
+        return {item["type"]: item for item in self.manifest["items"]}
+
+
+@dataclass(frozen=True)
+class RestoredBackup:
+    types: tuple[str, ...]
+    settings: config.Settings | None
+
+
+def validate_manifest(data, minimum: int, name: str) -> dict:
+    def invalid(detail: str) -> TransferError:
+        return TransferError(f"Invalid {MANIFEST} in {name}: {detail}")
+
+    if not isinstance(data, dict) or data.get("format") != ARCHIVE_FORMAT:
+        raise invalid("not a loaf archive.")
+    version = data.get("version")
+    if type(version) is not int:
+        raise invalid("missing format version.")
+    if not minimum <= version <= ARCHIVE_VERSION:
+        accepted = str(ARCHIVE_VERSION) if minimum == ARCHIVE_VERSION else f"{minimum} to {ARCHIVE_VERSION}"
+        raise TransferError(
+            f"{name} uses archive format {version}. This loaf accepts format {accepted}, limited by "
+            "[transfer] backup_version_min. Restore it with the loaf release that created it.")
+    deployment = data.get("deployment")
+    if not isinstance(deployment, str):
+        raise invalid("missing deployment version.")
+    try:
+        config.namespace(deployment)
+    except ValueError as exc:
+        raise invalid(str(exc)) from exc
+    items = data.get("items")
+    if not isinstance(items, list) or not items:
+        raise invalid("no items.")
+    kinds, paths = set(), set()
+    for item in items:
+        kind = item.get("type") if isinstance(item, dict) else None
+        members = item.get("members") if isinstance(item, dict) else None
+        if kind not in TYPES or kind in kinds or not isinstance(members, list) or not members:
+            raise invalid(f"unexpected item {kind!r}.")
+        kinds.add(kind)
+        for member in members:
+            path = member.get("path") if isinstance(member, dict) else None
+            if (path not in MEMBER_NAMES or path in paths or not (path == f"{kind}.tar" or path.startswith(f"{kind}/"))
+                    or type(member.get("size")) is not int or member["size"] < 0
+                    or not isinstance(member.get("sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", member["sha256"])):
+                raise invalid(f"unexpected member {path!r}.")
+            paths.add(path)
+    if "chats" in kinds and "webui" not in kinds:
+        raise invalid("chats without the WebUI data they belong to.")
+    return data
+
+
+def read_manifest(path: Path, minimum: int) -> dict:
+    """Read only the first member, which lists the archive's types before any payload."""
+    if path.is_symlink() or not path.is_file():
+        raise TransferError(f"Backup archive not found: {path}. Use --backup-dir or --archive to locate it.")
+    with gzip.open(path, "rb") as compressed, tarfile.open(fileobj=compressed, mode="r|") as archive:
+        member = archive.next()
+        if member is None or member.name != MANIFEST or not member.isfile() or member.size > MANIFEST_LIMIT:
+            raise TransferError(
+                f"{path.name} does not begin with {MANIFEST}. Archives from loaf releases before format "
+                f"{ARCHIVE_VERSION} need the loaf release that created them; their backup folder contains it.")
+        with archive.extractfile(member) as payload:
+            data = payload.read()
+    try:
+        manifest = json.loads(data)
+    except ValueError as exc:
+        raise TransferError(f"Invalid {MANIFEST} in {path.name}.") from exc
+    return validate_manifest(manifest, minimum, path.name)
+
+
+def read_checksums(directory: Path) -> dict[str, str]:
+    sums = {}
+    for line in (directory / CHECKSUMS).read_text(encoding="utf-8").splitlines():
+        match = re.fullmatch(r"([0-9a-f]{64})  ([^/\s]+)", line)
+        if not match or match[2] in sums:
+            raise TransferError(f"Invalid {CHECKSUMS} in {directory}.")
+        sums[match[2]] = match[1]
+    archives = [name for name in sums if name != LAUNCHER]
+    if LAUNCHER not in sums or len(archives) != 1 or not archives[0].endswith(".tar.gz"):
+        raise TransferError(f"{CHECKSUMS} in {directory} must list the launcher and one archive.")
+    return sums
+
+
+def open_archive(selection: Path, *, minimum: int = ARCHIVE_VERSION, verify_launcher: bool = True) -> Archive:
+    """Open a backup folder or an archive file and read its manifest."""
+    if not selection.is_dir():
+        return Archive(selection, read_manifest(selection, minimum))
+    if not is_bundle(selection):
+        raise TransferError(f"{selection} is not a backup folder with {LAUNCHER} and {CHECKSUMS}.")
+    sums = read_checksums(selection)
+    name = next(name for name in sums if name != LAUNCHER)
+    executable = selection / LAUNCHER
+    if executable.is_symlink() or not standalone_executable(executable):
+        raise TransferError(f"Standalone backup launcher missing or invalid: {executable}")
+    if verify_launcher and file_digest(executable) != sums[LAUNCHER]:
+        raise TransferError(f"SHA-256 verification failed for {executable}.")
+    return Archive(selection / name, read_manifest(selection / name, minimum), executable, sums[name])
+
+
+class HashingReader:
+    """Hash what a reader consumes and optionally report its progress."""
+
+    def __init__(self, stream, progress: Progress | None = None) -> None:
+        self.stream = stream
+        self.progress = progress
+        self.digest = sha256()
+
+    def read(self, size: int = -1) -> bytes:
+        data = self.stream.read(size)
+        self.digest.update(data)
+        if self.progress is not None:
+            self.progress.advance(len(data))
+        return data
+
+
+def unpack(archive: Archive, staging: Path, select: set[str]) -> None:
+    """Check every member against the manifest and stage the selected ones, before any change."""
+    expected = {member["path"]: member for item in archive.manifest["items"] for member in item["members"]}
+    seen = set()
+    with archive.path.open("rb") as raw:
+        whole = HashingReader(raw)
+        with gzip.GzipFile(fileobj=whole, mode="rb") as compressed:
+            with tarfile.open(fileobj=compressed, mode="r|") as members:
+                first = members.next()
+                with members.extractfile(first) as payload:
+                    if json.loads(payload.read()) != archive.manifest:
+                        raise TransferError(f"{archive.path.name} changed while it was read.")
+                # Iterating the archive would yield the manifest again.
+                while (member := members.next()) is not None:
+                    if not member.isfile() or member.name not in expected or member.name in seen:
+                        raise TransferError(f"Unexpected member in {archive.path.name}: {member.name!r}")
+                    if member.size != expected[member.name]["size"]:
+                        raise TransferError(f"Size mismatch for {member.name} in {archive.path.name}.")
+                    stage = member.name in select
+                    if stage:
+                        (staging / member.name).parent.mkdir(parents=True, exist_ok=True)
+                    target = (staging / member.name).open("xb") if stage else nullcontext()
+                    with (
+                        target as output,
+                        Progress(f"{'Unpack' if stage else 'Check'} {member.name}", member.size) as progress,
+                        members.extractfile(member) as payload,
+                    ):
+                        reader = HashingReader(payload, progress)
+                        while block := reader.read(COPY_BUFFER):
+                            if output is not None:
+                                output.write(block)
+                    if reader.digest.hexdigest() != expected[member.name]["sha256"]:
+                        raise TransferError(f"SHA-256 verification failed for {member.name}.")
+                    seen.add(member.name)
+            # Read to EOF so gzip checks its checksum before Docker state can change.
+            while compressed.read(COPY_BUFFER):
+                pass
+        while whole.read(COPY_BUFFER):
+            pass
+    if seen != set(expected):
+        raise TransferError(f"{archive.path.name} is missing {', '.join(sorted(set(expected) - seen))}.")
+    if archive.digest is not None and whole.digest.hexdigest() != archive.digest:
+        raise TransferError(f"SHA-256 verification failed for {archive.path.name}.")
+
+
+def member_record(staging: Path, path: str) -> dict:
+    file = staging / path
+    size = file.stat().st_size
+    with Progress(f"Hash {path}", size) as progress, file.open("rb") as payload:
+        reader = HashingReader(payload, progress)
+        while reader.read(COPY_BUFFER):
+            pass
+    return {"path": path, "size": size, "sha256": reader.digest.hexdigest()}
+
+
+def write_archive(staging: Path, pending: Path, manifest: dict, compression_level: int) -> None:
+    data = (json.dumps(manifest, indent=2) + "\n").encode()
+    with tarfile.open(pending, "w:gz", compresslevel=compression_level, copybufsize=COPY_BUFFER) as archive:
+        # The manifest comes first so a reader learns the types before any payload.
+        entry = tarfile.TarInfo(MANIFEST)
+        entry.size, entry.mode, entry.mtime = len(data), 0o600, int(datetime.now().timestamp())
+        archive.addfile(entry, io.BytesIO(data))
+        for item in manifest["items"]:
+            for member in item["members"]:
+                entry = archive.gettarinfo(staging / member["path"], arcname=member["path"])
+                with (Progress(f"Compress {member['path']}", entry.size) as progress,
+                      (staging / member["path"]).open("rb") as payload):
+                    archive.addfile(entry, TrackedStream(payload, progress))
+
+
+# --- File types ---
 
 def checkout_paths(project: Path) -> set[Path] | None:
     """List the checkout's tracked and unignored files, or None outside a Git checkout."""
@@ -278,18 +437,27 @@ def checkout_paths(project: Path) -> set[Path] | None:
     return {Path(os.fsdecode(name)) for name in files.split(b"\0") if name}
 
 
-def default_components(project: Path) -> tuple[str, ...]:
-    """Back up the source tree only from a checkout."""
-    return COMPONENTS if checkout_paths(project) is not None else tuple(c for c in COMPONENTS if c != "source")
+def write_tar(destination: Path, label: str, entries) -> None:
+    with Progress(label) as progress, destination.open("wb") as output:
+        stream = TrackedStream(output, progress)
+        with tarfile.open(fileobj=stream, mode="w|", bufsize=COPY_BUFFER, copybufsize=COPY_BUFFER) as archive:
+            for path, name in entries:
+                archive.add(path, arcname=name, recursive=False)
 
 
-def archive_project(project: Path, destination: Path, *, exclude_file: Path | None = None,
-                    config_dir: Path | None = None) -> None:
-    """Archive settings, saved Modelfiles and installer caches, the same for every installation."""
-    config_dir = config_dir or project / "config"
+def archive_config(project: Path, config_dir: Path, destination: Path, *, exclude_file: Path | None) -> None:
+    """Archive settings and saved Modelfiles."""
     # Settings can come entirely from the system or packaged layers, but the directory must be a deployment.
     if not (config_dir.is_dir() or (project / "docker-project").is_symlink() or checkout_paths(project) is not None):
         raise TransferError("Backup needs a deployment prepared by loaf setup or a Git checkout.")
+    files = sorted(path for path in config_dir.rglob("*") if path.suffix in CONFIG_SUFFIXES and path.is_file()
+                   and path.resolve() != exclude_file) if config_dir.is_dir() else []
+    write_tar(destination, "Archive config.tar",
+              ((path, (Path("config") / path.relative_to(config_dir)).as_posix()) for path in files))
+
+
+def archive_installers(project: Path, destination: Path, *, exclude_file: Path | None) -> None:
+    """Archive the cached installers: Python wheels, NVIDIA and Docker Debian packages."""
     paths = set()
     packages = toolkit_files(project)
     wheels = project / PYTHON_WHEEL_DIR
@@ -299,32 +467,22 @@ def archive_project(project: Path, destination: Path, *, exclude_file: Path | No
     for record in (wheels / WHEEL_CACHE_RECORD, wheels / TEST_WHEEL_RECORD):
         if record.is_file() and not record.is_symlink():
             paths.add(record.relative_to(project))
-    # Include the prepared installer files from the otherwise ignored cache.
     paths.update(path.relative_to(project) for path in wheels.glob("*.whl") if path.is_file() and not path.is_symlink())
     paths.update(path.relative_to(project) for path in docker_installer_files(project))
-
-    with Progress("Archive project.tar") as progress, destination.open("wb") as output:
-        stream = TrackedStream(output, progress)
-        with tarfile.open(fileobj=stream, mode="w|", bufsize=COPY_BUFFER, copybufsize=COPY_BUFFER) as archive:
-            for path in sorted(config_dir.rglob("*")):
-                if path.suffix in CONFIG_SUFFIXES and path.is_file() and path.resolve() != exclude_file:
-                    archive.add(path, arcname=(Path("config") / path.relative_to(config_dir)).as_posix())
-            for package in packages:
-                if package.resolve() != exclude_file:
-                    archive.add(package.resolve(), arcname=(TOOLKIT_DIR / package.name).as_posix())
-            for relative in sorted(paths):
-                archive.add(project / relative, arcname=relative.as_posix(), recursive=False)
+    entries = [(package.resolve(), (TOOLKIT_DIR / package.name).as_posix())
+               for package in packages if package.resolve() != exclude_file]
+    entries += [(project / relative, relative.as_posix()) for relative in sorted(paths)]
+    write_tar(destination, "Archive installers.tar", entries)
 
 
 def archive_source(project: Path, destination: Path, *, exclude_file: Path | None = None) -> None:
-    """Archive the Git history and working tree. Settings and installers belong to the project component."""
+    """Archive the Git history and working tree. Settings and installers have their own types."""
     paths = checkout_paths(project)
     if paths is None:
-        raise TransferError("The source component needs a Git checkout. Omit source for this deployment.")
-    bundle_dirs = {
-        path.parent for path in paths
-        if path.name == BUNDLE_MANIFEST and path.parent != Path(".") and (project / path.parent / "loaf").is_file()
-    }
+        raise TransferError("The source type needs a Git checkout. Omit source for this deployment.")
+    # Skip backup folders kept inside the checkout.
+    bundle_dirs = {path.parent for path in paths
+                   if path.name == CHECKSUMS and path.parent != Path(".") and (project / path.parent / LAUNCHER).is_file()}
     project_parts = {"config", INSTALL_CACHE.name, ".venv"}
 
     def exclude_secret(member):
@@ -336,19 +494,127 @@ def archive_source(project: Path, destination: Path, *, exclude_file: Path | Non
             archive.add(project / ".git", arcname=".git", filter=exclude_secret)
             for relative in sorted(paths):
                 path = project / relative
-                if (relative.parts[0] in project_parts or relative.name.startswith(TERMINAL_KEY_STAGING)
+                # Staging folders of this and other loaf operations stay out, like the backup folders.
+                if (relative.parts[0] in project_parts or any(part.startswith(".loaf-") for part in relative.parts)
                         or path == exclude_file or any(relative.is_relative_to(bundle) for bundle in bundle_dirs)):
                     continue
-                if relative == Path("loaf") and path.is_symlink():
+                if relative == Path(LAUNCHER) and path.is_symlink():
                     continue
                 if path.exists() or path.is_symlink():
                     archive.add(path, arcname=relative.as_posix(), recursive=False)
 
 
-def require_inactive_volumes(project: Path, namespace: str, workspaces: tuple[str, ...] = ()) -> None:
-    for volume in (*volume_names(namespace), *workspaces):
-        require_inactive_volume(project, volume)
+def stage_files(source: Path, target: Path, prefix: str) -> None:
+    """Extract regular files below one top-level directory, refusing any other path."""
+    with tarfile.open(source, "r:") as archive:
+        for member in archive:
+            path = PurePosixPath(member.name)
+            if (not member.isfile() or not path.is_relative_to(prefix) or ".." in path.parts or path.is_absolute()
+                    or (prefix == "config" and path.suffix not in CONFIG_SUFFIXES)):
+                raise TransferError(f"Invalid file in {source.name}: {member.name!r}")
+            destination = target / path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with destination.open("xb") as output, archive.extractfile(member) as payload:
+                shutil.copyfileobj(payload, output, length=COPY_BUFFER)
 
+
+def project_file_targets(source: Path, target: Path) -> list[tuple[Path, Path]]:
+    files = []
+    for path in sorted(source.rglob("*")) if source.is_dir() else ():
+        if not path.is_file():
+            continue
+        destination = target / path.relative_to(source)
+        if destination.resolve() != destination or (destination.exists() and not destination.is_file()):
+            raise TransferError(f"Cannot restore a regular file to {destination}.")
+        for parent in destination.parents:
+            if parent.exists() and not parent.is_dir():
+                raise TransferError(f"Cannot restore through {parent}.")
+            if parent == target:
+                break
+        files.append((path, destination))
+    return files
+
+
+def publish_project_files(files: list[tuple[Path, Path]]) -> None:
+    for source, destination in files:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(dir=destination.parent, prefix=".loaf-restore-") as directory:
+            replacement = Path(directory) / destination.name
+            shutil.copyfile(source, replacement)
+            replacement.chmod(0o600)
+            replacement.replace(destination)
+
+
+def stage_configuration(recovered: Path, lower: tuple[Path, ...], destination: Path, version: str) -> config.Settings:
+    """Load recovered settings over the lower configuration layers and keep the backup's version."""
+    target = recovered / config.CONFIG_NAME
+    current = recovered if target.is_file() else destination
+    settings = config.load(*lower, current)
+    if settings.version == version:
+        return settings
+    parser = ConfigParser(interpolation=None)
+    parser.read(current / config.CONFIG_NAME, encoding="utf-8-sig")
+    if not parser.has_section("launcher"):
+        parser.add_section("launcher")
+    parser.set("launcher", "version", version)
+    recovered.mkdir(parents=True, exist_ok=True)
+    with target.open("w", encoding="utf-8") as output:
+        parser.write(output)
+    return config.load(*lower, recovered)
+
+
+def stage_checkout(source: Path, checkout: Path) -> None:
+    """Extract source files into a private tree and refuse writes through archive links."""
+    data_filter = getattr(tarfile, "data_filter", None)
+    if data_filter is None:
+        raise TransferError("Source recovery requires the standalone loaf executable or a Python with tar extraction filters.")
+
+    def checked_member(member, directory):
+        path = PurePosixPath(member.name)
+        target = checkout / path
+        if target.is_symlink() or target.resolve() != target:
+            raise TransferError(f"Checkout path goes through a link: {member.name!r}")
+        checked = data_filter(member, directory)
+        return checked if member.issym() else checked.replace(mode=member.mode & 0o777)
+
+    checkout.mkdir()
+    with tarfile.open(source, "r:") as archive:
+        members = archive.getmembers()
+        seen = set()
+        for member in members:
+            path = PurePosixPath(member.name)
+            if (not path.parts or path.is_absolute() or ".." in path.parts or path in seen
+                    or path.parts[0] in CHECKOUT_RESERVED_PATHS or path.parts[0].startswith(".loaf-")):
+                raise TransferError(f"Invalid checkout path in backup: {member.name!r}")
+            seen.add(path)
+        archive.extractall(checkout, members=members, filter=checked_member)
+    if not (checkout / PYTHON_PACKAGE_DIR / "pyproject.toml").is_file() or not (checkout / "docs").is_dir():
+        raise TransferError("The source type in this backup is not a complete loaf checkout.")
+
+
+def checkout_targets(checkout: Path, project: Path) -> list[tuple[Path, Path]]:
+    """Map the checkout onto the project. Only directories may already exist; no file is replaced."""
+    def collect(source: Path, target: Path):
+        if not target.exists() and not target.is_symlink():
+            yield source, target
+        elif source.is_dir() and not source.is_symlink() and target.is_dir() and not target.is_symlink():
+            for entry in source.iterdir():
+                yield from collect(entry, target / entry.name)
+        else:
+            raise TransferError(f"Cannot restore the source checkout over {target}.")
+
+    return [target for entry in checkout.iterdir() for target in collect(entry, project / entry.name)]
+
+
+def publish_checkout(entries: list[tuple[Path, Path]]) -> None:
+    with ExitStack() as rollback:
+        for source, target in entries:
+            source.rename(target)
+            rollback.callback(target.rename, source)
+        rollback.pop_all()
+
+
+# --- Docker types ---
 
 def require_inactive_volume(project: Path, volume: str) -> None:
     consumers = subprocess.check_output(
@@ -358,18 +624,28 @@ def require_inactive_volume(project: Path, volume: str) -> None:
         raise TransferError(f"The {volume} volume is in use. Stop its containers before transferring it.")
 
 
-def volume_command(*, restore: bool = False, namespace: str = "", workspaces: tuple[str, ...] = ()) -> list[str]:
-    command = ["docker", "run", "--rm", "--pull", "never", "--network", "none", "--read-only"]
-    volumes = {**volume_names(namespace), **{name: name for name in workspaces}}
+def require_helper_image(project: Path, namespace: str) -> None:
     image = image_names(namespace)[0]
+    try:
+        subprocess.run(["docker", "image", "inspect", image], cwd=project,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True)
+    except subprocess.CalledProcessError as exc:
+        raise TransferError(f"Restoring volumes without images requires the local helper image {image}.") from exc
+
+
+def volume_command(*, restore: bool = False, namespace: str = "", volumes: dict[str, str] | None = None) -> list[str]:
+    """Stream named volumes as one tar whose top-level directories name the volumes."""
+    volumes = volume_names(namespace) if volumes is None else volumes
+    command = ["docker", "run", "--rm", "--pull", "never", "--network", "none", "--read-only"]
     if restore:
         command.append("-i")
     for volume, directory in volumes.items():
         mount = f"type=volume,source={volume},target=/transfer/{directory},volume-nocopy"
         command += ["--mount", mount if restore else mount + ",readonly"]
+    image = image_names(namespace)[0]
     if restore:
         return command + ["--entrypoint", "/bin/sh", image, "-c", RESTORE_VOLUMES,
-                          "loaf-restore-volumes", *(f"/transfer/{name}" for name in workspaces)]
+                          "loaf-restore-volumes", *(f"/transfer/{directory}" for directory in volumes.values())]
     return command + ["--entrypoint", "tar", image, "-cf", "-", "-C", "/transfer", *volumes.values()]
 
 
@@ -378,17 +654,6 @@ def copy_payload(read: Callable[[int], bytes], destination, progress: Progress) 
         if destination is not None:
             destination.write(block)
         progress.advance(len(block))
-
-
-class HashingReader(TrackedStream):
-    def __init__(self, stream, progress: Progress) -> None:
-        super().__init__(stream, progress)
-        self.digest = sha256()
-
-    def read(self, size: int) -> bytes:
-        data = super().read(size)
-        self.digest.update(data)
-        return data
 
 
 def docker_archive(project: Path, command: list[str], path: Path, label: str, *, send: bool = False) -> None:
@@ -457,16 +722,13 @@ def modelfile_definition(data: bytes) -> tuple[list[tuple[str, str, str]], dict[
     return commands, parameters
 
 
-def check_backup_modelfiles(project: Path, volumes: Path, staging: Path, namespace: str) -> list[str]:
-    prefix = PurePosixPath("ollama/config")
+def check_backup_modelfiles(project: Path, models: Path, staging: Path, namespace: str) -> list[str]:
+    """Compare the saved Modelfiles in a model snapshot with Ollama's current definitions."""
+    prefix = PurePosixPath("config")
     blobs = PurePosixPath("/ollama/models/blobs")
     problems = []
-    with tarfile.open(volumes, "r:") as snapshot:
-        entries = {}
-        for member in snapshot:
-            path = PurePosixPath(member.name)
-            if path.is_relative_to("ollama"):
-                entries[path] = member
+    with tarfile.open(models, "r:") as snapshot:
+        entries = {PurePosixPath(member.name): member for member in snapshot}
         recipes = {}
         for path, member in entries.items():
             if not path.is_relative_to(prefix) or path.suffix != ".model" or member.isdir():
@@ -487,7 +749,7 @@ def check_backup_modelfiles(project: Path, volumes: Path, staging: Path, namespa
             for instruction, _, value in commands:
                 target = PurePosixPath(value)
                 if instruction in ("FROM", "ADAPTER", "DRAFT") and target.is_relative_to(blobs):
-                    blob = entries.get(target.relative_to("/"))
+                    blob = entries.get(PurePosixPath("models/blobs", target.name))
                     if blob is None or not (blob.isfile() or blob.islnk()):
                         problems.append(f"{path}: missing model blob {target.name}.")
             recipes[model] = commands, parameters
@@ -521,263 +783,13 @@ def check_backup_modelfiles(project: Path, volumes: Path, staging: Path, namespa
                     problems.append(f"{prefix / name}: differs from the current Ollama definition.")
     except (OSError, subprocess.CalledProcessError, tarfile.TarError):
         problems.append("Could not compare saved Modelfiles with the model store.")
+    finally:
+        current.unlink(missing_ok=True)
     return problems
 
 
-def workspace_prefix(namespace: str) -> str:
-    project = sha256((namespace or "local-inference").encode()).hexdigest()[:16]
-    return f"loaf-tools-{project}-"
-
-
-def validate_workspace_names(names, namespace: str) -> tuple[str, ...]:
-    prefix = workspace_prefix(namespace)
-    if (not isinstance(names, list)
-            or any(not isinstance(name, str) or not re.fullmatch(prefix + r"[0-9a-f]{64}", name) for name in names)
-            or len(set(names)) != len(names)):
-        raise TransferError("Invalid terminal workspace volume names for the selected deployment.")
-    return tuple(sorted(names))
-
-
-def workspace_labels(namespace: str, name: str) -> dict[str, str]:
-    return {
-        WORKSPACE_PROJECT_LABEL: namespace or "local-inference",
-        WORKSPACE_OWNER_LABEL: name.removeprefix(workspace_prefix(namespace)),
-    }
-
-
-def list_terminal_workspaces(project: Path, namespace: str) -> tuple[str, ...]:
-    label = f"{WORKSPACE_PROJECT_LABEL}={namespace or 'local-inference'}"
-    names = subprocess.check_output(["docker", "volume", "ls", "--quiet", "--filter", f"label={label}"], cwd=project)
-    workspaces = validate_workspace_names(names.decode().split(), namespace)
-    if workspaces:
-        volumes = json.loads(subprocess.check_output(["docker", "volume", "inspect", *workspaces], cwd=project))
-        if {volume["Name"]: volume["Labels"] for volume in volumes} != {
-            name: workspace_labels(namespace, name) for name in workspaces
-        }:
-            raise TransferError("Terminal workspace volumes do not match the deployment's ownership labels.")
-    return workspaces
-
-
-def read_terminal_backup(staging: Path, namespace: str) -> tuple[bytes, tuple[str, ...]] | None:
-    path = staging / TERMINAL_METADATA
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_bytes())
-        key = data["key"].encode("ascii")
-        names = data["workspaces"]
-    except (AttributeError, KeyError, TypeError, ValueError):
-        raise TransferError("Invalid terminal server backup metadata.") from None
-    if not config.TERMINAL_KEY_PATTERN.fullmatch(key):
-        raise TransferError("Invalid terminal server key in the backup.")
-    return key, validate_workspace_names(names, namespace)
-
-
-def create_workspace_volumes(project: Path, namespace: str, workspaces: tuple[str, ...],
-                             driver: str, options: dict[str, str]) -> None:
-    for name in workspaces:
-        labels = workspace_labels(namespace, name)
-        command = ["docker", "volume", "create", "--driver", driver]
-        for label, value in labels.items():
-            command += ["--label", f"{label}={value}"]
-        for option, value in options.items():
-            command += ["--opt", f"{option}={value}"]
-        subprocess.check_output([*command, name], cwd=project)
-        volume, = json.loads(subprocess.check_output(["docker", "volume", "inspect", name], cwd=project))
-        if volume["Labels"] != labels or volume["Driver"] != driver or (volume["Options"] or {}) != options:
-            raise TransferError(f"Terminal workspace volume {name} does not match the deployment's ownership or storage settings.")
-
-
-def matching_terminal_key(path: Path, key: bytes) -> bool:
-    if not path.exists() and not path.is_symlink():
-        return False
-    existing = config.read_terminal_secret(path)
-    if existing.rstrip(b"\r\n") != key.rstrip(b"\r\n"):
-        raise TransferError(f"Terminal server key at {path} differs from the backup.")
-    return True
-
-
-@contextmanager
-def restore_terminal_key(path: Path, key: bytes):
-    if matching_terminal_key(path, key):
-        yield
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with NamedTemporaryFile(dir=path.parent, prefix=TERMINAL_KEY_STAGING) as pending:
-        pending.write(key)
-        pending.flush()
-        try:
-            # Publish a complete owner-only file without replacing an existing credential.
-            os.link(pending.name, path)
-        except FileExistsError:
-            if not matching_terminal_key(path, key):
-                raise
-            yield
-        else:
-            try:
-                yield
-            except BaseException:
-                if path.exists() and path.samefile(pending.name):
-                    path.unlink()
-                raise
-
-
-def validate_volume_payload(path: Path, workspaces: tuple[str, ...]) -> None:
-    allowed = {*VOLUMES.values(), *workspaces}
-    missing = set(workspaces)
-    entries = set()
-    links = set()
-    targets = set()
-    with tarfile.open(path, "r:") as volumes:
-        for member in volumes:
-            name = PurePosixPath(member.name)
-            if not name.parts or name.parts[0] not in allowed or ".." in name.parts or name in entries:
-                raise TransferError(f"Unexpected path in the volume backup: {member.name!r}")
-            if member.ischr() or member.isblk() or (len(name.parts) == 1 and not member.isdir()):
-                raise TransferError(f"Unexpected file type in the volume backup: {member.name!r}")
-            entries.add(name)
-            if len(name.parts) == 1:
-                missing.discard(name.name)
-            if member.issym() or member.islnk():
-                links.add(name)
-            if member.islnk():
-                target = PurePosixPath(member.linkname)
-                if not target.parts or target.parts[0] != name.parts[0] or ".." in target.parts:
-                    raise TransferError(f"Invalid hard link in the volume backup: {member.name!r}")
-                targets.add(target)
-    if any(not links.isdisjoint(path.parents) for path in entries | targets):
-        raise TransferError("A volume backup path traverses an archived link.")
-    if missing:
-        raise TransferError("The volume backup is missing terminal workspace data.")
-
-
-def backup(
-    project: Path,
-    destination: Path,
-    prepare_volumes: Callable[[], None],
-    *,
-    components: tuple[str, ...] | None = None,
-    namespace: str = "",
-    compression_level: int = config.DEFAULT_COMPRESSION_LEVEL,
-    exclude_project_file: Path | None = None,
-    include_terminal: bool = False,
-    include_terminal_image: bool = True,
-    config_dir: Path | None = None,
-) -> None:
-    if destination.is_relative_to(project / ".git"):
-        raise TransferError("Choose a backup directory outside .git.")
-    components = components or default_components(project)
-    members = tuple(f"{component}.tar" for component in COMPONENTS if component in components)
-    if not members or set(components) - set(COMPONENTS):
-        raise TransferError("Select backup components from images, volumes, project and source.")
-    include_terminal = include_terminal and "volumes" in components
-    exclude_project_file = exclude_project_file or project / config.TERMINAL_SECRET
-    if include_terminal:
-        key = config.read_terminal_secret(exclude_project_file)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with TemporaryDirectory(prefix=".loaf-backup-", dir=destination.parent) as folder:
-        staging = Path(folder)
-        if "project" in components:
-            print("Collecting project files…", file=sys.stderr, flush=True)
-            archive_project(project, staging / "project.tar", exclude_file=exclude_project_file, config_dir=config_dir)
-        if "source" in components:
-            print("Collecting source files…", file=sys.stderr, flush=True)
-            archive_source(project, staging / "source.tar", exclude_file=exclude_project_file)
-        if "images" in components:
-            images = image_names(namespace)
-            if include_terminal_image:
-                terminal_image = image_names(namespace, include_terminal=True)[-1]
-                if subprocess.check_output(
-                    ["docker", "image", "ls", "--quiet", "--filter", f"reference={terminal_image}"], cwd=project,
-                ).strip():
-                    images += (terminal_image,)
-            docker_archive(
-                project, ["docker", "image", "save", *images], staging / "images.tar", "Save images.tar",
-            )
-        if "volumes" in components:
-            print("Preparing services for volume backup…", file=sys.stderr, flush=True)
-            prepare_volumes()
-            workspaces = list_terminal_workspaces(project, namespace) if include_terminal else ()
-            require_inactive_volumes(project, namespace, workspaces)
-            volumes = staging / "volumes.tar"
-            docker_archive(project, volume_command(namespace=namespace, workspaces=workspaces), volumes, "Save volumes.tar")
-            for problem in check_backup_modelfiles(project, volumes, staging, namespace):
-                print(f"Warning: {problem}", file=sys.stderr, flush=True)
-
-        # Publish only after all payloads are complete, preserving any old backup
-        # if a command fails or the operation is interrupted.
-        if include_terminal:
-            (staging / TERMINAL_METADATA).write_text(
-                json.dumps({"key": key.decode("ascii"), "workspaces": workspaces}) + "\n", encoding="utf-8",
-            )
-            members += (TERMINAL_METADATA,)
-        pending = staging / ARCHIVE_NAME
-        with tarfile.open(pending, "w:gz", compresslevel=compression_level, copybufsize=COPY_BUFFER) as archive:
-            checksums = {}
-            for name in members:
-                entry = archive.gettarinfo(staging / name, arcname=name)
-                with Progress(f"Compress {name}", entry.size) as progress, (staging / name).open("rb") as payload:
-                    reader = HashingReader(payload, progress)
-                    archive.addfile(entry, reader)
-                    checksums[name] = reader.digest.hexdigest()
-            metadata = staging / CHECKSUMS
-            metadata.write_text(json.dumps(checksums, indent=2) + "\n", encoding="utf-8")
-            archive.add(metadata, arcname=CHECKSUMS)
-        pending.chmod(file_modes(destination.parent)[0])
-        pending.replace(destination)
-
-
-def unpack_payloads(source: Path, staging: Path, *, save: tuple[str, ...]) -> frozenset[str]:
-    if not source.is_file():
-        raise TransferError(f"Backup archive not found: {source}. Use --backup-dir or --archive to locate it.")
-    checksums = {}
-    expected = None
-    with gzip.open(source, "rb") as compressed:
-        with tarfile.open(fileobj=compressed, mode="r|") as archive:
-            for member in archive:
-                if not member.isfile() or member.name in checksums:
-                    raise TransferError(f"Unexpected member in {source.name}: {member.name!r}")
-                if member.name == CHECKSUMS and expected is None and member.size <= 4096:
-                    try:
-                        with archive.extractfile(member) as payload:
-                            expected = json.load(payload)
-                    except ValueError as exc:
-                        raise TransferError(f"Invalid {CHECKSUMS} in {source.name}.") from exc
-                    if not isinstance(expected, dict):
-                        raise TransferError(f"Invalid {CHECKSUMS} in {source.name}.")
-                    continue
-                if member.name not in PAYLOADS:
-                    raise TransferError(f"Unexpected member in {source.name}: {member.name!r}")
-                stage = member.name in save
-                target = (staging / member.name).open("wb") if stage else nullcontext()
-                with (
-                    target as output,
-                    Progress(f"{'Unpack' if stage else 'Read'} {member.name}", member.size) as progress,
-                    archive.extractfile(member) as payload,
-                ):
-                    reader = HashingReader(payload, progress)
-                    while block := reader.read(COPY_BUFFER):
-                        if output is not None:
-                            output.write(block)
-                    checksums[member.name] = reader.digest.hexdigest()
-        # Read to EOF so gzip checks its checksum before Docker state can change.
-        while compressed.read(COPY_BUFFER):
-            pass
-    if expected is None:
-        raise TransferError(f"{source.name} has no SHA-256 manifest. Create a new backup to record payload hashes.")
-    if expected != checksums:
-        mismatches = [name for name in checksums if expected.get(name) != checksums[name]]
-        detail = ", ".join(mismatches) or CHECKSUMS
-        raise TransferError(f"SHA-256 verification failed for {detail}.")
-    components = frozenset(component for component in COMPONENTS if f"{component}.tar" in checksums)
-    if TERMINAL_METADATA in checksums and "volumes" not in components:
-        raise TransferError(f"{source.name} contains terminal metadata without the volumes component.")
-    if not components:
-        raise TransferError(f"{source.name} contains no backup components.")
-    return components
-
-
-def image_platforms(path: Path, namespace: str) -> dict[str, set[str]]:
+def saved_image_tags(path: Path) -> dict[str, set[str]]:
+    """Return each image tag in a docker image save archive with its platforms."""
     try:
         with tarfile.open(path, "r:") as images:
             with images.extractfile("manifest.json") as manifest:
@@ -789,333 +801,47 @@ def image_platforms(path: Path, namespace: str) -> dict[str, set[str]]:
                 fields = [platform["os"], platform["architecture"]]
                 if platform.get("variant"):
                     fields.append(platform["variant"])
-                name = "/".join(fields)
                 for tag in image["RepoTags"] or ():
-                    platforms.setdefault(tag, set()).add(name)
+                    platforms.setdefault(tag, set()).add("/".join(fields))
     except (AttributeError, KeyError, ValueError, TypeError) as exc:
-        raise TransferError("Invalid Docker image manifest in images.tar.") from exc
+        raise TransferError(f"Invalid Docker image manifest in {path.name}.") from exc
+    return platforms
+
+
+def image_platforms(path: Path, namespace: str) -> dict[str, set[str]]:
+    platforms = saved_image_tags(path)
     core = set(image_names(namespace))
-    with_terminal = set(image_names(namespace, include_terminal=True))
-    if platforms.keys() not in (core, with_terminal):
+    if platforms.keys() not in (core, set(image_names(namespace, include_terminal=True))):
         selection = namespace or "the default namespace"
         raise TransferError(f"Backup image tags do not match {selection}. Select the matching --version.")
     return platforms
 
 
-def verify_backup(source: Path, namespace: str) -> None:
-    with TemporaryDirectory(prefix="loaf-verify-") as folder:
-        staging = Path(folder)
-        components = unpack_payloads(source, staging, save=("images.tar", TERMINAL_METADATA))
-        read_terminal_backup(staging, namespace)
-        platforms = image_platforms(staging / "images.tar", namespace) if "images" in components else {}
-    print(f"Verified SHA-256 hashes for all payloads in {source}")
-    print(f"Components: {', '.join(part for part in COMPONENTS if part in components)}")
-    for image, supported in sorted(platforms.items()):
-        print(f"  {image}  {', '.join(sorted(supported))}")
-
-
-def stage_project_files(source: Path, target: Path, *, select: str = "config") -> None:
-    """Stage settings, the Debian installers or, for a recovered checkout, settings and all installer caches."""
-    with tarfile.open(source, "r:") as archive:
+def validate_volume_payload(path: Path, volumes: set[str]) -> None:
+    """Accept only the named volume directories, each present, without links leaving their volume."""
+    missing = set(volumes)
+    entries, links, targets = set(), set(), set()
+    with tarfile.open(path, "r:") as archive:
         for member in archive:
-            path = PurePosixPath(member.name)
-            settings = path.is_relative_to("config") and path.suffix in CONFIG_SUFFIXES
-            if select == "installers":
-                selected = path.is_relative_to(INSTALL_CACHE / "deb") and (
-                    path.suffix == ".deb" or path.name == "Packages"
-                )
-            elif select == "all":
-                selected = settings or path.is_relative_to(INSTALL_CACHE)
-            else:
-                selected = settings
-            if not selected:
-                continue
-            if ".." in path.parts or not member.isfile():
-                raise TransferError(f"Invalid project file in backup: {member.name}")
-            destination = target / path
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            with destination.open("xb") as output, archive.extractfile(member) as payload:
-                shutil.copyfileobj(payload, output, length=COPY_BUFFER)
-
-
-def project_file_targets(source: Path, target: Path) -> list[tuple[Path, Path]]:
-    files = []
-    for path in sorted(source.rglob("*")):
-        if not path.is_file():
-            continue
-        destination = target / path.relative_to(source)
-        if destination.resolve() != destination or (destination.exists() and not destination.is_file()):
-            raise TransferError(f"Cannot restore a regular file to {destination}.")
-        for parent in destination.parents:
-            if parent.exists() and not parent.is_dir():
-                raise TransferError(f"Cannot restore through {parent}.")
-            if parent == target:
-                break
-        files.append((path, destination))
-    return files
-
-
-def publish_project_files(files: list[tuple[Path, Path]]) -> None:
-    for source, destination in files:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        with TemporaryDirectory(dir=destination.parent, prefix=".loaf-restore-") as directory:
-            replacement = Path(directory) / destination.name
-            shutil.copyfile(source, replacement)
-            replacement.chmod(0o600)
-            replacement.replace(destination)
-
-
-def prepare_bundle_setup(bundle: BackupBundle, project: Path, *, installers: bool) -> bytes | None:
-    """Recover the setup credential and optionally the cached Debian packages."""
-    with TemporaryDirectory(prefix=".loaf-restore-", dir=project) as folder:
-        staging = Path(folder)
-        save = (TERMINAL_METADATA, "project.tar") if installers else (TERMINAL_METADATA,)
-        components = unpack_payloads(bundle.archive, staging, save=save)
-        terminal = read_terminal_backup(staging, config.namespace(bundle.version))
-        if installers:
-            if "project" not in components:
-                raise TransferError("The backup has no project component containing cached host installers.")
-            files = staging / "files"
-            stage_project_files(staging / "project.tar", files, select="installers")
-            publish_project_files(project_file_targets(files, project))
-        return terminal[0] if terminal is not None else None
-
-
-def stage_configuration(recovered: Path, lower: tuple[Path, ...], destination: Path, version: str) -> config.Settings:
-    """Load recovered settings over the lower configuration layers and keep the backup's version."""
-    target = recovered / config.CONFIG_NAME
-    current = recovered if target.is_file() else destination
-    settings = config.load(*lower, current)
-    if settings.version == version:
-        return settings
-    parser = ConfigParser(interpolation=None)
-    parser.read(current / config.CONFIG_NAME, encoding="utf-8-sig")
-    if not parser.has_section("launcher"):
-        parser.add_section("launcher")
-    parser.set("launcher", "version", version)
-    recovered.mkdir(exist_ok=True)
-    with target.open("w", encoding="utf-8") as output:
-        parser.write(output)
-    return config.load(*lower, recovered)
-
-
-def stage_checkout(source: Path, checkout: Path) -> None:
-    """Extract source files into a private tree and refuse writes through archive links."""
-    data_filter = getattr(tarfile, "data_filter", None)
-    if data_filter is None:
-        raise TransferError("Full project recovery requires the standalone loaf executable or a Python with tar extraction filters.")
-
-    def checked_member(member, directory):
-        path = PurePosixPath(member.name)
-        target = checkout / path
-        if target.is_symlink() or target.resolve() != target:
-            raise TransferError(f"Checkout path goes through a link: {member.name!r}")
-        checked = data_filter(member, directory)
-        return checked if member.issym() else checked.replace(mode=member.mode & 0o777)
-
-    checkout.mkdir()
-    with tarfile.open(source, "r:") as archive:
-        members = archive.getmembers()
-        seen = set()
-        for member in members:
-            path = PurePosixPath(member.name)
-            if (not path.parts or path.is_absolute() or ".." in path.parts or path in seen
-                    or path.parts[0] in CHECKOUT_RESERVED_PATHS or path.parts[0].startswith(".loaf-")):
-                raise TransferError(f"Invalid checkout path in backup: {member.name!r}")
-            seen.add(path)
-        archive.extractall(checkout, members=members, filter=checked_member)
-    if not (checkout / PYTHON_PACKAGE_DIR / "pyproject.toml").is_file() or not (checkout / "docs").is_dir():
-        raise TransferError("This backup has no complete source checkout. Use loaf setup followed by loaf restore.")
-
-
-def checkout_targets(checkout: Path, project: Path) -> list[tuple[Path, Path]]:
-    def collect(source: Path, target: Path, *, merge: bool):
-        if not target.exists() and not target.is_symlink():
-            yield source, target
-        elif merge and not (source.is_symlink() or target.is_symlink()):
-            if source.is_dir() and target.is_dir():
-                for entry in source.iterdir():
-                    yield from collect(entry, target / entry.name, merge=True)
-            elif source.is_file() and target.is_file():
-                yield source, target
-            else:
-                raise TransferError(f"Cannot restore checkout over {target}.")
-        else:
-            raise TransferError(f"Cannot restore checkout over {target}.")
-
-    targets = []
-    for entry in checkout.iterdir():
-        targets.extend(collect(entry, project / entry.name, merge=entry.name in {"config", INSTALL_CACHE.name}))
-    return targets
-
-
-def stage_backup_layout(bundle: BackupBundle, project: Path, staging: Path) -> None:
-    backup = project / RESTORED_BACKUP_DIR
-    dist = project / "dist"
-    if backup.is_symlink() or (backup.exists() and (not backup.is_dir() or any(backup.iterdir()))):
-        raise TransferError(f"Cannot move the backup bundle to {backup}: use an empty local directory.")
-    if dist.is_symlink() or (dist.exists() and not dist.is_dir()):
-        raise TransferError(f"Cannot use {dist} for the restored executable.")
-    if (dist / "loaf").exists() or (dist / "loaf").is_symlink():
-        raise TransferError(f"Cannot replace the existing executable at {dist / 'loaf'}.")
-
-    saved = staging / RESTORED_BACKUP_DIR
-    saved.mkdir(mode=0o700)
-    for source in (bundle.archive, project / BUNDLE_MANIFEST):
-        os.link(source, saved / source.name)
-    shutil.copyfile(bundle.executable, saved / "loaf")
-    (saved / "loaf").chmod(0o700)
-    shutil.copyfile(bundle.executable, staging / "loaf-binary")
-    (staging / "loaf-binary").chmod(0o700)
-    (staging / "loaf-link").symlink_to(RESTORED_LAUNCHER)
-
-
-def publish_backup_layout(bundle: BackupBundle, project: Path, staging: Path,
-                          checkout_entries: list[tuple[Path, Path]]) -> None:
-    binary = project / RESTORED_LAUNCHER
-    backup = project / RESTORED_BACKUP_DIR
-    previous = staging / "previous"
-    previous.mkdir()
-    with ExitStack() as rollback:
-        def move(source: Path, target: Path) -> None:
-            source.rename(target)
-            rollback.callback(target.rename, source)
-
-        for index, (entry, destination) in enumerate(checkout_entries):
-            if destination.exists():
-                move(destination, previous / f"checkout-{index}")
-            move(entry, destination)
-        if not binary.parent.exists():
-            binary.parent.mkdir()
-            rollback.callback(binary.parent.rmdir)
-        move(staging / "loaf-binary", binary)
-        if backup.is_dir():
-            move(backup, previous / "empty-backup")
-        move(staging / RESTORED_BACKUP_DIR, backup)
-        move(project / BUNDLE_MANIFEST, previous / BUNDLE_MANIFEST)
-        move(bundle.archive, previous / bundle.archive.name)
-        move(bundle.executable, previous / "loaf")
-        move(staging / "loaf-link", bundle.executable)
-        rollback.pop_all()
-    print(f"Backup bundle moved to {backup}.")
-
-
-def restore(project: Path, source: Path, *, namespace: str = "", terminal_key: Path | None = None,
-            workspace_driver: str = "local", workspace_options: str = "{}",
-            configuration: tuple[tuple[Path, ...], Path, str] | None = None, in_place_bundle: BackupBundle | None = None,
-            full_checkout: bool = False, with_docker_deps: bool = False,
-            components: tuple[str, ...] | None = None, require_volumes: bool = False) -> RestoredBackup:
-    # Stage files in the project so the source can be on read-only media.
-    with TemporaryDirectory(prefix=".loaf-restore-", dir=project) as folder:
-        staging = Path(folder)
-        print(f"Checking and unpacking {source}…", file=sys.stderr, flush=True)
-        chosen = components if components is not None else COMPONENTS
-        if "source" in (components or ()) and not full_checkout:
-            raise TransferError("Restore the source component with setup --all in the copied backup folder.")
-        # The source tree is only for setup --all. Settings need a configuration destination.
-        needed = {"volumes", "images", *(("project",) if configuration is not None else ()),
-                  *(("source",) if full_checkout else ())}
-        save = tuple(f"{part}.tar" for part in chosen if part in needed)
-        if "volumes" in chosen:
-            save += (TERMINAL_METADATA,)
-        available = unpack_payloads(source, staging, save=save)
-        missing = set(components or ()) - available
-        if missing:
-            raise TransferError(f"{source.name} does not contain the requested components: {', '.join(sorted(missing))}.")
-        restoring = available.intersection(chosen)
-        if not full_checkout:
-            restoring -= {"source"}
-        elif "source" not in restoring:
-            raise TransferError("Setup --all requires the source component from a source checkout backup.")
-        if require_volumes and "volumes" not in restoring:
-            raise TransferError("Restore --import requires the volumes component.")
-        images = staging / "images.tar"
-        terminal = read_terminal_backup(staging, namespace)
-        if "images" in restoring:
-            image_platforms(images, namespace)
-        settings = None
-        files = []
-        checkout = staging / "checkout"
-        project_files = checkout if full_checkout else staging
-        if full_checkout:
-            stage_checkout(staging / "source.tar", checkout)
-            if "project" in restoring:
-                stage_project_files(staging / "project.tar", checkout, select="all")
-            if (checkout / "config").is_symlink() or (checkout / "config" / config.CONFIG_NAME).is_symlink():
-                raise TransferError("The checkout configuration must use local files.")
-        if configuration is not None and ("project" in restoring or full_checkout):
-            lower, destination, version = configuration
-            if not full_checkout:
-                stage_project_files(staging / "project.tar", staging)
-            settings = stage_configuration(project_files / "config", lower, destination, version)
-            if not full_checkout:
-                files = project_file_targets(staging / "config", destination)
-            terminal_key = config.terminal_secret_path(project, settings.terminal_server_secret_file)
-            workspace_driver = settings.terminal_server_volume_driver
-            workspace_options = settings.terminal_server_volume_options
-        workspaces = ()
-        credential = nullcontext()
-        if terminal_key is None:
-            terminal_key = project / config.TERMINAL_SECRET
-        key = None
-        if terminal is not None:
-            key, workspaces = terminal
-            if configuration is not None and not terminal_key.is_relative_to(project):
-                raise TransferError("The backup's terminal key path must be inside the destination project.")
-        elif ((full_checkout or {"project", "volumes"} <= restoring) and in_place_bundle is not None
-                and terminal_key.is_relative_to(project) and not terminal_key.exists()):
-            key = new_terminal_key()
-        if key is not None:
-            if in_place_bundle is not None:
-                key_path = terminal_key.relative_to(project)
-                if (not key_path.parts or key_path.parts[0] in CHECKOUT_RESERVED_PATHS | {".git"}
-                        or key_path.parts[0].startswith(".loaf-")):
-                    raise TransferError("The backup uses a reserved project path for the terminal key.")
-            if full_checkout:
-                staged_key = checkout / terminal_key.relative_to(project)
-                if staged_key.resolve() != staged_key or staged_key.exists() or staged_key.is_symlink():
-                    raise TransferError("The backup uses the terminal key path for a checkout file.")
-                if not matching_terminal_key(terminal_key, key):
-                    # Keep a new credential inside the staged tree until the restore succeeds.
-                    with restore_terminal_key(staged_key, key):
-                        pass
-            else:
-                if any(path == terminal_key for _, path in files):
-                    raise TransferError("The backup uses the terminal key path for a configuration file.")
-                matching_terminal_key(terminal_key, key)
-                credential = restore_terminal_key(terminal_key, key)
-        restored_checkout = checkout_targets(checkout, project) if full_checkout else []
-        if in_place_bundle is not None:
-            stage_backup_layout(in_place_bundle, project, staging)
-        volumes = staging / "volumes.tar"
-        if "volumes" in restoring:
-            validate_volume_payload(volumes, workspaces)
-            require_inactive_volumes(project, namespace, workspaces)
-            if "images" not in restoring:
-                image = image_names(namespace)[0]
-                try:
-                    subprocess.run(["docker", "image", "inspect", image], cwd=project,
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True)
-                except subprocess.CalledProcessError as exc:
-                    raise TransferError(f"Restoring volumes without images requires the local helper image {image}.") from exc
-        if with_docker_deps:
-            install_backup_host_packages(checkout)
-        if workspaces:
-            create_workspace_volumes(project, namespace, workspaces, workspace_driver, json.loads(workspace_options))
-        if "images" in restoring:
-            docker_archive(project, ["docker", "image", "load"], images, "Load images.tar", send=True)
-        with credential:
-            if "volumes" in restoring:
-                docker_archive(
-                    project, volume_command(restore=True, namespace=namespace, workspaces=workspaces),
-                    volumes, "Restore volumes.tar", send=True,
-                )
-            publish_project_files(files)
-            if in_place_bundle is not None:
-                publish_backup_layout(in_place_bundle, project, staging, restored_checkout)
-        if terminal is not None:
-            print(f"Terminal server key available at {terminal_key}.")
-        return RestoredBackup(restoring, settings)
+            name = PurePosixPath(member.name)
+            if not name.parts or name.parts[0] not in volumes or ".." in name.parts or name in entries:
+                raise TransferError(f"Unexpected path in {path.name}: {member.name!r}")
+            if member.ischr() or member.isblk() or (len(name.parts) == 1 and not member.isdir()):
+                raise TransferError(f"Unexpected file type in {path.name}: {member.name!r}")
+            entries.add(name)
+            if len(name.parts) == 1:
+                missing.discard(name.name)
+            if member.issym() or member.islnk():
+                links.add(name)
+            if member.islnk():
+                target = PurePosixPath(member.linkname)
+                if not target.parts or target.parts[0] != name.parts[0] or ".." in target.parts:
+                    raise TransferError(f"Invalid hard link in {path.name}: {member.name!r}")
+                targets.add(target)
+    if any(not links.isdisjoint(entry.parents) for entry in entries | targets):
+        raise TransferError(f"A path in {path.name} traverses an archived link.")
+    if missing:
+        raise TransferError(f"{path.name} is missing data for {', '.join(sorted(missing))}.")
 
 
 MODEL_TRANSFER_SETUP = """\
@@ -1154,52 +880,6 @@ if [ "$#" -gt 0 ]; then
     rsync -a --ignore-existing "$@" --delete-excluded --temp-dir="$scratch" --exclude='*-partial*' -- /staging/models/blobs/ /ollama/models/blobs/
 fi
 """
-
-
-def model_volume_command(project: Path, namespace: str, *, restore: bool = False, delete: bool = False) -> list[str]:
-    volume = f"{namespace}-ollama" if namespace else "ollama"
-    subprocess.check_output(["docker", "volume", "inspect", volume], cwd=project)
-    consumers = subprocess.check_output([
-        "docker", "ps", "--filter", f"volume={volume}", "--format",
-        '{{.Label "com.docker.compose.project"}}/{{.Label "com.docker.compose.service"}}',
-    ], cwd=project).decode().splitlines()
-    deployment = namespace or "local-inference"
-    serving = {f"{deployment}/ollama-{profile}" for profile in ("connected", "offline")}
-    if len(consumers) > 1 or any(consumer not in serving for consumer in consumers):
-        raise TransferError(f"The {volume} volume is in use by another container. Stop it before transferring models.")
-    mount = f"type=volume,source={volume},target=/ollama,volume-nocopy"
-    command = ["docker", "run", "--rm", "--pull", "never", "--network", "none", "--read-only"]
-    if restore:
-        command += ["-i"]
-    else:
-        mount += ",readonly"
-    command += [
-        "--mount", mount, "--mount", "type=volume,target=/staging",
-        "--entrypoint", "/bin/sh", image_names(namespace)[0], "-c",
-        IMPORT_MODELS if restore else SNAPSHOT_MODELS,
-    ]
-    if delete:
-        command += ["loaf-model-import", "--delete-delay"]
-    return command
-
-
-def export_models(
-    project: Path, destination: Path, namespace: str, compression_level: int, stop_downloader: Callable[[], None],
-) -> None:
-    if destination.is_relative_to(project / ".git"):
-        raise TransferError("Choose a backup directory outside .git.")
-    stop_downloader()
-    command = model_volume_command(project, namespace)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with TemporaryDirectory(prefix=".loaf-backup-", dir=destination.parent) as folder:
-        raw, pending = Path(folder) / "models.tar", Path(folder) / MODEL_ARCHIVE_NAME
-        docker_archive(project, command, raw, "Save models")
-        validate_model_archive(raw)
-        with (raw.open("rb") as payload, gzip.open(pending, "wb", compresslevel=compression_level) as output,
-              Progress("Compress models", raw.stat().st_size) as progress):
-            copy_payload(payload.read, output, progress)
-        pending.chmod(file_modes(destination.parent)[0])
-        pending.replace(destination)
 
 
 def model_blob(entries: dict[PurePosixPath, tarfile.TarInfo], digest: str) -> tarfile.TarInfo:
@@ -1284,14 +964,454 @@ def validate_model_archive(path: Path) -> None:
                 raise TransferError(f"Invalid model manifest {manifest.name!r}. {exc}") from exc
 
 
-def import_models(
-    project: Path, source: Path, namespace: str, stop_downloader: Callable[[], None], *, delete: bool = False,
+def model_volume_command(project: Path, namespace: str, *, restore: bool = False, delete: bool = False) -> list[str]:
+    volume = f"{namespace}-ollama" if namespace else "ollama"
+    if not restore:
+        subprocess.check_output(["docker", "volume", "inspect", volume], cwd=project)
+    consumers = subprocess.check_output([
+        "docker", "ps", "--filter", f"volume={volume}", "--format",
+        '{{.Label "com.docker.compose.project"}}/{{.Label "com.docker.compose.service"}}',
+    ], cwd=project).decode().splitlines()
+    deployment = deployment_project(namespace)
+    serving = {f"{deployment}/ollama-{profile}" for profile in ("connected", "offline")}
+    if len(consumers) > 1 or any(consumer not in serving for consumer in consumers):
+        raise TransferError(f"The {volume} volume is in use by another container. Stop it before transferring models.")
+    mount = f"type=volume,source={volume},target=/ollama,volume-nocopy"
+    command = ["docker", "run", "--rm", "--pull", "never", "--network", "none", "--read-only"]
+    if restore:
+        command += ["-i"]
+    else:
+        mount += ",readonly"
+    command += [
+        "--mount", mount, "--mount", "type=volume,target=/staging",
+        "--entrypoint", "/bin/sh", image_names(namespace)[0], "-c",
+        IMPORT_MODELS if restore else SNAPSHOT_MODELS,
+    ]
+    if delete:
+        command += ["loaf-model-import", "--delete-delay"]
+    return command
+
+
+# --- Terminal workspaces: account folders, chat folders and chat images ---
+
+def workspace_prefix(namespace: str) -> str:
+    project = sha256(deployment_project(namespace).encode()).hexdigest()[:16]
+    return f"loaf-tools-{project}-"
+
+
+def validate_workspace_names(names, namespace: str) -> tuple[str, ...]:
+    prefix = workspace_prefix(namespace)
+    if (not isinstance(names, list)
+            or any(not isinstance(name, str) or not re.fullmatch(prefix + r"[0-9a-f]{64}", name) for name in names)
+            or len(set(names)) != len(names)):
+        raise TransferError("Invalid terminal workspace volume names for the selected deployment.")
+    return tuple(sorted(names))
+
+
+def workspace_labels(namespace: str, name: str) -> dict[str, str]:
+    return {
+        WORKSPACE_PROJECT_LABEL: deployment_project(namespace),
+        WORKSPACE_OWNER_LABEL: name.removeprefix(workspace_prefix(namespace)),
+    }
+
+
+def chat_key(chat: dict) -> str:
+    return sha256(f"{chat['owner']}/{chat['id']}".encode()).hexdigest()
+
+
+def chat_volume(namespace: str, chat: dict) -> str:
+    return f"{workspace_prefix(namespace)}{chat_key(chat)}-chat"
+
+
+def chat_image(namespace: str, chat: dict) -> str:
+    return f"{CHAT_IMAGE_REPOSITORY}:{workspace_prefix(namespace)}{chat_key(chat)}"
+
+
+def chat_labels(namespace: str, chat: dict) -> dict[str, str]:
+    return {CHAT_PROJECT_LABEL: deployment_project(namespace), CHAT_ID_LABEL: chat["id"], CHAT_OWNER_LABEL: chat["owner"]}
+
+
+def validate_chats(chats) -> list[dict]:
+    if not isinstance(chats, list) or any(
+        not isinstance(chat, dict) or set(chat) != {"id", "owner"} or not isinstance(chat["id"], str)
+        or not re.fullmatch(r"[!-~]{1,128}", chat["id"]) or chat["id"].startswith(UNSAVED_CHAT_PREFIXES)
+        or not isinstance(chat["owner"], str) or not re.fullmatch(r"[0-9a-f]{64}", chat["owner"])
+        for chat in chats
+    ) or len({chat_key(chat) for chat in chats}) != len(chats):
+        raise TransferError("Invalid terminal chat list in the backup.")
+    return chats
+
+
+def list_terminal_workspaces(project: Path, namespace: str) -> tuple[str, ...]:
+    label = f"{WORKSPACE_PROJECT_LABEL}={deployment_project(namespace)}"
+    names = subprocess.check_output(["docker", "volume", "ls", "--quiet", "--filter", f"label={label}"], cwd=project)
+    workspaces = validate_workspace_names(names.decode().split(), namespace)
+    if workspaces:
+        volumes = json.loads(subprocess.check_output(["docker", "volume", "inspect", *workspaces], cwd=project))
+        if {volume["Name"]: volume["Labels"] for volume in volumes} != {
+            name: workspace_labels(namespace, name) for name in workspaces
+        }:
+            raise TransferError("Terminal workspace volumes do not match the deployment's ownership labels.")
+    return workspaces
+
+
+def list_saved_chats(project: Path, namespace: str) -> list[dict]:
+    """List the saved chats' folders. Temporary chats stay behind."""
+    label = f"{CHAT_PROJECT_LABEL}={deployment_project(namespace)}"
+    names = subprocess.check_output(["docker", "volume", "ls", "--quiet", "--filter", f"label={label}"], cwd=project)
+    if not names.split():
+        return []
+    chats = []
+    for volume in json.loads(subprocess.check_output(["docker", "volume", "inspect", *names.decode().split()], cwd=project)):
+        labels = volume["Labels"] or {}
+        chat = {"id": labels.get(CHAT_ID_LABEL, ""), "owner": labels.get(CHAT_OWNER_LABEL, "")}
+        if chat["id"].startswith(UNSAVED_CHAT_PREFIXES):
+            continue
+        validate_chats([chat])
+        if volume["Name"] != chat_volume(namespace, chat) or labels != chat_labels(namespace, chat):
+            raise TransferError("Terminal chat volumes do not match the deployment's ownership labels.")
+        chats.append(chat)
+    return sorted(chats, key=chat_key)
+
+
+def list_chat_images(project: Path, namespace: str, chats: list[dict]) -> list[str]:
+    output = subprocess.check_output([
+        "docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}",
+        "--filter", f"label={CHAT_IMAGE_PROJECT_LABEL}={deployment_project(namespace)}",
+        "--filter", f"label={CHAT_IMAGE_TEMPORARY_LABEL}=false",
+    ], cwd=project).decode().split()
+    return sorted(tag for tag in (chat_image(namespace, chat) for chat in chats) if tag in output)
+
+
+def create_labeled_volume(project: Path, name: str, labels: dict[str, str], driver: str, options: dict[str, str]) -> None:
+    command = ["docker", "volume", "create", "--driver", driver]
+    for label, value in labels.items():
+        command += ["--label", f"{label}={value}"]
+    for option, value in options.items():
+        command += ["--opt", f"{option}={value}"]
+    subprocess.check_output([*command, name], cwd=project)
+    volume, = json.loads(subprocess.check_output(["docker", "volume", "inspect", name], cwd=project))
+    if volume["Labels"] != labels or volume["Driver"] != driver or (volume["Options"] or {}) != options:
+        raise TransferError(f"Terminal volume {name} does not match the deployment's ownership or storage settings.")
+
+
+def create_workspace_volumes(project: Path, namespace: str, workspaces: tuple[str, ...],
+                             driver: str, options: dict[str, str]) -> None:
+    for name in workspaces:
+        create_labeled_volume(project, name, workspace_labels(namespace, name), driver, options)
+
+
+def matching_terminal_key(path: Path, key: bytes) -> bool:
+    if not path.exists() and not path.is_symlink():
+        return False
+    existing = config.read_terminal_secret(path)
+    if existing.rstrip(b"\r\n") != key.rstrip(b"\r\n"):
+        raise TransferError(f"Terminal server key at {path} differs from the backup.")
+    return True
+
+
+@contextmanager
+def restore_terminal_key(path: Path, key: bytes):
+    if matching_terminal_key(path, key):
+        yield
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with NamedTemporaryFile(dir=path.parent, prefix=TERMINAL_KEY_STAGING) as pending:
+        pending.write(key)
+        pending.flush()
+        try:
+            # Publish a complete owner-only file without replacing an existing credential.
+            os.link(pending.name, path)
+        except FileExistsError:
+            if not matching_terminal_key(path, key):
+                raise
+            yield
+        else:
+            try:
+                yield
+            except BaseException:
+                if path.exists() and path.samefile(pending.name):
+                    path.unlink()
+                raise
+
+
+@dataclass(frozen=True)
+class Chats:
+    key: bytes
+    accounts: tuple[str, ...]
+    chats: list[dict]
+    images: tuple[str, ...]
+
+    def volumes(self, namespace: str) -> dict[str, dict[str, str]]:
+        volumes = {name: workspace_labels(namespace, name) for name in self.accounts}
+        volumes.update({chat_volume(namespace, chat): chat_labels(namespace, chat) for chat in self.chats})
+        return volumes
+
+
+def read_chats(item: dict, staging: Path, namespace: str) -> Chats:
+    key = (staging / CHAT_KEY).read_bytes()
+    if not config.TERMINAL_KEY_PATTERN.fullmatch(key):
+        raise TransferError("Invalid terminal server key in the backup.")
+    chats = validate_chats(item.get("chats"))
+    images = item.get("images")
+    if not isinstance(images, list) or not set(images) <= {chat_image(namespace, chat) for chat in chats}:
+        raise TransferError("Invalid terminal chat images in the backup. Select the matching --version.")
+    result = Chats(key, validate_workspace_names(item.get("accounts"), namespace), chats, tuple(sorted(images)))
+    validate_volume_payload(staging / CHAT_VOLUMES, set(result.volumes(namespace)))
+    if images and set(saved_image_tags(staging / CHAT_IMAGES)) != set(images):
+        raise TransferError("The chat images in the backup do not match its chat list.")
+    if (CHAT_IMAGES in {member["path"] for member in item["members"]}) != bool(images):
+        raise TransferError("The chat images in the backup do not match its chat list.")
+    return result
+
+
+# --- Backup ---
+
+def backup(
+    project: Path,
+    destination: Path,
+    prepare_services: Callable[[], None],
+    *,
+    types: tuple[str, ...],
+    namespace: str = "",
+    version: str = "",
+    compression_level: int = config.DEFAULT_COMPRESSION_LEVEL,
+    terminal_key: Path | None = None,
+    include_terminal_image: bool = True,
+    config_dir: Path | None = None,
 ) -> None:
+    """Write one archive: loaf.json first, then the members of each selected type."""
+    if destination.is_relative_to(project / ".git"):
+        raise TransferError("Choose a backup directory outside .git.")
+    if not types or set(types) - set(TYPES):
+        raise TransferError(f"Select archive types from {', '.join(TYPES)}.")
+    if "chats" in types and "webui" not in types:
+        raise TransferError("Chats need the WebUI data that owns their accounts and chats. Add webui.")
+    terminal_key = terminal_key or project / config.TERMINAL_SECRET
+    key = config.read_terminal_secret(terminal_key) if "chats" in types else None
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    items = []
+    with TemporaryDirectory(prefix=".loaf-backup-", dir=destination.parent) as folder:
+        staging = Path(folder)
+
+        def add(kind: str, *paths: str, **metadata) -> None:
+            items.append({"type": kind, **metadata, "members": [member_record(staging, path) for path in paths]})
+
+        if "source" in types:
+            print("Collecting source files…", file=sys.stderr, flush=True)
+            archive_source(project, staging / "source.tar", exclude_file=terminal_key)
+            add("source", "source.tar")
+        if "config" in types:
+            archive_config(project, config_dir or project / "config", staging / "config.tar", exclude_file=terminal_key)
+            add("config", "config.tar")
+        if "installers" in types:
+            print("Collecting cached installers…", file=sys.stderr, flush=True)
+            archive_installers(project, staging / "installers.tar", exclude_file=terminal_key)
+            add("installers", "installers.tar")
+        if "images" in types:
+            images = image_names(namespace)
+            if include_terminal_image:
+                terminal_image = image_names(namespace, include_terminal=True)[-1]
+                if subprocess.check_output(
+                    ["docker", "image", "ls", "--quiet", "--filter", f"reference={terminal_image}"], cwd=project,
+                ).strip():
+                    images += (terminal_image,)
+            docker_archive(project, ["docker", "image", "save", *images], staging / "images.tar", "Save images.tar")
+            add("images", "images.tar", images=list(images))
+        if {"models", *SERVICE_TYPES} & set(types):
+            print("Preparing services for the backup…", file=sys.stderr, flush=True)
+            prepare_services()
+        if "models" in types:
+            docker_archive(project, model_volume_command(project, namespace), staging / "models.tar", "Save models.tar")
+            validate_model_archive(staging / "models.tar")
+            for problem in check_backup_modelfiles(project, staging / "models.tar", staging, namespace):
+                print(f"Warning: {problem}", file=sys.stderr, flush=True)
+            add("models", "models.tar")
+        if "webui" in types:
+            webui = next(name for name, role in volume_names(namespace).items() if role == "webui")
+            require_inactive_volume(project, webui)
+            docker_archive(project, volume_command(namespace=namespace, volumes={webui: "webui"}),
+                           staging / "webui.tar", "Save webui.tar")
+            add("webui", "webui.tar")
+        if "chats" in types:
+            accounts = list_terminal_workspaces(project, namespace)
+            chats = list_saved_chats(project, namespace)
+            images = list_chat_images(project, namespace, chats)
+            volumes = [*accounts, *(chat_volume(namespace, chat) for chat in chats)]
+            for volume in volumes:
+                require_inactive_volume(project, volume)
+            (staging / "chats").mkdir()
+            if volumes:
+                docker_archive(project, volume_command(namespace=namespace, volumes={name: name for name in volumes}),
+                               staging / CHAT_VOLUMES, f"Save {CHAT_VOLUMES}")
+            else:
+                # tar refuses to create an empty archive.
+                tarfile.open(staging / CHAT_VOLUMES, "w").close()
+            members = [CHAT_VOLUMES]
+            if images:
+                docker_archive(project, ["docker", "image", "save", *images], staging / CHAT_IMAGES, f"Save {CHAT_IMAGES}")
+                members.append(CHAT_IMAGES)
+            (staging / CHAT_KEY).write_bytes(key)
+            add("chats", *members, CHAT_KEY, accounts=list(accounts), chats=chats, images=images)
+
+        manifest = {
+            "format": ARCHIVE_FORMAT, "version": ARCHIVE_VERSION, "created": datetime.now().astimezone().isoformat(),
+            "loaf": assets.release_version(), "deployment": version, "items": items,
+        }
+        # Publish only after all payloads are complete, preserving any old backup
+        # if a command fails or the operation is interrupted.
+        pending = staging / destination.name
+        write_archive(staging, pending, manifest, compression_level)
+        pending.chmod(file_modes(destination.parent)[0])
+        pending.replace(destination)
+
+
+def backup_bundle(project: Path, destination: Path, prepare_services: Callable[[], None], *,
+                  version: str, executable: Path | None = None, **options) -> None:
+    """Publish a backup folder with the archive, the launcher that can restore it and their checksums."""
+    if destination.is_relative_to(project / ".git"):
+        raise TransferError("Choose a backup directory outside .git.")
+    if executable is None:
+        executable = release_executable(project)
+    elif not standalone_executable(executable):
+        raise TransferError(f"The build did not produce a standalone executable at {executable}.")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    private, runnable = file_modes(destination.parent)
+    with TemporaryDirectory(prefix=".loaf-backup-", dir=destination.parent) as folder:
+        bundle = Path(folder) / destination.name
+        bundle.mkdir()
+        bundle.chmod(runnable | (bundle.stat().st_mode & stat.S_ISGID))
+        copy = bundle / LAUNCHER
+        shutil.copyfile(executable, copy)
+        copy.chmod(runnable)
+        archive = bundle / f"{destination.name}.tar.gz"
+        backup(project, archive, prepare_services, namespace=config.namespace(version), version=version, **options)
+        sums = bundle / CHECKSUMS
+        sums.write_text(f"{file_digest(copy)}  {LAUNCHER}\n{file_digest(archive)}  {archive.name}\n", encoding="utf-8")
+        sums.chmod(private)
+        bundle.rename(destination)
+
+
+# --- Verify and restore ---
+
+def describe(archive: Archive) -> list[str]:
+    lines = [f"Archive format {archive.manifest['version']}, created {archive.manifest.get('created', 'unknown')} "
+             f"by loaf {archive.manifest.get('loaf', 'unknown')} for "
+             f"{config.namespace(archive.deployment) or 'the default deployment'}."]
+    for item in archive.manifest["items"]:
+        size = sum(member["size"] for member in item["members"])
+        lines.append(f"  {item['type']:<10} {size:>15,} bytes")
+    return lines
+
+
+def verify_backup(archive: Archive, namespace: str) -> None:
+    with TemporaryDirectory(prefix="loaf-verify-") as folder:
+        staging = Path(folder)
+        unpack(archive, staging, {"images.tar"})
+        platforms = image_platforms(staging / "images.tar", namespace) if "images" in archive.items else {}
+    print(f"Verified SHA-256 hashes for all members of {archive.path}")
+    for line in describe(archive):
+        print(line)
+    for image, supported in sorted(platforms.items()):
+        print(f"  {image}  {', '.join(sorted(supported))}")
+
+
+def setup_from_archive(archive: Archive, project: Path, *, installers: bool) -> bytes | None:
+    """Recover the archived terminal key and, on request, the cached installers before setup."""
+    items = archive.items
+    if installers and "installers" not in items:
+        raise TransferError("The backup has no installers type containing cached host installers.")
     with TemporaryDirectory(prefix=".loaf-restore-", dir=project) as folder:
-        raw = Path(folder) / "models.tar"
-        with gzip.open(source, "rb") as archive, raw.open("wb") as output, Progress("Unpack models") as progress:
-            copy_payload(archive.read, output, progress)
-        validate_model_archive(raw)
-        stop_downloader()
-        command = model_volume_command(project, namespace, restore=True, delete=delete)
-        docker_archive(project, command, raw, "Import models", send=True)
+        staging = Path(folder)
+        unpack(archive, staging, {CHAT_KEY, *(("installers.tar",) if installers else ())})
+        if installers:
+            stage_files(staging / "installers.tar", staging / "files", INSTALL_CACHE.as_posix())
+            publish_project_files(project_file_targets(staging / "files", project))
+        key = staging / CHAT_KEY
+        if key.is_file():
+            data = key.read_bytes()
+            if not config.TERMINAL_KEY_PATTERN.fullmatch(data):
+                raise TransferError("Invalid terminal server key in the backup.")
+            return data
+    return None
+
+
+def restore(project: Path, archive: Archive, types: tuple[str, ...] | None = None, *, namespace: str = "",
+            settings: config.Settings | None = None, configuration: tuple[tuple[Path, ...], Path, str] | None = None,
+            delete: bool = False) -> RestoredBackup:
+    """Verify the whole archive, then restore the selected types in order."""
+    items = archive.items
+    requested = expand_types(types) if types else tuple(kind for kind in TYPES if kind in items)
+    missing = [kind for kind in requested if kind not in items]
+    if missing:
+        raise TransferError(f"{archive.path.name} does not contain {', '.join(missing)}.")
+    settings = settings or config.Settings()
+    config_dir = configuration[1] if configuration else project / "config"
+    project.mkdir(parents=True, exist_ok=True)
+    # Stage files in the project so the archive can stay on read-only media.
+    with TemporaryDirectory(prefix=".loaf-restore-", dir=project) as folder:
+        staging = Path(folder)
+        print(f"Checking and unpacking {archive.path}…", file=sys.stderr, flush=True)
+        unpack(archive, staging, {member["path"] for kind in requested for member in items[kind]["members"]})
+
+        # Check everything before the first change.
+        if "images" in requested:
+            image_platforms(staging / "images.tar", namespace)
+        if "models" in requested:
+            validate_model_archive(staging / "models.tar")
+        if "webui" in requested:
+            validate_volume_payload(staging / "webui.tar", {"webui"})
+        chats = read_chats(items["chats"], staging, namespace) if "chats" in requested else None
+        checkout = staging / "checkout"
+        if "source" in requested:
+            stage_checkout(staging / "source.tar", checkout)
+        files = staging / "files"
+        restored_settings = None
+        if "config" in requested:
+            stage_files(staging / "config.tar", files, "config")
+            if configuration is not None:
+                lower, _, version = configuration
+                settings = restored_settings = stage_configuration(files / "config", lower, config_dir, version)
+        if "installers" in requested:
+            stage_files(staging / "installers.tar", files, INSTALL_CACHE.as_posix())
+        checkout_entries = checkout_targets(checkout, project) if "source" in requested else []
+        file_targets = (project_file_targets(files / "config", config_dir)
+                        + project_file_targets(files / INSTALL_CACHE, project / INSTALL_CACHE))
+        terminal_key = config.terminal_secret_path(project, settings.terminal_server_secret_file)
+        if chats is not None:
+            if any(path == terminal_key for _, path in file_targets):
+                raise TransferError("The backup uses the terminal key path for a configuration file.")
+            matching_terminal_key(terminal_key, chats.key)
+        if {"models", "webui", "chats"} & set(requested) and "images" not in requested:
+            require_helper_image(project, namespace)
+        webui = next(name for name, role in volume_names(namespace).items() if role == "webui")
+        if "webui" in requested:
+            require_inactive_volume(project, webui)
+        chat_volumes = chats.volumes(namespace) if chats is not None else {}
+        for volume in chat_volumes:
+            require_inactive_volume(project, volume)
+        model_command = model_volume_command(project, namespace, restore=True, delete=delete) if "models" in requested else None
+
+        publish_checkout(checkout_entries)
+        publish_project_files(file_targets)
+        if "images" in requested:
+            docker_archive(project, ["docker", "image", "load"], staging / "images.tar", "Load images.tar", send=True)
+        if model_command is not None:
+            docker_archive(project, model_command, staging / "models.tar", "Restore models.tar", send=True)
+        if "webui" in requested:
+            docker_archive(project, volume_command(restore=True, namespace=namespace, volumes={webui: "webui"}),
+                           staging / "webui.tar", "Restore webui.tar", send=True)
+        if chats is not None:
+            driver, options = settings.terminal_server_volume_driver, json.loads(settings.terminal_server_volume_options)
+            for volume, labels in chat_volumes.items():
+                create_labeled_volume(project, volume, labels, driver, options)
+            if chats.images:
+                docker_archive(project, ["docker", "image", "load"], staging / CHAT_IMAGES, f"Load {CHAT_IMAGES}",
+                               send=True)
+            with restore_terminal_key(terminal_key, chats.key):
+                if chat_volumes:
+                    docker_archive(project, volume_command(restore=True, namespace=namespace,
+                                                           volumes={name: name for name in chat_volumes}),
+                                   staging / CHAT_VOLUMES, f"Restore {CHAT_VOLUMES}", send=True)
+            print(f"Terminal server key available at {terminal_key}.")
+        return RestoredBackup(requested, restored_settings)

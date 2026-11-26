@@ -79,7 +79,7 @@ if [ -d /check/config ] && [ -d /check/models/blobs ] &&
     [ -n "$(find /check/models/blobs -type f -name 'sha256-*' ! -name '*-partial*' -print -quit)" ]; then
     exit 0
 fi
-echo 'No local model manifests or saved definitions with blobs. Run loaf download or loaf import.' >&2
+echo 'No local model manifests or saved definitions with blobs. Run loaf download or loaf restore models.' >&2
 exit 1
 """
     docker_output(compose, probe_container(

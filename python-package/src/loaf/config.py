@@ -14,6 +14,8 @@ CONFIG_NAME = "config.ini"
 SYSTEM_CONFIG_DIR = Path("/etc/loaf")
 DEFAULT_WAIT_TIMEOUT = 300
 DEFAULT_COMPRESSION_LEVEL = 4
+# The archive format this release writes; [transfer] backup_version_min can raise the oldest accepted one.
+ARCHIVE_VERSION = 2
 OPEN_TERMINAL_IMAGE = "ghcr.io/open-webui/open-terminal:0.17.20-slim"
 TERMINAL_SECRET = Path("config/terminal-server.key")
 TERMINAL_KEY_PATTERN = re.compile(rb"[!-~]{32,512}(?:\r?\n)?")
@@ -47,6 +49,7 @@ class Settings:
     export_models: bool = False
     import_models: bool = False
     compression_level: int = DEFAULT_COMPRESSION_LEVEL
+    backup_version_min: int = ARCHIVE_VERSION
     terminal_server_enabled: bool = False
     terminal_server_include_in_backup: bool = False
     terminal_server_secret_file: Path = TERMINAL_SECRET
@@ -134,6 +137,14 @@ def compression_value(value: str) -> int:
     return number
 
 
+def archive_version_value(value: str) -> int:
+    number = int(value)
+    # Format 2 is the first one with a typed manifest; this release reads nothing newer than it writes.
+    if not 2 <= number <= ARCHIVE_VERSION:
+        raise ValueError(f"expected an archive format from 2 to {ARCHIVE_VERSION}")
+    return number
+
+
 def boolean_value(value: str) -> bool:
     try:
         return ConfigParser.BOOLEAN_STATES[value.lower()]
@@ -203,6 +214,7 @@ SECTIONS = {
         "export_models": boolean_value,
         "import_models": boolean_value,
         "compression_level": compression_value,
+        "backup_version_min": archive_version_value,
     },
     "terminal_server": {
         "enabled": boolean_value,

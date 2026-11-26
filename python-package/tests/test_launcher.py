@@ -76,10 +76,28 @@ class ModelListTests(unittest.TestCase):
         source = "hf.co/test/chat:Q4_K_M"
         model, = self.read(f"[models.chat]\nmodel = {source}\nname = Friendly-Chat\n".encode())
         self.assertEqual(model.name, "Friendly-Chat:latest")
-        self.assertEqual(cli.plan("download", [model])[-1].arguments[-4:],
-                         ("ollama", "cp", source, model.name))
-        self.assertEqual(cli.plan("download", [model], export_definitions=True)[-1].arguments[-2:],
-                         ("export-modelfiles", model.name))
+        # Only the display name stays visible after download.
+        self.assertEqual([step.arguments[-4:] for step in cli.plan("download", [model])[3:]], [
+            ("ollama-online", "ollama", "pull", source),
+            ("ollama", "cp", source, model.name),
+            ("ollama-online", "ollama", "rm", source),
+        ])
+        self.assertEqual([step.arguments[-2:] for step in cli.plan("download", [model], export_definitions=True)[3:]],
+                         [("export-modelfiles", model.name)])
+
+    def test_a_source_also_selected_unnamed_keeps_its_long_name(self):
+        source = "hf.co/test/chat:Q4_K_M"
+        models = [cli.Model(source), cli.Model(source, "Friendly-Chat:latest")]
+        steps = cli.plan("download", models)
+        self.assertFalse(any("rm" in step.arguments for step in steps))
+        self.assertEqual([step.arguments[-4:] for step in steps[3:]], [
+            ("ollama-online", "ollama", "pull", source), ("ollama", "cp", source, "Friendly-Chat:latest"),
+        ])
+        exported = [step.arguments[-4:] for step in cli.plan("download", models, export_definitions=True)[3:]]
+        self.assertEqual(exported, [
+            ("-T", "ollama-online", "export-modelfiles", source), ("ollama", "cp", source, "Friendly-Chat:latest"),
+            ("-T", "ollama-online", "export-modelfiles", "Friendly-Chat:latest"),
+        ])
 
     def test_alias_collision_is_rejected_case_insensitively(self):
         with self.assertRaisesRegex(cli.ModelFileError, "duplicate model name"):
@@ -513,19 +531,21 @@ class CliTests(unittest.TestCase):
             (("offline", "extra"), "Unexpected arguments for offline"),
             (("offline", "systemd"), "Use the integration name with loaf integration"),
             (("integration",), "integration requires a name"),
-            (("backup", "logs"), "Unknown backup component logs"),
-            (("backup", "images", "images"), "Specify each backup component once"),
+            (("backup", "logs"), "Unknown archive type logs"),
+            (("backup", "images", "images"), "Specify each archive type once"),
             (("offline", "-n"), "only supported by stop"),
             (("restore", "--verify"), "--verify is only supported by backup"),
-            (("backup", "images", "--verify"), "--verify checks the whole deployment backup"),
+            (("backup", "images", "--verify"), "--verify checks the whole archive"),
             (("backup", "volumes", "--no-terminal-server"), "creating a backup that includes images"),
-            (("export", "--delete"), "--delete is supported by import"),
+            (("backup", "--delete"), "--delete is only supported by restore"),
+            (("restore", "config", "--delete"), "--delete applies to the models type"),
             (("build", "--cpu"), "--cpu is only supported by"),
-            (("restore", "volumes", "--models-only", "--cpu"), "--cpu applies when starting inference"),
+            (("restore", "--models-only"), "unrecognized arguments: --models-only"),
+            (("setup", "--all"), "unrecognized arguments: --all"),
             (("offline", "--with-docker-deps"), "--with-docker-deps is only supported by setup"),
-            (("offline", "--all"), "--all and --terminal-server-key are only supported by setup"),
-            (("setup", "--terminal-server-key", "--all"), "--terminal-server-key is for key setup only"),
-            (("setup", "--all", "--config-dir", "config"), "Omit --config-dir"),
+            (("offline", "--test-local-repository"), "only supported by setup and install"),
+            (("setup", "--terminal-server-key", "--test-local-repository"), "--terminal-server-key is for key setup only"),
+            (("setup", "--test-local-repository", "--with-docker-deps"), "only creates the test repository"),
             (("offline", "--badges"), "--badges is only supported by test"),
             (("offline", "--full"), "--full is only supported by clean"),
             (("offline", "--backup-dir", "backup"), "--backup-dir is only supported by backup"),
@@ -533,12 +553,12 @@ class CliTests(unittest.TestCase):
             (("clean", "--version", "v2"), "Unexpected option for clean"),
             (("restore", "--backup-dir", "a", "--archive", "b"), "Use either --backup-dir or --archive"),
             (("offline", "--archive", "a.tar.gz"), "--archive is for standalone setup"),
-            (("offline", "--import"), "--import/--no-import are only supported by deployment restore"),
-            (("restore", "images", "--import"), "--import requires the volumes component"),
-            (("backup", "images", "--export"), "--export requires the volumes component"),
+            (("offline", "--import"), "--import/--no-import are only supported by restore"),
+            (("restore", "images", "--import"), "--import requires the models type"),
+            (("backup", "images", "--export"), "--export requires the models type"),
             (("build", "--wait-timeout", "5"), "--wait-timeout is only supported by commands that start services"),
             (("setup", "extra"), "setup accepts only the tests argument"),
-            (("setup", "tests", "--all"), "setup tests installs only the test packages"),
+            (("setup", "tests", "--test-local-repository"), "setup tests installs only the test packages"),
             (("install", "tests", "--archive", "backup"), "setup tests installs only the test packages"),
             (("setup", "tests", "--version", "v2"), "Unexpected option for setup"),
         ):
@@ -566,15 +586,14 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(raised.exception.code, 2)
                 self.assertIn("--no-terminal-server is only supported when creating a backup", errors.getvalue())
 
-    def test_import_dry_run_from_another_directory_needs_no_selection_file(self):
+    def test_restore_dry_run_from_another_directory_needs_no_selection_file(self):
         with tempfile.TemporaryDirectory() as folder:
             child = subprocess.run([
-                sys.executable, '-m', 'loaf', '--project-dir', str(self.project), 'import',
-                '--archive', 'models.tar.gz', '--dry-run',
+                sys.executable, '-m', 'loaf', '--project-dir', str(self.project), 'restore', 'models',
+                '--backup-dir', 'archives', '--dry-run',
             ], cwd=folder, capture_output=True, text=True)
         self.assertEqual(child.returncode, 0, child.stderr)
-        self.assertIn('Stop the model downloader', child.stdout)
-        self.assertIn(f'Merge Ollama models from {Path(folder) / "models.tar.gz"}', child.stdout)
+        self.assertIn(f'Restore models from the newest backup in {Path(folder).resolve() / "archives"}', child.stdout)
         self.assertNotIn('+ ', child.stdout)
 
     def test_online_rejects_previous_download_options_before_docker(self):

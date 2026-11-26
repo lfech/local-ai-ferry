@@ -1,11 +1,11 @@
 # Local AI Ferry
 
-[![CLI baseline · 2026-11-25 23:28:20 — 204/204 passed](docs/badges/cli.svg)](docs/verification-record.md#2026-11-25-232820-0100--test-badge-run)&nbsp;&nbsp;&nbsp; This is software not production-ready - use for testing only.
+[![CLI baseline · 2026-11-26 20:22:57 — 212/212 passed](docs/badges/cli.svg)](docs/verification-record.md#2026-11-26-202257-0100--test-badge-run)&nbsp;&nbsp;&nbsp; This is software not production-ready - use for testing only.
 
-[![Docker · 2026-11-25 23:20:36 — 32/32 passed](docs/badges/docker.svg)](docs/verification-record.md#2026-11-25-232036-0100--test-badge-run)
-[![Open Terminal · 2026-11-25 23:28:20 — 12/12 passed](docs/badges/open-terminal.svg)](docs/verification-record.md#2026-11-25-232820-0100--test-badge-run)
-[![GPU inference · 2026-11-25 23:20:36 — 6/6 passed](docs/badges/gpu.svg)](docs/verification-record.md#2026-11-25-232036-0100--test-badge-run)
-[![Model catalog · 2026-11-25 23:20:36 — 1/1 passed](docs/badges/catalog.svg)](docs/verification-record.md#2026-11-25-232036-0100--test-badge-run)
+[![Docker · 2026-11-26 20:22:57 — 33/33 passed](docs/badges/docker.svg)](docs/verification-record.md#2026-11-26-202257-0100--test-badge-run)
+[![Open Terminal · 2026-11-26 20:22:57 — 16/16 passed](docs/badges/open-terminal.svg)](docs/verification-record.md#2026-11-26-202257-0100--test-badge-run)
+[![GPU inference · 2026-11-26 20:22:57 — 6/6 passed](docs/badges/gpu.svg)](docs/verification-record.md#2026-11-26-202257-0100--test-badge-run)
+[![Model catalog · 2026-11-26 20:22:57 — 1/1 passed](docs/badges/catalog.svg)](docs/verification-record.md#2026-11-26-202257-0100--test-badge-run)
 
 Local AI Ferry prepares and runs local AI deployments and transfers them to
 offline or air-gapped machines (web-connected usage is also supported). 
@@ -18,10 +18,10 @@ to prepare the deployment. Run `loaf online` to test it. Use
 `loaf online --cpu` on a machine without NVIDIA GPU access.
 
 To move the deployment offline, run `loaf backup` and copy the entire backup
-folder to the destination. From the copied folder, run `./loaf setup`,
-`./loaf restore`, and `./loaf offline`.
-Use `./loaf setup --all` in place of setup and restore to recover the full
-source checkout from a backup made from source. [Backup recovery](docs/transfer.md#debian-restore)
+folder to the destination. From the backup folder, run `./loaf setup` and
+`./loaf restore`. They prepare `~/.local-ai-ferry` and leave the folder
+unchanged. Then run `./loaf offline` in `~/.local-ai-ferry`.
+[Backup recovery](docs/transfer.md#debian-restore)
 
 ## Development disclosure
 
@@ -29,8 +29,13 @@ Codex in VS Code assisted with implementation and verification. The author
 guided the system design and reviewed the functional behavior of the Docker
 Compose deployment and the `loaf` CLI.
 
-- Development used GPT‑6.2 Sol with 'Extra High' reasoning effort.
-- Final verification used GPT‑6.2 Sol with 'Max' reasoning effort.
+- Development uses one of the following models:
+  + ChatGPT 6.2 Sol with 'Extra High' reasoning effort.
+  + Claude Opus 5.5 with "Extra High" reasoning effort.
+
+- Final verification and testing before each release use:
+  + ChatGPT 6.2 Sol with 'Max' reasoning effort.
+  + Claude Opus 5.5 with "Max" reasoning effort.
 
 ## Quick Setup
 
@@ -125,7 +130,7 @@ when starting from a prepared archive.
 
 | Mode | What it does |
 | --- | --- |
-| `setup` / `install` | Prepare the deployment and its terminal key. Use `--terminal-server-key` for key setup alone or `--all` in a source checkout backup to recover the source and Docker data. `setup tests` caches and installs the test packages. [Setup options](docs/cli-help.md#setup) |
+| `setup` / `install` | Prepare the deployment and its terminal key. Use `--terminal-server-key` for key setup alone. `--test-local-repository` creates a small APT repository for chat packages. `setup tests` caches and installs the test packages. [Setup options](docs/cli-help.md#setup) |
 | `link-docker-project` | Create a `docker-project` symlink to the packaged Compose file, Dockerfiles, and default configuration. [Direct Compose commands](docs/launcher.md#link-the-docker-project) |
 | `integration` | Print a systemd unit, Continue YAML, or Tether installation instructions. [Host integrations](docs/installation.md#host-integrations) |
 | `build` / `upgrade` | Build the local images. Upgrade refreshes upstream base images first. |
@@ -133,9 +138,8 @@ when starting from a prepared archive.
 | `clean` | Remove temporary files and the runtime cache. Add `--full` to clear generated installation files too. [Cleanup](docs/launcher.md#clean-generated-files) |
 | `download` | Download selected models using the downloader. |
 | `online` / `offline` | Start Ollama and WebUI with the selected network profile. Add `--cpu` for CPU inference. |
-| `export` / `import` | Transfer the Ollama model store. Also available as `backup volumes --models-only` and `restore volumes --models-only`. [Model transfer](docs/transfer.md#transfer-models-between-existing-deployments) |
-| `backup` / `restore` | Select any combination of `images`, `volumes`, `project` and, from a checkout, `source`. [Component selection](docs/transfer.md#select-deployment-components) |
-| `backup --verify` | Check archive payload and bundled executable hashes, and report saved image platforms without Docker. |
+| `backup` / `restore` | Select any of `source`, `config`, `installers`, `images`, `models`, `webui` and `chats`, or the aliases `project` and `volumes`. `models` alone transfers the model store. [Archive types](docs/transfer.md#select-archive-types) |
+| `backup --verify` | Check the archive members and the bundled launcher, list the types, and report saved image platforms without Docker. |
 | `version` / `docs` | Show the release and installation, or read the bundled guides and manual page. [Bundled guides](docs/launcher.md#read-the-bundled-guides) |
 | `status` / `stop` | Check deployment readiness and list containers, or stop and remove containers across all profiles. [Keep stopped containers](docs/launcher.md#stop-and-remove-containers) |
 | `test` | Run the checkout's test suite. [Verification guide](docs/verification.md) |
@@ -165,7 +169,7 @@ separate. [Versioned deployments](docs/launcher.md#run-a-versioned-deployment)
 The default INI section `[models.default]` selects IBM's Granite 4.0 H 350M in
 Q4_K_M, a 223 MB chat model that can call tools. Add a `[models.<name>]` section with a `model` value
 for each model you want to use. Those sections replace the default selection.
-Add `name` to give WebUI a readable Ollama alias. Choose a different
+Add `name` to show the model under that readable name only. Choose a different
 INI with `--models-file` or select another settings directory with `--config-dir`.
 [Selection syntax](docs/launcher.md#select-models)
 
@@ -203,7 +207,8 @@ loaf stop
 
 To move computers, run `loaf backup` and transfer the resulting
 `backup/YYYYMMDD-HHMM_local-ai-ferry/` folder. On the destination, enter
-that folder and run `./loaf setup` followed by `./loaf restore`.
+that folder and run `./loaf setup` followed by `./loaf restore`. Both prepare
+`~/.local-ai-ferry`.
 [Offline transfer](docs/transfer.md#debian-restore)
 
 Offline startup uses local images and models. Ollama is on an internal network;

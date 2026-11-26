@@ -123,16 +123,6 @@ class CleanupTests(unittest.TestCase):
                 self.assertEqual(key.read_bytes(), b"k" * 32)
                 self.assertTrue(self.runtime.is_dir())
 
-    def test_full_keeps_the_launcher_linked_by_an_in_place_restore(self):
-        binary = self.put(self.project / transfer.RESTORED_LAUNCHER)
-        manifest = self.put(self.project / "backup/backup.json")
-        launcher = self.project / "loaf"
-        launcher.symlink_to(transfer.RESTORED_LAUNCHER)
-        status, output = self.invoke("--full")
-        self.assertEqual(status, 0, output)
-        self.assertEqual(launcher.read_bytes(), binary.read_bytes())
-        self.assertTrue(manifest.is_file())
-
     def test_busy_project_or_runtime_prevents_cleanup(self):
         candidate = self.put(self.project / ".loaf-restore-active/images.tar")
         for lock in (
@@ -184,7 +174,8 @@ class CleanupTests(unittest.TestCase):
     def test_bundle_layout_cannot_be_cleaned_as_a_cache(self):
         bundle = self.runtime / f"20261123-1500_{transfer.BUNDLE_NAME}"
         archive = self.put(bundle / "custom.tar.gz")
-        self.put(bundle / transfer.BUNDLE_MANIFEST)
+        self.put(bundle / transfer.CHECKSUMS)
+        self.put(bundle / transfer.LAUNCHER)
         status, output = self.invoke("--full")
         self.assertEqual(status, 0)
         self.assertIn("protected Git work, backup, credentials or mount", output)

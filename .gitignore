@@ -29,4 +29,7 @@ local-ai-ferry.tar.gz
 *_local-ai-ferry-[0-9]*.tar.gz
 *_local-ai-ferry/
 *_local-ai-ferry-[0-9]*/
-*_loaf-volumes.tar.gz
+
+# Generated test APT repository
+/apt-test-repository/
+/config/apt-test-repository.list

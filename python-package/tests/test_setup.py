@@ -648,3 +648,48 @@ class SetupTests(unittest.TestCase):
                 f"home = {missing}" if line.startswith("home = ") else line for line in lines
             ) + "\n", encoding="utf-8")
             self.assertFalse(setup.interpreter_works(python, environment))
+
+
+class TestRepositoryTests(unittest.TestCase):
+    def test_local_repository_lists_its_tools_and_replaces_only_its_own_directory(self):
+        calls = []
+
+        def docker(command, **kwargs):
+            calls.append(command)
+            if command[1:3] == ["image", "inspect"]:
+                return subprocess.CompletedProcess(command, 1 if "missing" in command[-1] else 0)
+            mount = next(part for part in command if part.startswith("type=bind,"))
+            repository = Path(mount.split("source=", 1)[1].split(",target=", 1)[0])
+            self.assertEqual(command[command.index("--user") + 1], "0:0")
+            self.assertNotIn("--network", command)
+            self.assertEqual(command[-len(setup.TEST_REPOSITORY_TOOLS):], list(setup.TEST_REPOSITORY_TOOLS))
+            (repository / "jq_1.7_amd64.deb").write_bytes(b"package")
+            (repository / "Packages.gz").write_bytes(b"index")
+            (repository / setup.TEST_REPOSITORY_LIST).write_text("jq\ntree\n", encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0)
+
+        with tempfile.TemporaryDirectory(prefix="loaf repository ") as folder:
+            project = Path(folder)
+            with patch.object(setup.subprocess, "run", side_effect=docker), redirect_stdout(StringIO()) as output:
+                self.assertEqual(setup.create_test_repository(project, "local/open-terminal:latest"), ["jq", "tree"])
+                self.assertEqual(setup.create_test_repository(project, "local/open-terminal:latest"), ["jq", "tree"])
+            repository = project / setup.TEST_REPOSITORY_DIR
+            self.assertEqual(sorted(path.name for path in repository.iterdir()),
+                             ["Packages.gz", "jq_1.7_amd64.deb", setup.TEST_REPOSITORY_LIST])
+            self.assertEqual((project / setup.TEST_REPOSITORY_SOURCE).read_text(),
+                             "deb [trusted=yes] file:/run/loaf-apt/repository ./\n")
+            self.assertIn("  jq\n  tree\n", output.getvalue())
+            self.assertIn("apt_repository_dir = apt-test-repository", output.getvalue())
+            self.assertFalse(list(project.glob(".loaf-repository-*")))
+
+            with patch.object(setup.subprocess, "run", side_effect=docker), self.assertRaisesRegex(
+                setup.SetupError, "terminal image local/missing:latest is missing",
+            ):
+                setup.create_test_repository(project, "local/missing:latest")
+            (repository / setup.TEST_REPOSITORY_LIST).unlink()
+            calls.clear()
+            with patch.object(setup.subprocess, "run", side_effect=docker), self.assertRaisesRegex(
+                setup.SetupError, "is not a loaf test repository",
+            ):
+                setup.create_test_repository(project, "local/open-terminal:latest")
+            self.assertEqual(calls, [])

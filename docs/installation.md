@@ -2,8 +2,9 @@
 
 ## Disconnected Debian installation
 
-Copy the trusted backup folder to a writable location and enter it. The
-folder's `loaf` uses its bundled Python. Prepare a compatible NVIDIA driver
+Copy the trusted backup folder to the destination, or attach its media, and
+enter it. The folder's `loaf` uses its bundled Python. Setup and restore
+prepare `~/.local-ai-ferry` and leave the folder unchanged. Prepare a compatible NVIDIA driver
 for GPU inference and use an account with Docker access.
 [Backup recovery](transfer.md#debian-restore) · [Docker access](debian.md#docker-access)
 
@@ -13,12 +14,14 @@ chmod +x loaf
 ./loaf restore
 ```
 
-Setup creates default configuration and the terminal server key and links
-the packaged Docker files. Restore checks the handoff and loads saved images,
-volumes, settings and Modelfiles. Use `./loaf setup --all` in place of these
-two commands when recovering the full source checkout from a checkout backup.
-For a fresh deployment, use the release executable and run setup.
-[Full checkout recovery](transfer.md#debian-restore) ·
+Setup creates default configuration and the terminal server key, links
+the packaged Docker files and copies the launcher into the project. Restore
+checks the backup and loads everything it contains: settings and Modelfiles,
+installers, images, models and WebUI data, and, when included, the source
+checkout and chat folders. Continue with `./loaf offline` in
+`~/.local-ai-ferry`. For a fresh deployment, use the release executable and
+run setup.
+[Backup recovery](transfer.md#debian-restore) ·
 [Release executable](releases.md#run-the-executable)
 
 On Debian 12 or 13, use the following setup command when the backup has

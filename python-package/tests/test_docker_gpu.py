@@ -277,11 +277,13 @@ class ModelWorkflowTests(unittest.TestCase):
         def stop_downloader():
             compose_command(compose, cli.STOP_DOWNLOADER)
 
-        transfer.export_models(compose.project_dir, archive, project, 1, stop_downloader)
+        transfer.backup(compose.project_dir, archive, stop_downloader, types=("models",), namespace=project,
+                        compression_level=1)
         added = "only-on-destination:latest"
         self.invoke(compose, "online", "exec", "-T", "ollama-connected", "ollama", "cp", CACHED_MODEL, added)
         self.assertIn(added, self.model_names(compose, "online"))
-        transfer.import_models(compose.project_dir, archive, project, stop_downloader, delete=True)
+        transfer.restore(compose.project_dir, transfer.open_archive(archive), ("models",), namespace=project,
+                         delete=True)
         self.assertEqual(self.model_names(compose, "online"), {CACHED_MODEL, DISPLAY_NAME})
         self.assertEqual(self.container_id(compose, "online", "ollama-connected"), backend)
         self.assertEqual(self.container_id(compose, "online", "open-webui-online"), webui)
