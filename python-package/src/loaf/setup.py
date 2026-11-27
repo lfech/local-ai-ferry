@@ -81,6 +81,46 @@ print(sys.prefix)
 """
 
 
+# A small local APT repository for trying chat packages offline.
+TEST_REPOSITORY_DIR = Path("apt-test-repository")
+TEST_REPOSITORY_SOURCE = Path("config/apt-test-repository.list")
+TEST_REPOSITORY_LIST = "packages.txt"
+TEST_REPOSITORY_TOOLS = (
+    "bc", "cowsay", "dos2unix", "figlet", "hexyl", "jq", "moreutils", "ncdu", "pv", "ripgrep", "sl", "tree", "units",
+)
+TEST_REPOSITORY_COUNT = 3
+TEST_REPOSITORY_SCRIPT = """\
+set -eu
+export DEBIAN_FRONTEND=noninteractive
+owner=$1
+count=$2
+shift 2
+apt-get -qq -o APT::Update::Error-Mode=any update
+candidates=
+for package do
+    if dpkg-query -W -f '${Status}' "$package" 2>/dev/null | grep -q 'ok installed'; then
+        continue
+    fi
+    if apt-cache show "$package" >/dev/null 2>&1; then
+        candidates="$candidates $package"
+    fi
+done
+chosen=$(printf '%s\\n' $candidates | shuf -n "$count" | sort)
+if [ -z "$chosen" ]; then
+    echo "The image's APT sources offer none of the candidate tools." >&2
+    exit 1
+fi
+# Download what the shared terminal image lacks, as the chat package installer would install it.
+mkdir -p /tmp/archives/partial
+apt-get -qq -o Dir::Cache::Archives=/tmp/archives/ install -y --download-only $chosen
+cp /tmp/archives/*.deb /repository/
+cd /repository
+dpkg-scanpackages --multiversion . /dev/null 2>/dev/null | gzip -9n > Packages.gz
+printf '%s\\n' $chosen > packages.txt
+chown -R "$owner" /repository
+"""
+
+
 class SetupError(ValueError):
     """The host or project prerequisites could not be prepared."""
 
@@ -762,3 +802,39 @@ def install(project: Path, *, with_docker_deps: bool = False) -> None:
     install_python(project)
     print("Prepare the NVIDIA Container Toolkit…", file=sys.stderr, flush=True)
     install_toolkit(project)
+
+
+def create_test_repository(project: Path, image: str) -> list[str]:
+    """Download a few Debian command-line tools into a flat APT repository for chat package tests."""
+    target = project / TEST_REPOSITORY_DIR
+    if (target.exists() or target.is_symlink()) and not (
+        target.is_dir() and not target.is_symlink() and (target / TEST_REPOSITORY_LIST).is_file()
+    ):
+        raise SetupError(f"{target} exists and is not a loaf test repository. Move it away first.")
+    if subprocess.run(["docker", "image", "inspect", image], stdout=subprocess.DEVNULL,
+                      stderr=subprocess.DEVNULL).returncode:
+        raise SetupError(f"The terminal image {image} is missing. Enable [terminal_server] and run loaf build first.")
+    with TemporaryDirectory(prefix=".loaf-repository-", dir=project) as folder:
+        staging = Path(folder) / TEST_REPOSITORY_DIR.name
+        staging.mkdir()
+        # The terminal image matches the Debian release and architecture of the chat package installer.
+        subprocess.run([
+            "docker", "run", "--rm", "--pull", "never", "--user", "0:0", "--entrypoint", "/bin/sh",
+            "--mount", f"type=bind,source={staging},target=/repository", image, "-c", TEST_REPOSITORY_SCRIPT,
+            "loaf-test-repository", f"{os.getuid()}:{os.getgid()}", str(TEST_REPOSITORY_COUNT), *TEST_REPOSITORY_TOOLS,
+        ], check=True)
+        packages = (staging / TEST_REPOSITORY_LIST).read_text(encoding="utf-8").split()
+        if target.exists():
+            shutil.rmtree(target)
+        staging.rename(target)
+    source = project / TEST_REPOSITORY_SOURCE
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("deb [trusted=yes] file:/run/loaf-apt/repository ./\n", encoding="utf-8")
+    print(f"Test APT repository in {target} with these tools:")
+    for package in packages:
+        print(f"  {package}")
+    print(f"Use it for chat packages with these settings in {project / 'config' / config.CONFIG_NAME}:\n"
+          f"  [terminal_server]\n  apt_source_file = {TEST_REPOSITORY_SOURCE.as_posix()}\n"
+          f"  apt_repository_dir = {TEST_REPOSITORY_DIR.as_posix()}\n"
+          f"Then run loaf offline or loaf online and ask the model to run: apt-get install {packages[0]}")
+    return packages

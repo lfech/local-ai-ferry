@@ -136,6 +136,9 @@ class ConfigTests(unittest.TestCase):
             compose.variables(start)
         repository = self.project / "mirror"
         repository.mkdir()
+        with self.assertRaisesRegex(FileNotFoundError, "has no APT index"):
+            compose.variables(start)
+        (repository / "Packages.xz").write_bytes(b"")
         before = compose.variables(start)
         self.assertEqual(before["LOAF_TERMINAL_APT_SOURCE_FILE"], str(source))
         self.assertEqual(before["LOAF_TERMINAL_APT_SOURCE_FORMAT"], "sources")

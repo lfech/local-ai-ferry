@@ -71,8 +71,8 @@ original executable. [Python Build Standalone release](https://github.com/astral
 Setup creates `config/config.ini` and `config/models.ini` if missing,
 creates the terminal server key, and links the packaged Docker project.
 Use the same setup command with a binary carried in a backup. Follow it
-with `loaf restore` when recovering a minimal deployment, or use
-`loaf setup --all` to recover an archived source checkout and its Docker data.
+with `loaf restore`, which also recovers an archived source checkout into a
+new project directory.
 For a fresh deployment, use `../loaf build` from the project directory.
 [Backup recovery](transfer.md#debian-restore)
 

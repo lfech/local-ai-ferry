@@ -4,6 +4,163 @@
 
 Older entries use the current command and project names in examples.
 
+## 2026-11-26 20:22:57 +0100 — Test badge run
+
+`loaf test --badges` passed on Linux with Python 3.13.5.
+Unittest reported 268 cases and 0 skips.
+Enabled test options were `RUN_DOCKER_TESTS=1`, `RUN_GPU_TESTS=1`, `RUN_CATALOG_TESTS=1`, `RUN_TERMINAL_SERVER_TESTS=1`.
+
+| Group | Passed / executed |
+| --- | ---: |
+| CLI baseline | 212/212 |
+| Docker | 33/33 |
+| Open Terminal | 16/16 |
+| GPU inference | 6/6 |
+| Model catalog | 1/1 |
+
+## 2026-11-26 19:43:28 +0100 — Test badge run
+
+`loaf test --badges` passed on Linux with Python 3.13.5.
+Unittest reported 268 cases and 46 skips.
+All opt-in test options were disabled.
+
+| Group | Passed / executed |
+| --- | ---: |
+| CLI baseline | 210/210 |
+| Open Terminal | 12/12 |
+
+## 2026-11-26 20:35:45 +0100 — Full suite with every opt-in and a code review
+
+- Environment: Debian 13 in WSL2, Docker Engine 26.1.5, Compose 2.26.1-4,
+  the author's rebuilt `.venv` on pyenv Python 3.13.2, the rebuilt
+  `local/open-terminal:latest`, and an NVIDIA GPU visible to Docker.
+- `RUN_DOCKER_TESTS=1 RUN_GPU_TESTS=1 RUN_TERMINAL_SERVER_TESTS=1 RUN_CATALOG_TESTS=1 ./loaf test -v`
+  without `--badges`: all 268 cases passed in 660 seconds with no skips. The
+  author's own deployment ran in the online profile during the run.
+- A review of the uncommitted changes found seven important and three minor
+  issues. Three were reproduced with the CLI: `restore volumes` asks for
+  `chats` on an archive without them, a truncated archive and an unusable
+  `--project-dir` end in Python tracebacks. They are not fixed yet; see the
+  development record.
+- After the change of model names, the launcher, documentation and transfer
+  cases passed (88 cases).
+
+## 2026-11-26 19:55 CET — Author's full run and the rebuilt terminal image
+
+- The author rebuilt the project's `.venv` on pyenv Python 3.13.2 and ran
+  `RUN_DOCKER_TESTS=1 RUN_GPU_TESTS=1 RUN_TERMINAL_SERVER_TESTS=1 RUN_CATALOG_TESTS=1 ./loaf test -v`
+  (author's output): 268 cases in 623 seconds, all passed except both
+  subtests of the Open WebUI serving case, including the GPU model workflows,
+  the catalog check and the Debian package tests. The serving case ran the
+  provisioner baked into the stale `local/open-terminal:latest`, whose tool
+  schema still listed the unprefixed paths.
+- The serving case now first compares the image's `provisioner.py`,
+  `runner.py` and `apt-guard.sh` with the checkout. Against the stale image it
+  failed at once with the rebuild hint.
+- After `./loaf build` (cached layers; the terminal image took the new
+  scripts and the `apt` guard), all four terminal Docker cases passed in 178
+  seconds against `local/open-terminal:latest` without an image override.
+
+## 2026-11-26 19:37:39 +0100 — Full suite through loaf test
+
+- Environment: Debian 13 in WSL2, Docker Engine 26.1.5, Compose 2.26.1-4,
+  system Python 3.13.5 with pip 25.1.1. A disposable virtualenv outside the
+  checkout held the editable `loaf` and the pinned test packages from
+  `tests/requirements.txt` (aiohttp 3.11.16, yarl 1.19.0, httpx 0.28.1,
+  open-terminal 0.17.20). The project's own `.venv`, which links to
+  `/root/.pyenv`, stayed unchanged.
+- `loaf test -v` with `RUN_DOCKER_TESTS=1`, `RUN_TERMINAL_SERVER_TESTS=1` and
+  `LOAF_TEST_TERMINAL_IMAGE` set to a disposable image built offline from
+  `local/open-terminal:latest` plus the current provisioner, runner and `apt`
+  guard: all 268 cases ran in 231 seconds, 261 passed and 7 were skipped. The
+  skips were the six CPU and GPU model workflows and the catalog check, which
+  `config.ini` leaves disabled. The run included the package, Debian package,
+  provisioner, runner, Docker and terminal Docker cases. The disposable image
+  and all test resources were removed afterwards.
+
+## 2026-11-26 19:26:23 +0100 — Full test run without a usable virtualenv
+
+- Environment: Debian 13 in WSL2, Docker Engine 26.1.5, Compose 2.26.1-4.
+  The project's `.venv` still links to `/root/.pyenv`, which this account
+  cannot run, and the system Python 3.13.5 has neither `pip` nor `ensurepip`.
+  No test packages were installed. Runs used `PYTHONPATH` set to the
+  checkout's `src`.
+- Docker-free suite: 268 cases, 34 errors and 58 skips. All errors are
+  `test_package` cases that need the installed `loaf` console script and
+  distribution metadata.
+- In `local/open-terminal:latest` with networking disabled, all 11
+  provisioner tests passed with the image's Debian Python and `aiohttp`, and
+  the runner test passed with its Python and Open Terminal.
+- With `RUN_DOCKER_TESTS=1` and `RUN_TERMINAL_SERVER_TESTS=1`, 59 cases ran in
+  206 seconds: 46 passed, 12 skipped because their API packages are missing on
+  the host (they passed in the image above), and the Debian package class
+  failed in setup because building the wheel needs `pip`. The terminal Docker
+  cases ran against a disposable image built offline from
+  `local/open-terminal:latest` plus the current provisioner, runner and `apt`
+  guard: local-mirror chat packages, both Open WebUI serving profiles with a
+  cold restart, the runtime APT source, and the chats backup round trip all
+  passed. The image and all test resources were removed afterwards.
+- Skipped: GPU, CPU model and catalog workflows (disabled in `config.ini`),
+  the Debian package tests and the `test_package` cases.
+
+## 2026-11-26 19:15:51 +0100 — Typed backup archives and the test APT repository
+
+- Environment as in the entry below: Debian 13 in WSL2, Docker Engine
+  26.1.5, Compose 2.26.1-4, system Python 3.13.5 because the project's
+  `.venv` points to an interpreter this account cannot run.
+- With `PYTHONPATH` set to the checkout's `src`, 160 focused cases passed:
+  launcher, cleanup, configuration, readiness, transfer, documentation,
+  deployment and setup. The 27 transfer cases cover the new archive format,
+  every type, the chats round trip, versions, the unchanged backup folder and
+  rejected archives with simulated Docker. The full Docker-free suite ran 267
+  cases: 34 errors, all in `test_package`, which needs the installed `loaf`
+  console script and distribution metadata, and 58 skips.
+- Real Docker: the volume round trip passed, models merged and mirrored into
+  another deployment version through the CLI, and the terminal backup test
+  restored images, the WebUI volume, an account folder with ownership, a saved
+  chat folder with labels and the key, also from `chats` alone. All 12
+  provisioner and runner unit tests passed in the terminal image (one skip
+  for missing `httpx`).
+- `loaf setup --test-local-repository` ran against
+  `local/open-terminal:latest` with network access and chose moreutils, pv
+  and ripgrep. Installing them from the repository with the chat installer's
+  APT options in a network-disabled container, with the repository mounted
+  read-only, succeeded.
+- Skipped: the serving and chat-package Docker tests were not rerun after the
+  archive changes, which do not touch them; `release_handoff.py`; GPU tests.
+
+## 2026-11-26 18:29:37 +0100 — Read-only user folder for models and chat package changes through APT
+
+- Environment: Debian 13 in WSL2, Docker Engine 26.1.5, Compose 2.26.1-4.
+  The project's `.venv` links to an interpreter this account cannot run, so
+  the host checks used the system Python 3.13.5 and the provisioner checks
+  used the terminal image's Python 3.13 with its pinned `aiohttp`.
+- All 12 provisioner and runner tests passed inside the image with
+  networking disabled; one runner case skipped for missing `httpx`. They
+  cover routing by the `/agent/` prefix, process views, directory sync, APT
+  command parsing, package list changes, the image rebuild and the shell
+  guard.
+- With `RUN_TERMINAL_SERVER_TESTS=1`, all four terminal Docker tests passed
+  in 166 seconds against a disposable image: `local/open-terminal:latest` plus
+  the changed scripts and guard, built with networking disabled. The
+  local-mirror case used an unsigned flat repository marked `Trusted: yes`.
+  It verified installation by a plain `apt-get` command, removal and the
+  refusal for a package of the shared image, the read-only user folder for
+  model commands, the shared temporary chat folder, restart persistence and
+  image cleanup. The serving case drove both Open WebUI profiles, including
+  a model command that reads but cannot write the account's folder. An
+  earlier run with the shipped image's start-directory setting failed on a
+  new chat's directory; the provisioner now selects it.
+- The documentation, configuration, readiness and terminal settings checks
+  passed all 27 cases. The Docker-free suite on the system Python had the same
+  36 environment failures, caused by the missing virtualenv, as the unchanged
+  commit in a separate worktree. The one difference came from a stale
+  `local_ai_ferry.egg-info` in the working tree.
+- Skipped: a `loaf build` of the terminal image, the regular Docker suite and
+  a real model through Open WebUI. The reported local-repository failure was
+  not reproduced, because the terminal server in the live deployment had not
+  run since the previous day.
+
 ## 2026-11-26 12:11:52 +0100 — Installation channels, settings layers and the Debian package
 
 - On Debian 13.8 in WSL2 with Python 3.13.5, Docker Engine 26.1.5 and Compose

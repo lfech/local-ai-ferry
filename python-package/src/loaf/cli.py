@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -34,7 +35,8 @@ SERVICES = {
 PROFILES = tuple(SERVICES)
 MODES = ("build", "upgrade", "download", "online", "offline", "status", "stop")
 TRANSFER_MODES = ("backup", "restore")
-MODEL_TRANSFER_MODES = ("export", "import")
+# A backup folder is transfer media. Run from inside one, setup and restore use this project instead.
+DEFAULT_PROJECT_DIR = Path("~/.local-ai-ferry")
 INSTALL_MODES = ("setup", "install")
 LINK_MODE = "link-docker-project"
 # Tags may be quantization names or complete GGUF filenames. This conservative
@@ -231,11 +233,14 @@ def plan(
     if mode == "download":
         exec_args = ("exec", "-T", *targets)
         pulled = set()
+        # A display name replaces the long source name unless another entry selects the source unnamed.
+        renamed = {model.source for model in models if model.name} - {model.source for model in models if not model.name}
         for model in models:
             if not export_definitions and model.source not in pulled:
                 steps.append(Step((profile,), (*exec_args, "ollama", "pull", model.source), f"Download {model.source}"))
                 pulled.add(model.source)
-            if model.name:
+            # Download already gave a renamed source its display name; its long name is gone.
+            if model.name and not (export_definitions and model.source in renamed):
                 steps.append(Step(
                     (profile,), (*exec_args, "ollama", "cp", model.source, model.name),
                     f"Tag {model.source} as {model.name}",
@@ -243,6 +248,10 @@ def plan(
             if export_definitions:
                 name = model.name or model.source
                 steps.append(Step((profile,), (*exec_args, "export-modelfiles", name), f"Export the Modelfile for {name}"))
+        if not export_definitions:
+            for source in dict.fromkeys(model.source for model in models if model.source in renamed):
+                steps.append(Step((profile,), (*exec_args, "ollama", "rm", source),
+                                  f"Remove the long name {source}; its display name keeps the model"))
     return steps
 
 
@@ -331,6 +340,12 @@ class Compose:
         directory = (self.project_dir / configured.expanduser()).resolve()
         if not directory.is_dir():
             raise FileNotFoundError(f"Terminal server APT repository directory is missing: {directory}")
+        # A flat repository has its index at the root, a suite repository below dists/.
+        indexes = ("dists", "Release", "InRelease", *(f"Packages{suffix}" for suffix in ("", ".gz", ".xz", ".bz2",
+                                                                                     ".lz4", ".zst")))
+        if not any((directory / name).exists() for name in indexes):
+            raise FileNotFoundError(
+                f"Terminal server APT repository directory has no APT index (Packages, Release or dists/): {directory}")
         return directory
 
     def environment(self, variables: dict[str, str]) -> dict[str, str]:
@@ -417,9 +432,10 @@ DEPLOYMENT_OPTIONS = ("--config-dir", "--version", "--dry-run")
 COMPOSE_OPTIONS = (*DEPLOYMENT_OPTIONS, "--attach")
 START_OPTIONS = (*COMPOSE_OPTIONS, "--wait-timeout")
 TRANSFER_OPTIONS = (*DEPLOYMENT_OPTIONS, "--backup-dir", "--archive")
-SETUP_OPTIONS = ("--config-dir", "--dry-run", "--archive", "--with-docker-deps", "--terminal-server-key", "--all")
+SETUP_OPTIONS = ("--config-dir", "--dry-run", "--archive", "--with-docker-deps", "--terminal-server-key",
+                 "--test-local-repository")
 SETUP_NOTES = (
-    "Run --all from a copied backup folder to restore the source checkout and Docker data.\n"
+    "Run inside a copied backup folder to prepare ~/.local-ai-ferry from it.\n"
     "Run 'setup tests' with the checkout's virtualenv to cache and install the test packages."
 )
 COMMAND_HELP = {
@@ -443,22 +459,20 @@ COMMAND_HELP = {
     "stop": CommandHelp(
         "Stop deployment services and remove their containers.", (*COMPOSE_OPTIONS, "--remove-containers", "-n"),
     ),
-    "export": CommandHelp("Save the Ollama model store to an archive.", TRANSFER_OPTIONS),
-    "import": CommandHelp("Merge a model archive into the Ollama store.", (*TRANSFER_OPTIONS, "--delete")),
     "backup": CommandHelp(
         "Save the deployment in a portable backup folder.",
-        (*TRANSFER_OPTIONS, "--verify", "--models-only", "--no-terminal-server", "--export", "--models-file",
-         "--wait-timeout", "--attach"),
-        "Components are images, volumes and project. Omit them to save all three.\n"
-        "Use --models-only for a model-store archive. Use --archive with --verify\n"
-        "or --models-only.",
+        (*TRANSFER_OPTIONS, "--verify", "--no-terminal-server", "--export", "--models-file", "--wait-timeout",
+         "--attach"),
+        "Types are source, config, installers, images, models, webui and chats.\n"
+        "project means config and installers; volumes means models, webui and chats.\n"
+        "chats adds webui. Omit types to save all available ones. Use --archive with --verify.",
     ),
     "restore": CommandHelp(
-        "Restore selected components from a deployment backup.",
-        (*TRANSFER_OPTIONS, "--models-only", "--delete", "--import", "--cpu", "--wait-timeout", "--attach"),
-        "Components are images, volumes and project. Omit them to restore what is\n"
-        "in the archive. Deployment volumes must be new or empty. --models-only\n"
-        "merges an Ollama model-store archive. Add --delete to mirror it.",
+        "Restore selected types from a backup.",
+        (*TRANSFER_OPTIONS, "--delete", "--import", "--cpu", "--wait-timeout", "--attach"),
+        "Types are those of backup. Omit them to restore everything in the archive.\n"
+        "models merge into the model store; add --delete to mirror them. webui and\n"
+        "chats need new or empty volumes. source needs a project without its files.",
     ),
     "integration": CommandHelp("Print a host integration."),
     "test": CommandHelp(
@@ -480,7 +494,8 @@ def add_options(parser, selected: tuple[str, ...] | None = None) -> None:
             parser.add_argument(*flags, **settings)
 
     add("-h", "--help", action="store_true", help="Show help and exit.")
-    add("--project-dir", type=Path, metavar="PATH", help="Use PATH as the project (default: current directory).")
+    add("--project-dir", type=Path, metavar="PATH",
+        help="Use PATH as the project (default: current directory; inside a backup folder, ~/.local-ai-ferry).")
     add("--system", action="store_true", help="Use the system deployment: settings in /etc/loaf, data in /var/lib/loaf.")
     add("-v", "--verbose", action="store_true", help="Show external commands or individual test names.")
     add("--config-dir", type=Path, metavar="PATH", help="Use PATH for settings (default: project config/).")
@@ -488,11 +503,10 @@ def add_options(parser, selected: tuple[str, ...] | None = None) -> None:
     add("--dry-run", action="store_true", help="Preview without running Docker or changing the project.")
     add("--models-file", type=Path, metavar="PATH", help="Select the model INI for this run.")
     add("--backup-dir", type=Path, metavar="PATH", help="Override the configured archive directory.")
-    add("--archive", type=Path, metavar="PATH", help="Select an archive or backup folder.")
+    add("--archive", type=Path, metavar="PATH", help="Select a backup folder or archive file.")
     add("--verify", action="store_true", help="Check an existing backup's hashes and image platforms without Docker.")
-    add("--models-only", action="store_true", help="Transfer only the Ollama model store.")
     add("--no-terminal-server", action="store_true", help="Skip the locally available Open Terminal image.")
-    add("--delete", action="store_true", help="Delete destination model data absent from the archive.")
+    add("--delete", action="store_true", help="Mirror the archived models: delete destination model data absent from it.")
     add("--export", dest="export_models", action=argparse.BooleanOptionalAction,
         help="Enable or disable exporting selected Modelfiles from the cached models before backup.")
     add("--import", dest="import_models", action=argparse.BooleanOptionalAction,
@@ -504,8 +518,8 @@ def add_options(parser, selected: tuple[str, ...] | None = None) -> None:
     add("--with-docker-deps", action="store_true",
         help="On Debian 12 or 13, cache Docker Engine, Compose and Buildx packages and install them as needed.")
     add("--terminal-server-key", action="store_true", help="Create the terminal server key only.")
-    add("--all", dest="full_checkout", action="store_true",
-        help="Restore the complete source checkout and Docker data from the backup in the project directory.")
+    add("--test-local-repository", action="store_true",
+        help="Download a few Debian command-line tools into a local test APT repository and list them.")
     add("--badges", action="store_true", help="Record test results and update badges for the groups that ran.")
     add("--full", action="store_true", help="Also remove generated installation files.")
     add("--wait-timeout", type=int, metavar="SECONDS", help="Override the service readiness wait from config.ini.")
@@ -534,7 +548,7 @@ def show_help(command: str | None, integration: str | None) -> None:
         details = COMMAND_HELP[command] if integration is None else INTEGRATION_HELP[integration]
         description, options, notes = details.summary, details.options, details.notes
         if command in TRANSFER_MODES:
-            usage = "%(prog)s [OPTIONS] [COMPONENT ...]"
+            usage = "%(prog)s [OPTIONS] [TYPE ...]"
         elif command in INSTALL_MODES:
             usage = "%(prog)s [OPTIONS] [tests]"
         elif command == "docs":
@@ -639,51 +653,57 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.mode == "integration" and integration is None:
         parser.error("integration requires a name: systemd, continue or tether.")
     continue_integration = integration == "continue"
+    named = ()
     if components:
-        unknown = set(components) - set(transfer.COMPONENTS)
-        if unknown:
-            parser.error(f"Unknown backup component {', '.join(sorted(unknown))}. Use images, volumes, project or source.")
         if len(set(components)) != len(components):
-            parser.error("Specify each backup component once.")
-    selected = components or transfer.COMPONENTS
-    if args.models_only and (args.mode not in TRANSFER_MODES or (components and components != ("volumes",))):
-        parser.error("--models-only is supported by backup and restore with the volumes component.")
-    models_only = args.mode in MODEL_TRANSFER_MODES or args.models_only
+            parser.error("Specify each archive type once.")
+        try:
+            named = transfer.expand_types(components)
+        except transfer.TransferError as exc:
+            parser.error(str(exc))
+    # Named types decide these options before any backup is searched; the defaults are checked later.
+    if args.mode == "backup" and args.no_terminal_server and named and "images" not in named:
+        parser.error("--no-terminal-server is only supported when creating a backup that includes images.")
+    if args.mode == "backup" and args.export_models and named and "models" not in named:
+        parser.error("--export requires the models type.")
+    if args.mode == "restore" and named and "models" not in named:
+        if args.delete:
+            parser.error("--delete applies to the models type of restore.")
+        if args.import_models:
+            parser.error("--import requires the models type.")
     if args.remove_containers is not None and args.mode != "stop":
         parser.error("--remove-containers, --no-remove-containers and -n are only supported by stop.")
     remove_containers = args.remove_containers is not False
     if args.verify and args.mode != "backup":
         parser.error("--verify is only supported by backup.")
-    if args.verify and (components or models_only):
-        parser.error("--verify checks the whole deployment backup. Omit components and --models-only.")
-    if args.no_terminal_server and (args.mode != "backup" or args.verify or models_only or "images" not in selected):
+    if args.verify and components:
+        parser.error("--verify checks the whole archive. Omit the types.")
+    if args.no_terminal_server and (args.mode != "backup" or args.verify):
         parser.error("--no-terminal-server is only supported when creating a backup that includes images.")
-    if args.delete and not (models_only and args.mode in ("restore", "import")):
-        parser.error("--delete is supported by import and by restore --models-only.")
+    if args.delete and args.mode != "restore":
+        parser.error("--delete is only supported by restore, for the models type.")
     if args.cpu and args.mode not in ("online", "offline", "status", "restore", "test"):
         parser.error("--cpu is only supported by online, offline, status, restore and test.")
-    if args.cpu and models_only:
-        parser.error("--cpu applies when starting inference. Omit it for model-store transfers.")
     if args.with_docker_deps and args.mode not in INSTALL_MODES:
         parser.error("--with-docker-deps is only supported by setup and install.")
-    if (args.full_checkout or args.terminal_server_key) and args.mode not in INSTALL_MODES:
-        parser.error("--all and --terminal-server-key are only supported by setup and install.")
-    if args.terminal_server_key and (args.full_checkout or args.with_docker_deps or args.archive is not None):
+    if (args.terminal_server_key or args.test_local_repository) and args.mode not in INSTALL_MODES:
+        parser.error("--terminal-server-key and --test-local-repository are only supported by setup and install.")
+    if args.terminal_server_key and (args.with_docker_deps or args.archive is not None or args.test_local_repository):
         parser.error("--terminal-server-key is for key setup only.")
-    if setup_tests and (args.full_checkout or args.terminal_server_key or args.with_docker_deps
-                        or args.archive is not None):
+    if args.test_local_repository and (args.with_docker_deps or args.archive is not None):
+        parser.error("--test-local-repository only creates the test repository. Omit --with-docker-deps and --archive.")
+    if setup_tests and (args.terminal_server_key or args.with_docker_deps or args.archive is not None
+                        or args.test_local_repository):
         parser.error("setup tests installs only the test packages. "
-                     "Omit --all, --terminal-server-key, --with-docker-deps and --archive.")
-    if args.full_checkout and args.config_dir is not None:
-        parser.error("--all restores the original checkout's configuration to config/. Omit --config-dir.")
+                     "Omit --terminal-server-key, --test-local-repository, --with-docker-deps and --archive.")
     if args.badges and args.mode != "test":
         parser.error("--badges is only supported by test.")
     if args.full and args.mode != "clean":
         parser.error("--full is only supported by clean.")
-    if args.backup_dir is not None and args.mode not in TRANSFER_MODES and not models_only:
-        parser.error("--backup-dir is only supported by backup, restore, import and export.")
-    if args.attach and (args.verify or models_only or args.mode not in (*MODES, *TRANSFER_MODES)):
-        parser.error("--attach is available for Compose and full transfer commands.")
+    if args.backup_dir is not None and args.mode not in TRANSFER_MODES:
+        parser.error("--backup-dir is only supported by backup and restore.")
+    if args.attach and (args.verify or args.mode not in (*MODES, *TRANSFER_MODES)):
+        parser.error("--attach is available for Compose and transfer commands.")
     if args.system and (args.project_dir is not None or args.config_dir is not None):
         parser.error("--system uses /etc/loaf and /var/lib/loaf. Omit --project-dir and --config-dir.")
     unexpected = any(value is not None for value in (
@@ -708,10 +728,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     # The Debian package operates the system deployment unless a project is selected.
     system_mode = args.system or (assets.debian_package() and args.project_dir is None and args.config_dir is None)
     if system_mode and args.mode in INSTALL_MODES and (
-        setup_tests or args.full_checkout or args.with_docker_deps or args.archive is not None
+        setup_tests or args.test_local_repository or args.with_docker_deps or args.archive is not None
     ):
-        parser.error("The system deployment uses the Debian package's dependencies. "
-                     "Omit tests, --all, --with-docker-deps and --archive, or select a project with --project-dir.")
+        parser.error("The system deployment uses the Debian package's dependencies. Omit tests, "
+                     "--test-local-repository, --with-docker-deps and --archive, or select a project with --project-dir.")
     if system_mode:
         project_dir = assets.SYSTEM_PROJECT_DIR
         if not project_dir.is_dir():
@@ -724,6 +744,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                   file=sys.stderr, flush=True)
     else:
         project_dir = (args.project_dir or Path.cwd()).resolve()
+        if args.project_dir is None and transfer.is_bundle(project_dir):
+            project_dir = DEFAULT_PROJECT_DIR.expanduser()
+            print(f"Using the project {project_dir}. The backup folder stays unchanged. "
+                  "Select another project with --project-dir.", file=sys.stderr, flush=True)
+        elif transfer.is_bundle(project_dir) and not args.verify:
+            parser.error(f"{project_dir} is a backup folder, which loaf leaves unchanged. Select another --project-dir.")
+        if args.mode in (*INSTALL_MODES, "restore") and not args.dry_run:
+            project_dir.mkdir(parents=True, exist_ok=True)
     if args.mode in (LINK_MODE, "binary", "clean") or setup_tests:
         if unexpected:
             parser.error(f"Unexpected option for {args.mode}. See 'loaf {args.mode} --help'.")
@@ -773,51 +801,43 @@ def main(argv: Sequence[str] | None = None) -> int:
     standalone_setup = args.mode in INSTALL_MODES and setup.bundled_release() is not None and not system_mode
     if args.backup_dir is not None and args.archive is not None:
         parser.error("Use either --backup-dir or --archive.")
-    if args.archive is not None and (
-        args.mode != "restore" and not (models_only or args.verify or standalone_setup or args.full_checkout)
-    ):
-        parser.error("--archive is for standalone setup, restore, model transfers or backup --verify.")
-    if models_only and args.mode in ("import", "restore") and args.archive is not None and transfer.is_bundle(args.archive):
-        parser.error("Use loaf restore for a full backup folder.")
-    bundle = None
+    if args.archive is not None and args.mode != "restore" and not (args.verify or standalone_setup):
+        parser.error("--archive is for standalone setup, restore or backup --verify.")
+    archive = None
+    backup_dir = None
     try:
         layer_dirs = layer_dirs or config.layers(defaults_dir, config_dir)
         settings = config.load(*layer_dirs)
         version = settings.version if args.version is None else args.version
         namespace = config.namespace(version)
-        if ((args.mode == "restore" and not models_only) or args.verify or standalone_setup
-                or args.full_checkout or args.terminal_server_key):
-            selection = (args.archive or args.backup_dir)
-            selection = selection.resolve() if selection is not None else None
-            directory = transfer.find_bundle(project_dir, selection) if args.backup_dir is None else None
-            if directory is None and (args.mode == "restore" or args.verify) and not args.archive:
-                root = selection or project_dir / settings.backup_dir
-                candidate = transfer.latest_backup(root, namespace=namespace)
-                if candidate is not None and candidate.is_dir():
-                    directory = candidate
-                elif candidate is not None and candidate.is_file() and transfer.is_bundle(candidate.parent):
-                    directory = candidate.parent
-                elif selection is not None and transfer.is_bundle(selection):
-                    directory = selection
-                elif selection is None and candidate is None:
-                    preserved = project_dir / transfer.RESTORED_BACKUP_DIR
-                    if transfer.is_bundle(preserved):
-                        directory = preserved
-            if directory is not None:
-                bundle = transfer.read_bundle(directory, verify=not args.dry_run)
-                if args.archive is not None and selection not in (directory, bundle.archive):
-                    raise transfer.TransferError(f"The backup manifest selects {bundle.archive}.")
-                if args.version is not None and args.version != bundle.version:
-                    raise transfer.TransferError(f"Backup version is {bundle.version or 'unversioned'}. Select the matching --version.")
-                version = bundle.version
-                namespace = config.namespace(version)
-            elif standalone_setup and args.archive is not None:
-                raise transfer.TransferError("Standalone setup requires a backup folder with backup.json.")
-        in_place_bundle = bundle if (
-            bundle is not None and bundle.executable == project_dir / "loaf"
-        ) else None
-        if args.full_checkout and in_place_bundle is None:
-            raise transfer.TransferError("Run setup --all in the copied backup folder containing loaf, backup.json and the archive.")
+        if args.mode == "restore" or args.verify or standalone_setup or args.terminal_server_key:
+            # An explicit archive, else the backup folder this runs in or from, else the newest backup.
+            selection = args.archive.resolve() if args.archive is not None else None
+            if selection is None and args.backup_dir is None:
+                selection = transfer.find_bundle(Path.cwd(), None)
+            if selection is None and (args.mode == "restore" or args.verify):
+                backup_dir = (args.backup_dir or project_dir / settings.backup_dir).resolve()
+                selection = transfer.latest_backup(backup_dir, namespace=namespace)
+                if selection is None and not args.dry_run:
+                    raise transfer.TransferError(f"No backup found in {backup_dir}. Use --backup-dir or --archive.")
+            if selection is not None:
+                archive = transfer.open_archive(selection, minimum=settings.backup_version_min,
+                                                verify_launcher=not args.dry_run)
+                if args.version is None or args.version == archive.deployment:
+                    version = archive.deployment
+                    namespace = config.namespace(version)
+                elif not (args.mode == "restore" and named and set(named) <= set(transfer.PORTABLE_TYPES)):
+                    raise transfer.TransferError(
+                        f"Backup version is {archive.deployment or 'unversioned'}. Select the matching --version, "
+                        f"or restore only {', '.join(transfer.PORTABLE_TYPES)} into another deployment.")
+        selected = ()
+        if args.mode == "backup" and not args.verify:
+            selected = (transfer.expand_types(components, chats_available=settings.terminal_server_enabled)
+                        if components else
+                        transfer.default_backup_types(project_dir, chats=settings.terminal_server_include_in_backup))
+        elif args.mode == "restore":
+            selected = (transfer.expand_types(components) if components else
+                        tuple(kind for kind in transfer.TYPES if archive is None or kind in archive.items))
     except (OSError, transfer.TransferError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -825,20 +845,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(str(exc))
     except ValueError as exc:
         parser.error(f"--version: {exc}.")
-    backup_volumes = args.mode == "backup" and not args.verify and not models_only and "volumes" in selected
-    restore_volumes = args.mode == "restore" and not models_only and "volumes" in selected
-    if args.export_models is not None and (args.mode != "backup" or args.verify or models_only):
-        parser.error("--export/--no-export are only supported when creating a deployment backup.")
-    if args.export_models and not backup_volumes:
-        parser.error("--export requires the volumes component.")
-    if args.import_models is not None and (args.mode != "restore" or models_only):
-        parser.error("--import/--no-import are only supported by deployment restore.")
-    if args.import_models and not restore_volumes:
-        parser.error("--import requires the volumes component.")
-    export_models = backup_volumes and (
+    backup_models = args.mode == "backup" and "models" in selected
+    restore_models = args.mode == "restore" and "models" in selected
+    if args.no_terminal_server and "images" not in selected:
+        parser.error("--no-terminal-server is only supported when creating a backup that includes images.")
+    if args.delete and not restore_models:
+        parser.error("--delete applies to the models type of restore.")
+    if args.export_models is not None and (args.mode != "backup" or args.verify):
+        parser.error("--export/--no-export are only supported when creating a backup.")
+    if args.export_models and not backup_models:
+        parser.error("--export requires the models type.")
+    if args.import_models is not None and args.mode != "restore":
+        parser.error("--import/--no-import are only supported by restore.")
+    if args.import_models and not restore_models:
+        parser.error("--import requires the models type.")
+    export_models = backup_models and (
         settings.export_models if args.export_models is None else args.export_models
     )
-    import_models = restore_volumes and (
+    import_models = restore_models and (
         settings.import_models if args.import_models is None else args.import_models
     )
     workflow_mode = args.mode
@@ -877,9 +901,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if integration == "tether":
         print(integrations.TETHER_INSTRUCTIONS, end="")
         return 0
-    if not (continue_integration or args.verify or (args.mode == "backup" and not models_only and not backup_volumes)
-            or standalone_setup or args.full_checkout
-            or args.terminal_server_key or compose_file.is_file()):
+    # Only the model and volume types stop and inspect Compose services.
+    compose_types = {"models", *transfer.SERVICE_TYPES}
+    if not (continue_integration or args.verify or (args.mode == "backup" and not compose_types & set(selected))
+            or standalone_setup or args.terminal_server_key or args.test_local_repository or compose_file.is_file()):
         parser.error(f"No compose.yml in {project_dir}. Run loaf setup or select a project with --project-dir.")
     compose_files = (compose_file,)
     if args.cpu:
@@ -932,20 +957,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                         setup.ensure_terminal_key(key_path, group=setup.SYSTEM_GROUP)
                     print(f"System deployment ready: settings in {config_dir}, data in {project_dir}.")
                 return 0
-            if args.full_checkout:
+            if args.test_local_repository:
+                image = transfer.image_names(namespace, include_terminal=True)[-1]
                 if args.dry_run:
-                    print(f"Restore the full source checkout and any included Docker data from {bundle.archive}.")
-                    print(f"Keep the backup bundle in {project_dir / transfer.RESTORED_BACKUP_DIR} and link loaf to dist/loaf.")
-                    if args.with_docker_deps:
-                        print("Install Docker host packages from the backup.")
+                    print(f"Download a few Debian command-line tools with {image} into "
+                          f"{project_dir / setup.TEST_REPOSITORY_DIR} and write {project_dir / setup.TEST_REPOSITORY_SOURCE}.")
                 else:
                     with project_lock(lock_path):
-                        transfer.restore(
-                            project_dir, bundle.archive, namespace=namespace,
-                            configuration=(layer_dirs[:-1], config_dir, bundle.version), in_place_bundle=in_place_bundle,
-                            full_checkout=True, with_docker_deps=args.with_docker_deps,
-                        )
-                    print(f"Restored the full source checkout in {project_dir}.")
+                        setup.create_test_repository(project_dir, image)
                 return 0
             if args.terminal_server_key:
                 if args.dry_run:
@@ -953,8 +972,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else:
                     with project_lock(lock_path):
                         archived_key = None
-                        if bundle is not None and not key_path.exists():
-                            archived_key = transfer.prepare_bundle_setup(bundle, project_dir, installers=False)
+                        if archive is not None and not key_path.exists():
+                            archived_key = transfer.setup_from_archive(archive, project_dir, installers=False)
                         setup.ensure_terminal_key(key_path, archived_key)
                 return 0
             if standalone_setup:
@@ -962,20 +981,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print(f"Prepare default configuration and link the packaged Docker project in {project_dir}.")
                     print(f"Create the terminal server key at {key_path} if missing.")
                     if args.with_docker_deps:
-                        print("Prepare Docker host packages" + (f" from {bundle.archive}." if bundle else "."))
+                        print("Prepare Docker host packages" + (f" from {archive.path}." if archive else "."))
                 else:
                     with project_lock(lock_path):
                         archived_key = None
-                        if bundle is not None and (args.with_docker_deps or not key_path.exists()):
-                            archived_key = transfer.prepare_bundle_setup(bundle, project_dir, installers=args.with_docker_deps)
+                        if archive is not None and (args.with_docker_deps or not key_path.exists()):
+                            archived_key = transfer.setup_from_archive(archive, project_dir, installers=args.with_docker_deps)
                         if args.with_docker_deps:
-                            if bundle is not None:
+                            if archive is not None:
                                 setup.install_backup_host_packages(project_dir)
                             else:
                                 setup.prepare_docker(project_dir)
                                 setup.install_toolkit(project_dir)
                         setup.setup_standalone(project_dir)
                         setup.ensure_terminal_key(key_path, archived_key)
+                        launcher = project_dir / transfer.LAUNCHER
+                        if archive is not None and archive.executable is not None and not (
+                                launcher.exists() or launcher.is_symlink()):
+                            # Keep a launcher in the project; the backup folder can stay on its media.
+                            shutil.copyfile(archive.executable, launcher)
+                            launcher.chmod(transfer.file_modes(project_dir)[1])
                         print(f"Deployment ready in {project_dir}.")
                     warn_shared_deployment(layer_dirs, version, config_dir)
                 return 0
@@ -1000,124 +1025,81 @@ def main(argv: Sequence[str] | None = None) -> int:
             if settings.terminal_server_apt_source_file is not None:
                 compose.terminal_apt_source_file(settings.terminal_server_apt_source_file)
                 compose.terminal_apt_repository_dir()
-        if args.mode in TRANSFER_MODES or models_only:
-            backup = args.mode in ("backup", "export") and not args.verify
+        if args.mode in TRANSFER_MODES:
             with (nullcontext() if args.dry_run or args.verify else project_lock(lock_path)):
-                if bundle is not None:
-                    archive = bundle.archive
-                elif args.archive is not None:
-                    archive = args.archive.resolve()
-                else:
-                    directory = (args.backup_dir or project_dir / settings.backup_dir).resolve()
-                    select_archive = transfer.backup_path if backup else transfer.latest_backup
-                    archive = select_archive(directory, namespace=namespace, models_only=models_only)
-                    if archive is None:
-                        if not args.dry_run:
-                            raise transfer.TransferError(f"No backup found in {directory}. Use --backup-dir or --archive.")
-                        archive = directory
                 if args.verify:
-                    if args.dry_run:
-                        print(f"Verify payload hashes and report image platforms from {archive}")
+                    if archive is None:
+                        print(f"Verify the newest backup in {backup_dir}")
+                    elif args.dry_run:
+                        print(f"Verify the member hashes and report image platforms of {archive.path}")
                     else:
                         transfer.verify_backup(archive, namespace)
                     return 0
-                if models_only:
-                    def stop_downloader():
-                        compose.execute(VALIDATE)
-                        compose.execute(STOP_DOWNLOADER)
-
+                if args.mode == "backup":
+                    destination = transfer.backup_path(
+                        (args.backup_dir or project_dir / settings.backup_dir).resolve(), namespace=namespace)
+                    if set(transfer.SERVICE_TYPES) & set(selected):
+                        steps.append(STOP_WITH_TERMINAL if terminal_available else STOP_ALL)
+                    elif "models" in selected:
+                        # A model snapshot tolerates the serving backend, not the downloader.
+                        steps += [*(() if steps else (VALIDATE,)), STOP_DOWNLOADER]
+                    script = binary_builder(project_dir)
                     if args.dry_run:
-                        execute_plan(compose, [VALIDATE, STOP_DOWNLOADER], lock_path=lock_path, dry_run=True)
-                        if backup:
-                            print(f"Save Ollama models to {archive}")
-                        elif args.delete:
-                            print(f"Replace Ollama models from {archive} and delete destination-only model data")
-                        else:
-                            print(f"Merge Ollama models from {archive}")
-                    elif backup:
-                        transfer.export_models(
-                            project_dir, archive, namespace, settings.compression_level, stop_downloader,
-                        )
-                        print(f"Ollama models saved to {archive}")
-                    else:
-                        transfer.import_models(project_dir, archive, namespace, stop_downloader, delete=args.delete)
-                        print(f"Ollama models imported from {archive}")
-                    return 0
-                if backup_volumes:
-                    steps.append(STOP_WITH_TERMINAL if terminal_available else STOP_ALL)
-                script = binary_builder(project_dir) if backup else None
-                if args.dry_run:
-                    if backup:
                         if script is not None:
                             print(f"Build the standalone executable at {project_dir / 'dist/loaf'}")
-                        if "project" in selected:
-                            print("Export Python wheels and save project files")
+                        print(f"Save {', '.join(selected)} to {destination}")
                         if "images" in selected:
-                            print("Save images with the standalone loaf executable")
                             print("Skip the Open Terminal image" if args.no_terminal_server else
                                   "Include the Open Terminal image if available locally")
+                        execute_plan(compose, steps, lock_path=lock_path, dry_run=True)
+                        if "models" in selected:
+                            print("Check saved Modelfiles against the Ollama model store")
                     else:
-                        conditional = " when present" if components is None else ""
-                        if "images" in selected:
-                            print(f"Load images from {archive}{conditional}")
-                        if "volumes" in selected:
-                            print(f"Restore empty volumes from {archive}{conditional}")
-                        if "project" in selected:
-                            print(f"Restore saved settings and Modelfiles into {config_dir}{conditional}")
-                        if in_place_bundle is not None:
-                            print(f"Keep the backup bundle in {project_dir / transfer.RESTORED_BACKUP_DIR} and link loaf to dist/loaf.")
+                        executable = None
+                        if script is not None:
+                            result = build_executable(project_dir, script, verbose=args.verbose)
+                            if result:
+                                return result
+                            executable = project_dir / "dist/loaf"
+
+                        def prepare_services():
+                            for step in steps:
+                                compose.execute(step)
+
+                        transfer.backup_bundle(
+                            project_dir, destination, prepare_services, types=selected,
+                            version=version, executable=executable, compression_level=settings.compression_level,
+                            terminal_key=compose.terminal_secret_file(), include_terminal_image=not args.no_terminal_server,
+                            config_dir=config_dir,
+                        )
+                        print(f"Backup saved to {destination}", flush=True)
+                elif args.dry_run:
+                    source = archive.path if archive is not None else f"the newest backup in {backup_dir}"
+                    print(f"Restore {', '.join(selected)} from {source} into {project_dir}")
                     execute_plan(compose, steps, lock_path=lock_path, dry_run=True)
-                    if backup_volumes:
-                        print(f"Archive service volumes to {archive}")
-                        if settings.terminal_server_include_in_backup:
-                            print("Include terminal workspace volumes and bearer key")
-                        print("Check saved Modelfiles against the Ollama model store")
-                elif backup:
-                    executable = None
-                    if script is not None:
-                        result = build_executable(project_dir, script, verbose=args.verbose)
-                        if result:
-                            return result
-                        executable = project_dir / "dist/loaf"
-
-                    def prepare_volumes():
-                        for step in steps:
-                            compose.execute(step)
-
-                    transfer.backup_bundle(
-                        project_dir, archive, prepare_volumes,
-                        version=version, executable=executable, compression_level=settings.compression_level,
-                        exclude_project_file=compose.terminal_secret_file(),
-                        include_terminal=settings.terminal_server_include_in_backup,
-                        include_terminal_image=not args.no_terminal_server,
-                        config_dir=config_dir, components=components or transfer.default_components(project_dir),
-                    )
-                    print(f"Backup saved to {archive}", flush=True)
                 else:
                     restored = transfer.restore(
-                        project_dir, archive, namespace=namespace, terminal_key=compose.terminal_secret_file(),
-                        workspace_driver=settings.terminal_server_volume_driver,
-                        workspace_options=settings.terminal_server_volume_options,
-                        configuration=(layer_dirs[:-1], config_dir, version),
-                        in_place_bundle=in_place_bundle, components=components, require_volumes=args.import_models is True,
+                        project_dir, archive, components, namespace=namespace, settings=settings,
+                        configuration=(layer_dirs[:-1], config_dir, version), delete=args.delete,
                     )
                     if restored.settings is not None:
                         compose = Compose(project_dir, files=compose_files, namespace=namespace, settings=restored.settings,
                                           verbose=args.verbose)
-                    import_models = "volumes" in restored.components and (
+                    import_models = "models" in restored.types and (
                         compose.settings.import_models if args.import_models is None else args.import_models
                     )
                     workflow_mode = "offline" if import_models else "restore"
                     steps = plan("offline", wait_timeout=args.wait_timeout or compose.settings.wait_timeout,
                                  import_definitions=True, cpu=args.cpu) if import_models else []
-                    if in_place_bundle is not None:
-                        archive = project_dir / transfer.RESTORED_BACKUP_DIR / archive.name
-                    print(f"Restored from {archive}", flush=True)
+                    print(f"Restored {', '.join(restored.types)} from {archive.path} into {project_dir}", flush=True)
                     for step in steps:
                         compose.execute(step)
                     if import_models:
                         backend = "CPU Ollama" if args.cpu else "GPU Ollama"
                         print(f"Modelfiles imported. {backend} is ready. Open WebUI is stopped.", flush=True)
+                    if project_dir != Path.cwd().resolve():
+                        followup = project_command(project_dir, override_dir, version)
+                        print("Next: " + display_command(followup + ["offline"]), flush=True)
             if args.attach:
                 follow_logs(compose, workflow_mode, dry_run=args.dry_run, import_definitions=import_models)
             return 0

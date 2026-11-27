@@ -144,15 +144,17 @@ and give your login [Docker access](#docker-access).
 ## Use a prepared archive
 
 Copy the complete backup folder to Debian and enter it. Run `./loaf setup`
-and `./loaf restore` to load the images, volumes and saved settings.
-Then start or resume inference. [Debian restore](transfer.md#debian-restore)
+and `./loaf restore` to prepare `~/.local-ai-ferry` with the images, volumes
+and saved settings. Then start or resume inference there.
+[Debian restore](transfer.md#debian-restore)
 
 ```bash
 ./loaf offline
 ```
 
-Backend startup applies saved Modelfiles automatically. For a model-only
-archive, use `./loaf import --archive PATH` on an existing deployment.
+Backend startup applies saved Modelfiles automatically. To add only the
+models of a backup to an existing deployment, use
+`./loaf restore models --archive PATH`.
 [Model transfer](transfer.md#transfer-models-between-existing-deployments)
 
 ## Verify and open WebUI

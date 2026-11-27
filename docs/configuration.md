@@ -83,10 +83,16 @@ packaged configuration directory. Leave it blank to select `models.ini`.
 Relative `backup_dir` paths start at the project directory. Relative CLI paths
 start at the current directory. [Model selection syntax](launcher.md#select-models)
 
+`[transfer] backup_version_min` names the oldest archive format that restore
+accepts. This release writes and reads format 2, the first with typed
+contents, so 2 is the only valid value. Archives from earlier releases need
+the launcher in their backup folder. [Archive contents](transfer.md#archive-contents)
+
 Use `[terminal_server]` for the optional Open Terminal service. Its
 `secret_file` path is relative to the project directory. Set
-`include_in_backup = true` to transfer its user workspaces and key with
-the standard backup. Backup includes the matching local terminal image when
+`include_in_backup = true` to include the `chats` type in backups without
+type names. It holds the account and chat folders, the chats' package images
+and the bearer key. Backup includes the matching local terminal image when
 available. Use `loaf backup --no-terminal-server` to skip that image.
 Set `[images] terminal_server_image` to override its
 base image. Set `[terminal_server] apt_source_file` for the terminal image

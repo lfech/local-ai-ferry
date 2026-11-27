@@ -377,7 +377,7 @@ class DockerTests(unittest.TestCase):
                 )
         check_fixture("verify", target, readonly=True)
 
-    def test_models_only_commands_merge_and_mirror_the_destination(self):
+    def test_models_merge_and_mirror_into_another_deployment_version(self):
         prefix = f"loaf-model-transfer-{uuid4().hex}"
 
         def create_store(role):
@@ -406,10 +406,14 @@ class DockerTests(unittest.TestCase):
             project = Path(folder)
             compose = {"services": {"ollama-online": {"image": transfer.IMAGES[0]}}}
             (project / "compose.yml").write_text(json.dumps(compose), encoding="utf-8")
+            # Every backup folder carries a launcher; the fixture stands in for the standalone executable.
+            (project / "dist").mkdir()
+            (project / "dist/loaf").write_bytes(transfer.EXECUTABLE_HEADER + b"\n__LOAF_PAYLOAD__\n\x1f\x8bfixture")
             launcher = [sys.executable, "-m", "loaf"]
-            options = ["volumes", "--models-only", "--archive", str(project / "models.tar.gz")]
-            command([*launcher, "--version", source, "backup", *options], cwd=project)
-            restore = [*launcher, "--version", target, "restore", *options]
+            command([*launcher, "--version", source, "backup", "models", "--backup-dir", "archives"], cwd=project)
+            bundle, = (project / "archives").iterdir()
+            # Models carry no namespaced resources, so they restore into another deployment version.
+            restore = [*launcher, "--version", target, "restore", "models", "--archive", str(bundle)]
             command(restore, cwd=project)
             self.assertEqual(store_shell(target_volume, "ls /ollama/config").split(), ["local.model", "source.model"])
             command([*restore, "--delete"], cwd=project)

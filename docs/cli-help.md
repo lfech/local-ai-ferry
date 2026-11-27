@@ -15,7 +15,7 @@ paths given on the command line start at the shell's current directory.
 | Flag | Effect |
 | --- | --- |
 | `-h`, `--help` | Print help for `loaf`, a command, or an integration and exit. |
-| `--project-dir PATH` | Select the checkout or deployment. Defaults to the current directory. |
+| `--project-dir PATH` | Select the checkout or deployment. Defaults to the current directory, or to `~/.local-ai-ferry` inside a backup folder. A backup folder itself is never a project. |
 | `--system` | Operate the system deployment with settings in `/etc/loaf` and data in `/var/lib/loaf`. The Debian package uses it unless `--project-dir` or `--config-dir` selects a project. [Debian package](installation.md#debian-package) |
 | `-v`, `--verbose` | Show external commands where available. With `test`, show individual test names. |
 
@@ -49,13 +49,13 @@ server key when it is missing. [Installation](installation.md)
 Uses `--config-dir PATH` and `--dry-run`.
 
 - `--with-docker-deps` caches Docker Engine, Compose and Buildx packages on Debian 12 or 13 and installs them as needed. [Docker packages](debian.md#install-docker-and-cache-its-packages)
-- `--archive PATH` selects a backup folder or its archive when running standalone setup. With `--with-docker-deps`, setup can recover the matching installers from that backup.
-- `--terminal-server-key` creates the configured key only, with owner-only permissions. It preserves an existing key.
-- `--all` restores the archived source checkout and Docker data in the copied backup folder. The backup must contain the source files. [Full checkout recovery](transfer.md#debian-restore)
+- `--archive PATH` selects a backup folder or archive when running standalone setup. Inside a backup folder, setup uses it without this flag. With `--with-docker-deps`, setup recovers the backup's `installers` first. Setup reuses the backup's terminal key from `chats` and copies the launcher into the project. [Debian restore](transfer.md#debian-restore)
+- `--terminal-server-key` creates the configured key only, with owner-only permissions. It preserves an existing key and reuses a key from the selected backup.
+- `--test-local-repository` downloads three command-line tools, chosen at random from a fixed list, with the dependencies that the terminal image lacks into `apt-test-repository/`. It writes `config/apt-test-repository.list` and prints the tools and the settings that use them for chat packages. It needs the built terminal image and network access. [Chat packages](terminal-server.md#install-packages-for-a-chat)
 
 In the system deployment, setup creates the terminal server key, readable by
 root and the `docker` group. The Debian package's dependencies replace
-`--with-docker-deps`. `tests`, `--all` and `--archive` need a project.
+`--with-docker-deps`. `tests`, `--test-local-repository` and `--archive` need a project.
 
 `loaf setup tests` caches the pinned test packages as wheels and installs
 them into the virtualenv that runs `loaf`. It needs Python 3.11 or newer and
@@ -146,51 +146,36 @@ Stop the selected deployment's services and remove their containers. Uses
 - `--remove-containers` explicitly enables container removal, the default.
 - `-n`, `--no-remove-containers` keep the stopped containers and their logs.
 
-### export
-
-Save the Ollama store to a model-only archive. Uses `--config-dir PATH`,
-`--version VERSION`, and `--dry-run`. `--archive PATH` writes to a specific
-file. `--backup-dir PATH` writes the automatically named archive in that
-directory. [Model transfer](transfer.md#transfer-models-between-existing-deployments)
-
-### import
-
-Merge a model-only archive into the Ollama store. Uses `--config-dir PATH`,
-`--version VERSION`, and `--dry-run`. `--archive PATH` reads a specific file.
-`--backup-dir PATH` selects the newest model archive in that directory.
-
-- `--delete` mirrors the archive by removing destination-only blobs, manifests and Modelfiles.
-
 ### backup
 
-Create a dated backup folder containing the archive, verification manifest
-and standalone executable. List `images`, `volumes`, `project` and `source` in
-any combination, or omit them to save every available component. `source` is
-available in a source checkout. Uses `--config-dir PATH`, `--version VERSION`,
-`--dry-run`, and `--backup-dir PATH`. Use `-a` or `--attach` when creating a
-backup. [Backup contents](transfer.md#archive-contents)
+Create a dated backup folder containing the archive, its checksums and the
+standalone launcher. Name the types `source`, `config`, `installers`,
+`images`, `models`, `webui` and `chats`, or the aliases `project` and
+`volumes`, or omit them to save every available type. `source` is available
+in a source checkout; `chats` adds `webui`. Uses `--config-dir PATH`,
+`--version VERSION`, `--dry-run`, and `--backup-dir PATH`. Use `-a` or
+`--attach` when creating a backup. [Archive types](transfer.md#select-archive-types) ·
+[Backup contents](transfer.md#archive-contents)
 
-- `--verify` checks the whole deployment backup, lists its components and reports any image platforms without Docker.
-- `--models-only` saves the Ollama store as a model-store archive. Use it with `volumes` or omit the component name.
-- `--archive PATH` selects an input for `--verify` or an output file for `--models-only`.
-- `--no-terminal-server` skips the Open Terminal image. Backup includes the matching local image by default when it exists. Terminal workspaces and the bearer key follow `[terminal_server] include_in_backup`.
-- `--export`, `--no-export` enable or disable refreshing selected Modelfiles from cached models before backing up volumes. The default comes from `[transfer] export_models`.
+- `--verify` checks the whole archive, lists its types and reports any image platforms without Docker. `--archive PATH` selects the backup to verify.
+- `--no-terminal-server` skips the Open Terminal image. Backup includes the matching local image by default when it exists. `chats` follows `[terminal_server] include_in_backup` when no types are named.
+- `--export`, `--no-export` enable or disable refreshing selected Modelfiles from cached models before saving `models`. The default comes from `[transfer] export_models`.
 - `--models-file PATH`, `--wait-timeout SECONDS` apply when refreshing Modelfiles.
 
 ### restore
 
-Restore any combination of `images`, `volumes` and `project` from a verified
-backup. Omit the names to restore every available component. `setup --all`
-applies `source`. Deployment volume
-restore requires new or empty volumes. Uses `--config-dir PATH`,
+Restore types from a verified backup. Name them as for `backup`, or omit them
+to restore everything in the archive. `models` merge into the Ollama store.
+`webui` and `chats` require new or empty volumes; `chats` adds `webui`.
+`source` requires a project without its files. Uses `--config-dir PATH`,
 `--version VERSION`, `--dry-run`, and `-a` or `--attach`. `--archive PATH`
 selects a specific backup folder or archive. `--backup-dir PATH` selects the
 newest backup for the deployment in that directory. A selected backup
-folder supplies its saved deployment version. [Restore behavior](transfer.md#restore-behavior)
+supplies its saved deployment version. Only `source`, `installers` and
+`models` restore into another `--version`. [Restore behavior](transfer.md#restore-behavior)
 
-- `--models-only` merges a model-store archive into the existing Ollama store. Use it with `volumes` or omit the component name.
-- `--delete` mirrors the Ollama store when using `--models-only`.
-- `--import`, `--no-import` enable or disable starting offline Ollama to apply saved Modelfiles after restoring volumes. The default comes from `[transfer] import_models`.
+- `--delete` mirrors the archived models by removing destination-only blobs, manifests and Modelfiles.
+- `--import`, `--no-import` enable or disable starting offline Ollama to apply saved Modelfiles after restoring `models`. The default comes from `[transfer] import_models`.
 - `--cpu` uses CPU inference when starting Ollama to apply Modelfiles.
 - `--wait-timeout SECONDS` applies when starting Ollama to import Modelfiles.
 

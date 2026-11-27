@@ -7,6 +7,94 @@ Git milestones use commit timestamps. Working-tree milestones use the
 associated verification time where it was recorded.
 Earlier entries use the current names for commands, paths and artifacts.
 
+## 2026-11-26 20:45 CET — Display names replace long model names, and review findings
+
+- `loaf download` now removes the long `hf.co/...` name after creating an
+  entry's `name`, unless another entry selects the same source without a
+  name. WebUI lists such a model once, under its readable name.
+  `backup --export` exports the selected names; run download after adding a
+  `name` to a cached model. [Model selection](launcher.md#select-models)
+- Open points from the code review of the uncommitted changes, ordered by
+  impact: `restore volumes` must expand `chats` only when the archive holds
+  it; damaged archives and an unusable project directory must end in an
+  error message; restore must check volume emptiness and labels before its
+  first change; `--archive` on the archive inside a backup folder must still
+  check `SHA256SUMS`; the test APT repository's source file is runtime-only
+  and breaks `loaf build` when set as `apt_source_file`; `source` alone omits
+  tracked `config/` files. Minor: the published tool list should use the
+  same check as routing, the account's process history is capped at 64, and
+  the shell's `apt` guard misses option values such as `-o Key=Value`.
+
+## 2026-11-26 19:15 CET — Typed backup archives, an unchanged backup folder and a test APT repository
+
+- Archive format 2: the `.tar.gz` begins with `loaf.json`, which lists the
+  format, the deployment version and one item per type with each member's
+  path, size and SHA-256 hash. loaf reads it before any payload. The types
+  are `source`, `config`, `installers`, `images`, `models`, `webui` and
+  `chats`; `project` and `volumes` remain as aliases. `chats` holds each
+  account's `/home/user`, each saved chat's `/home/chat`, the saved chats'
+  package images and the bearer key, and implies `webui`.
+  [Archive types](transfer.md#select-archive-types)
+- The model archive format, `export`, `import` and `--models-only` are gone:
+  `loaf backup models` and `loaf restore models [--delete]` replace them.
+  `source`, `installers` and `models` restore into another deployment
+  version. `setup --all` is gone; `loaf restore` recovers a source checkout.
+- A backup folder now holds `loaf`, the archive and `SHA256SUMS`, which
+  replaces `backup.json` and `sha256.json`. loaf never changes it: inside one,
+  setup and restore use `~/.local-ai-ferry`, and a backup folder is refused as
+  `--project-dir`. Standalone setup copies the launcher into the project. The
+  in-place layout with `backup/` and `dist/loaf` is gone.
+  [Debian restore](transfer.md#debian-restore)
+- Breaking change before 1.0.0: restore refuses archives from earlier
+  releases; their own launcher restores them. `[transfer] backup_version_min`
+  names the oldest accepted format, currently 2.
+- `loaf setup --test-local-repository` downloads three tools, chosen at
+  random from 13 Debian command-line tools, with the dependencies that the
+  terminal image lacks into `apt-test-repository/`. It writes a trusted
+  `file:` source and prints the tools and settings.
+  [Chat packages](terminal-server.md#install-packages-for-a-chat)
+- Decided against a fully transparent `apt` in the terminal shell: the
+  runner cannot reach the provisioner by design, and an image change
+  restarts the runner during the user's command. The guard stays.
+- Open points: every backup, including `models` alone, needs the standalone
+  launcher, and a source checkout builds it first. Backup hashes each staged
+  member in an extra read before compression. The `release_handoff.py`
+  flow was not rerun.
+
+## 2026-11-26 18:40 CET — Read-only user folder for models and chat package changes through APT
+
+- Each chat workspace now has up to two runners from the same image that
+  share its folders. The user runner serves the interface and can write
+  `/home/user`. The agent runner serves model tool calls, mounts `/home/user`
+  read-only and has `/home/chat` as its home. The provisioner publishes the
+  model tools below `/agent/` in its tool schema and routes by path. Commands
+  started from the interface run in the user runner, and process views follow
+  each command. The tool for typing into the account's shell is no longer
+  offered. `max_workspaces` counts workspaces, not runners.
+  [Folder access](terminal-server.md#use-the-terminal-from-a-model)
+- The working directory selected in the interface applies to both runners.
+  A new chat starts in `/home/chat`. Temporary chats use a shared volume,
+  removed after `idle_seconds` without a runner and at shutdown, instead of a
+  per-runner temporary filesystem.
+- Chat packages form a list recorded in the chat image's labels. The model
+  changes it with `install_chat_packages`, the new `remove_chat_packages`, or
+  a plain `apt`/`apt-get` install, remove or purge command, which the
+  provisioner handles instead of the runner. Every change rebuilds the chat
+  image from the shared image. Only packages installed for the chat can be
+  removed. The image's `apt` and `apt-get` refuse changes in the shell and
+  explain this route. [Chat packages](terminal-server.md#install-packages-for-a-chat)
+- Probable cause of the reported failure with a local repository: the
+  working `config/config.ini` leaves `apt_source_file` blank, which disables
+  package changes. The guide now shows `[trusted=yes]` for an unsigned
+  `file:` repository, and the launcher refuses an `apt_repository_dir`
+  without an APT index. The failure itself was not reproduced.
+- Approved changes to the [architecture](instructions/architecture.md):
+  the agent runner, the read-only user folder and package lists.
+- Open points: run `loaf build` so the image contains the shell's `apt`
+  guard; earlier images still work through the runtime scripts. Chat images
+  from earlier releases lack a package list and are rebuilt with only the
+  next change's packages.
+
 ## 2026-11-26 12:05 CET — Three installation channels, settings layers and the Debian package
 
 - Upgrades: a `docker-project` link to another loaf release no longer
@@ -39,7 +127,7 @@ Earlier entries use the current names for commands, paths and artifacts.
   new `source` component, which only `setup --all` applies. Backups no
   longer carry `.venv`. Checkout backups made before this change have no
   `source` payload and cannot be used with `setup --all` of this version.
-  [Component selection](transfer.md#select-deployment-components)
+  [Component selection](transfer.md#select-archive-types)
 - A checkout's setup links `./loaf` to `.venv/bin/loaf`, and the guides use
   `./loaf` throughout. The Verify workflow adds Python 3.11 and the Debian
   package tests.
@@ -186,7 +274,7 @@ Earlier entries use the current names for commands, paths and artifacts.
 
 - Added selectable images, volumes and project payloads. Restore verifies
   every archived payload and applies all present components when no names
-  are supplied. [Component selection](transfer.md#select-deployment-components)
+  are supplied. [Component selection](transfer.md#select-archive-types)
 - Kept the archived terminal key with the volumes component and covered
   successive component restores from the same retained bundle.
   [Terminal transfer](terminal-server.md#offline-transfer-and-shutdown)

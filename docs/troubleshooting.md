@@ -115,7 +115,7 @@ If `loaf status` reports that no local model data was found, check the project
 and version in the report against the ones you used to download or restore
 the models. The probe checks both Ollama manifest layouts and also recognizes
 saved Modelfiles with model blobs. For a fresh store, use `loaf download` on a
-connected host or import an existing model archive.
+connected host or restore the models of a backup with `loaf restore models`.
 [Versioned deployments](launcher.md#run-a-versioned-deployment) · [Model transfer](transfer.md#transfer-models-between-existing-deployments)
 
 ## Downloads and selection files
@@ -157,6 +157,27 @@ terminal lets you switch between `/home/user` and `/home/chat`.
 To set the working directory for the model, use the **Working Directory**
 folder button next to the terminal selector below the chat input.
 [Terminal workspace folders](terminal-server.md#use-the-terminal-from-a-model)
+
+A model command that writes to `/home/user` fails with `Read-only file system`.
+Model commands can write only to `/home/chat` and `/tmp`. Select `chat` as the
+working directory, or copy the result into `/home/user` yourself.
+[Folder access](terminal-server.md#use-the-terminal-from-a-model)
+
+## Packages in the terminal
+
+`apt-get: packages cannot be changed from this shell` comes from the
+terminal's own `apt` and `apt-get`. Ask the model to run the APT command
+on its own, without pipes or other commands, or to use its package tools.
+If the result reports that the server has no package source, set
+`[terminal_server] apt_source_file` and run `loaf offline` or `loaf online`.
+[Chat packages](terminal-server.md#install-packages-for-a-chat)
+
+When the installer reports that a repository `is not signed`, mark a local
+unsigned repository as trusted in the source file, for example
+`deb [trusted=yes] file:/run/loaf-apt/repository ./`, or reference its key
+with `signed-by=`. `Unable to locate package` means that the configured
+source does not provide that name for the image's Debian release and
+architecture.
 
 ## Build requests additional privileges
 

@@ -1,5 +1,12 @@
 # Contributing
 
+> ℹ️ **INFO**\
+> Tell me if you want to contribute so we can coordinate efforts - of course
+> I value your effort and time - so I will reject unsolicited pull requests.
+> If you make an PR for the following file, I will let the agents work on it:\
+> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; `docs/instructions/development.md`\
+> Later, when not so many things change, I might be open normal PRs.
+
 `loaf` prepares, serves and transfers Ollama and Open WebUI deployments on
 Debian. Start with the [repository guide](AGENTS.md) and the
 [architecture specification](docs/instructions/architecture.md).

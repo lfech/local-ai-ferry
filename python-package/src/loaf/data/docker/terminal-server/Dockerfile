@@ -19,7 +19,9 @@ RUN --mount=type=secret,id=terminal-apt-source set -eu; \
         bash build-essential cmake ninja-build python3-aiohttp python3-pytest python3-sphinx; \
     rm -rf /var/lib/apt/lists/*
 
-COPY provisioner.py runner.py /opt/loaf-terminal/
+COPY provisioner.py runner.py apt-guard.sh /opt/loaf-terminal/
+RUN install -m 0755 /opt/loaf-terminal/apt-guard.sh /usr/local/bin/apt \
+    && install -m 0755 /opt/loaf-terminal/apt-guard.sh /usr/local/bin/apt-get
 ENV OPEN_TERMINAL_MULTI_USER=false \
     OPEN_TERMINAL_ENABLE_BROWSER=false \
     OPEN_TERMINAL_ENABLE_DESKTOP=false \

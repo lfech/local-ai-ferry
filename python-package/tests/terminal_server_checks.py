@@ -86,10 +86,11 @@ class WebUI:
                 return None
             return await (response.read() if raw else response.json())
 
-    async def run(self, account, command, *, exit_code=0, wait=55, chat=None):
+    async def run(self, account, command, *, exit_code=0, wait=55, chat=None, agent=False):
+        # Model tool calls use the published agent paths; the plain path is the account's own request.
         result = await self.request(
-            "POST", WORKSPACE + "/execute", account, params={"wait": wait}, json={"command": command},
-            headers={"X-Session-Id": chat} if chat else None,
+            "POST", WORKSPACE + ("/agent" if agent else "") + "/execute", account, params={"wait": wait},
+            json={"command": command}, headers={"X-Session-Id": chat} if chat else None,
         )
         assert result["status"] != "running", result
         if exit_code is None:
@@ -148,7 +149,7 @@ async def check_access(webui, accounts):
     metadata = await webui.request("GET", WORKSPACE + "/api/config", alice)
     assert metadata["features"]["terminal"], metadata
     schema = await webui.request("GET", WORKSPACE + "/openapi.json", alice)
-    assert "/execute" in schema["paths"]
+    assert "/agent/execute" in schema["paths"] and "/execute" not in schema["paths"], sorted(schema["paths"])
 
 
 async def check_draft_directories(webui, account):
@@ -226,7 +227,7 @@ async def check_chat_directories(webui, account, other_account):
     chat_header = {"X-Session-Id": ids[0]}
     assert (await picker_choices(webui, account, chat=ids[0]))[:2] == ["/home/user", "/home/chat"]
     cwd = await webui.request("GET", WORKSPACE + "/files/cwd", account, headers=chat_header)
-    assert cwd == {"cwd": "/home/user", "home": "/home/user", "root": {"path": "/home", "label": "home"}}, cwd
+    assert cwd == {"cwd": "/home/chat", "home": "/home/user", "root": {"path": "/home", "label": "home"}}, cwd
     folders = await entries(webui, first, account, "/home")
     assert folders["user"] == folders["chat"] == "directory", folders
 
@@ -248,6 +249,12 @@ printf first > project/model.txt
     assert (await entries(webui, first, account))["shared-check"] == "directory"
     assert (await entries(webui, first, account, "shared-check"))["model.txt"] == "file"
     assert (await entries(webui, WORKSPACE, account))["shared-check"] == "directory"
+    # Model commands read the account's folder in the selected directory but cannot write to it.
+    await webui.run(account, "test -f shared-check/model.txt && ! touch model-denied && pwd > /home/chat/agent-cwd",
+                    chat=ids[0], agent=True)
+    assert "model-denied" not in await entries(webui, first, account)
+    agent_cwd = await webui.request("GET", first + "/files/read", account, params={"path": "/home/chat/agent-cwd"})
+    assert agent_cwd["content"].strip() == "/home/user", agent_cwd
 
     assert "project" not in await entries(webui, second, account, "/home/chat")
     assert (await entries(webui, second, account, "/home/user/shared-check"))["model.txt"] == "file"

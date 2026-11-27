@@ -87,7 +87,7 @@ class PackageTests(unittest.TestCase):
     def test_every_workflow_defaults_to_current_directory(self):
         with tempfile.TemporaryDirectory(prefix='loaf project with spaces ') as folder:
             root = self.project(folder)
-            for mode in (*cli.MODES, *cli.MODEL_TRANSFER_MODES):
+            for mode in (*cli.MODES, *cli.TRANSFER_MODES):
                 with self.subTest(mode=mode):
                     result = self.invoke(folder, mode, '--dry-run')
                     self.assertEqual(result.returncode, 0, result.stderr)

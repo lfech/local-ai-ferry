@@ -13,10 +13,12 @@ bridge. [Bridge driver options](https://docs.docker.com/engine/network/drivers/b
 The provisioner and new workspaces start from the shared local image built from
 MIT-licensed Open Terminal. A chat that installs packages uses its own derived
 image. Each authorized Open WebUI account gets a persistent
-user volume on first use. Each chat runs in a separate container and can access
-that account's user volume. Users select one direct
-Open Terminal connection in Open WebUI and use its terminal, files, and model
-tools. Ollama continues to handle inference. [Open Terminal 0.17.20 license](https://github.com/open-webui/open-terminal/blob/v0.17.20/LICENSE) · [Open WebUI terminal connection](https://docs.openwebui.com/features/open-terminal/setup/connecting/)
+user volume on first use. Each chat has a workspace with up to two containers
+that share its files and packages. The user runner serves your terminal and
+the **Files** tab and can write to the account's user volume. The agent
+runner serves model tool calls and mounts that volume read-only. Users select
+one direct Open Terminal connection in Open WebUI and use its terminal, files,
+and model tools. Ollama continues to handle inference. [Open Terminal 0.17.20 license](https://github.com/open-webui/open-terminal/blob/v0.17.20/LICENSE) · [Open WebUI terminal connection](https://docs.openwebui.com/features/open-terminal/setup/connecting/)
 
 ## Enable and connect
 
@@ -101,16 +103,27 @@ when the chat starts using the terminal. Upload files to `/home/chat` from
 the saved chat's **Files** tab or write them from the terminal. The **home**
 breadcrumb in Files lets you browse both folders.
 
-| Folder | Path | Lifetime |
-| --- | --- | --- |
-| `user` | `/home/user` | Shared by your chats. Existing files and settings stay at this path. |
-| `chat` | `/home/chat` | Private to this chat. A saved chat's files survive restarts and are removed when the chat is deleted. Temporary chats keep files for the life of their runner. |
+| Folder | Path | You | Model | Lifetime |
+| --- | --- | --- | --- | --- |
+| `user` | `/home/user` | Read and write | Read only | Shared by your chats. Existing files and settings stay at this path. |
+| `chat` | `/home/chat` | Read and write | Read and write | Private to this chat. A saved chat's files survive restarts and are removed when the chat is deleted. A temporary chat's files are removed once it has been idle for `idle_seconds` without a runner. |
 
-The Files tab and model commands share the chat's working directory. Use
+A chat starts in `/home/chat`, and a draft in `/home/user`. The Files tab, your
+uploads and model commands share the working directory you select. Use
 `/home/chat` for files to remove with the chat and `/home/user` for files to keep.
-Both volumes are mounted. A model can write to the other folder using an
-explicit path. Open the matching folder in Files to see where it wrote a file.
+Model commands can read `/home/user` but fail with `Read-only file system`
+when they write to it. Copy a model's result into `/home/user` yourself from
+the terminal or the Files tab.
 [Open WebUI file browser root](https://docs.openwebui.com/features/open-terminal/terminals/orchestration/file-browser-home-boundary/)
+
+Open WebUI calls model tools at the paths that the provisioner publishes in its
+tool schema, all below `/agent/`. The provisioner sends those calls to the
+agent runner. The interface uses Open Terminal's plain paths, which reach the
+user runner. A model therefore never reaches the writable user volume. Its
+tools also omit typing into your interactive shell; reading its output remains.
+Commands that you start from the interface, such as a Git clone, run in the user
+runner. The process list shows the model's commands. Open WebUI without Redis,
+as bundled, reloads the tool schema for each request.
 
 The provisioner uses the bundled Open WebUI deployment's SQLite database
 to check saved chat ownership and deletion. It reads chat IDs and owners
@@ -137,13 +150,13 @@ All settings below belong to `[terminal_server]` in `config/config.ini`.
 | Setting | Default | Purpose |
 | --- | --- | --- |
 | `enabled` | `false` | Start the provisioner with `loaf online` and `loaf offline`. |
-| `include_in_backup` | `false` | Include persistent user volumes and the bearer key in `loaf backup`. |
+| `include_in_backup` | `false` | Include the `chats` type in `loaf backup` without type names: account and chat folders, chat package images and the bearer key. |
 | `secret_file` | `config/terminal-server.key` | Source for the Compose bearer secret. |
 | `apt_source_file` | blank | Use this APT source for terminal image builds and per-chat package installs. [Package mirror](#package-mirror-for-image-builds) |
 | `apt_repository_dir` | blank | Host directory for a `file:` repository mounted in the package installer. [Chat packages](#install-packages-for-a-chat) |
 | `cpus` | `2` | CPU limit per runner. |
 | `memory_mib` | `2048` | Memory limit per runner. |
-| `max_workspaces` | `4` | Limit on simultaneously allocated runners. |
+| `max_workspaces` | `4` | Limit on simultaneously allocated workspaces, one per account draft or chat. A workspace uses up to two runners, each with the CPU and memory limits below. |
 | `idle_seconds` | `900` | Minimum time before reclaiming an idle runner. When the limit is full, another workspace can take an eligible slot immediately. |
 | `command_seconds` | `900` | Runtime limit for commands started through the tool API. Interactive shells use their terminal sessions. |
 | `volume_driver` and `volume_options` | `local` and `{}` | Docker volume driver and JSON object of string options. Configure a quota-capable volume driver to enforce a hard workspace disk limit. |
@@ -213,22 +226,51 @@ same configured source through a separate installer.
 
 ## Install packages for a chat
 
-With `apt_source_file` set, `loaf offline` and `loaf online` enable the
-`install_chat_packages` tool on the Open Terminal connection. Ask the model
-to install an APT package for the current chat. Loaf runs APT against the
-configured mirror, including dependency resolution and package setup. After
-a successful install, the next terminal request starts a new runner. Named
-volumes keep their files, and the runner tries to reopen the last working
-directory. Files stored in the old runner's temporary `/home/chat` or
-`/tmp` expire with that runner. The packages are available from both `user`
-and `chat` for that chat. Every new chat starts with the base image's packages.
+With `apt_source_file` set, `loaf offline` and `loaf online` let the model
+change the APT packages of the current chat. Ask the model to install a
+package. It can use the `install_chat_packages` and `remove_chat_packages`
+tools or run a plain APT command, which the provisioner handles in place of
+the runner:
+
+```text
+sudo apt-get update && sudo apt-get install -y PACKAGE
+apt-get remove PACKAGE
+apt-get purge PACKAGE
+```
+
+The provisioner accepts `apt` and `apt-get` with `install`, `reinstall`,
+`remove` and `purge`, the options `-y`, `-q` and `--no-install-recommends`,
+and optional `sudo` and environment assignments, joined by `&&` or `;`.
+`update`, `autoremove` and `clean` need no action. Each package name can
+carry an architecture or version, such as `jq:amd64` or `jq=1.7.1-3`. Any
+other command, such as one with a pipe or another program, runs unchanged in
+the runner. There the image's `apt` and `apt-get` explain how to change
+packages and exit with status 100. An image built before this release lacks
+these explanations; run `loaf build` to add them.
+
+Each chat's packages form a list. Every change installs the whole list
+with APT from the configured source, in a disposable installer based on the
+shared terminal image. The result becomes the chat's image, and removing the
+last package removes the image. Recommended packages follow the image's APT
+settings; the provisioner accepts `--no-install-recommends` but does not
+change them.
+Only packages installed for the chat can be removed; the shared image's
+packages stay. The tool result lists the chat's packages. After a change,
+the next request starts new runners from the chat's image. Both folders keep
+their files and the selected working directory stays. Every new chat starts with the
+shared image's packages. Chat images from earlier releases did not record
+their packages; their next change rebuilds them with only the new list, and
+the result says so.
 
 For an HTTP or HTTPS source, make the mirror reachable from the Docker
 host's bridge network. For a mirror stored on the offline host, set
 `apt_repository_dir` to the repository root and use a source URI rooted at
 `file:/run/loaf-apt/repository`. Relative paths in `config.ini` start at the
-project directory. For example, after loading the base terminal image, use
-the following settings and a flat repository's `.list` source.
+project directory. `loaf online`, `loaf offline` and `loaf status` refuse a
+directory without an APT index: `Packages` or one of its compressed forms,
+`Release` or `InRelease` at the root, or `dists/`. For example, after loading
+the base terminal image, use the following settings and a flat repository's
+`.list` source.
 
 ```ini
 [terminal_server]
@@ -237,32 +279,45 @@ apt_repository_dir = /media/transfer/apt-mirror
 ```
 
 ```text
-deb file:/run/loaf-apt/repository ./
+deb [trusted=yes] file:/run/loaf-apt/repository ./
 ```
 
-Use a signed repository with its trusted key available to APT. The `file:`
-repository is mounted read-only in a network-disabled installer. The
-terminal's local base image supplies the starting filesystem.
+To try this, run `loaf setup --test-local-repository` while connected after
+building the terminal image. It downloads three command-line tools, chosen at
+random from a fixed list, together with the dependencies that the terminal
+image lacks, into `apt-test-repository/`. It writes the source file above as
+`config/apt-test-repository.list` and prints the tools and the two settings.
+Then ask the model to install one of the tools.
+
+APT refuses an unsigned repository unless the source marks it trusted, as
+above. A flat repository built with `dpkg-scanpackages` has no signature.
+To verify a signed repository instead, place its public key in the repository
+directory and reference it with
+`signed-by=/run/loaf-apt/repository/KEY.gpg`. The `file:` repository is
+mounted read-only in a network-disabled installer.
+[Debian APT source options](https://manpages.debian.org/bookworm/apt/sources.list.5.en.html)
 
 Saved chat images persist on this Docker host across `loaf stop` and are
-removed when their chat is deleted. Temporary chat images expire with the
-workspace. Deployment image backups carry the shared terminal base image.
+removed when their chat is deleted. A temporary chat's image is removed after
+it has been idle for `idle_seconds` and at provisioner shutdown. The `images`
+type of a backup carries the shared terminal base image, and the `chats` type
+the saved chats' images.
 
 ## Offline transfer and shutdown
 
 `loaf backup` includes the matching Open Terminal image when capturing images
 if it exists locally.
-Use `loaf backup --no-terminal-server` to skip that image. To also transfer each
-account's `user` volume and the bearer key, set
-`[terminal_server] include_in_backup = true` and provision the credential on
-the source before backing up `volumes`. Move chat files you want to transfer into
-`/home/user` before the backup. The archive contains the bearer key in
-plaintext and is created with owner-only permissions. [Archive contents](transfer.md#archive-contents)
+Use `loaf backup --no-terminal-server` to skip that image. The `chats` type
+transfers each account's `user` volume, each saved chat's `chat` volume, the
+saved chats' package images and the bearer key, together with the `webui`
+data that owns those accounts and chats. Name it, as in `loaf backup chats`,
+or set `[terminal_server] include_in_backup = true` to include it in backups
+without type names. Temporary chats stay behind. The archive contains the
+bearer key in plaintext and is created with owner-only permissions.
+[Archive types](transfer.md#select-archive-types)
 
-`loaf restore` restores those assets with their corresponding components.
-Restore with the matching
-deployment version and configuration so the workspace names and WebUI account
-IDs match. The destination's `volume_driver` and `volume_options` determine
+`loaf restore` restores those assets. Restore with the matching deployment
+version so the workspace names and WebUI account IDs match. The destination's `volume_driver` and `volume_options` determine
 how workspace volumes are created. Restore writes the key to `secret_file`
 with owner-only permissions, reuses a matching key, and refuses to replace a
 different key or overwrite populated volumes. Setup from the copied backup
@@ -335,7 +390,8 @@ An archived chat retains its files across the restart.
   restarting, verify the original HTML, upload a revision, and rebuild.
 - **Isolation and limits** — Verify that both accounts keep their own
   workspace files, the second account cannot download the first account's
-  artifact, and a command ends when it exceeds the runtime limit. With
+  artifact, a model command reads but cannot write the account's folder in the
+  selected directory, and a command ends when it exceeds the runtime limit. With
   production isolation, check that the host bridges have no IPv4 address,
   the runners have no default route or IPv6 address, and a runner cannot
   reach its peer or the provisioner's control API.
