@@ -108,15 +108,15 @@ explains the separate API-startup and Compose-health timeouts.
 
 If saved Modelfiles changed while Ollama was running, run `loaf stop` and start
 the desired serving mode again. Restarting interrupts active inference and
-applies saved definitions. Use `loaf stop -n` to keep containers and their logs
-for inspection before starting again.
+applies saved definitions. Use `loaf stop --no-remove-containers` to keep
+containers and their logs for inspection before starting again.
 
 If `loaf status` reports that no local model data was found, check the project
-and version in the report against the ones you used to download or restore
+and namespace in the report against the ones you used to download or restore
 the models. The probe checks both Ollama manifest layouts and also recognizes
 saved Modelfiles with model blobs. For a fresh store, use `loaf download` on a
 connected host or restore the models of a backup with `loaf restore models`.
-[Versioned deployments](launcher.md#run-a-versioned-deployment) · [Model transfer](transfer.md#transfer-models-between-existing-deployments)
+[Separate namespaces](launcher.md#run-a-separate-namespace) · [Model transfer](transfer.md#transfer-models-between-existing-deployments)
 
 ## Downloads and selection files
 

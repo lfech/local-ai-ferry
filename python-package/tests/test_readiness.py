@@ -105,7 +105,7 @@ class ReadinessTests(unittest.TestCase):
             patch.object(cli.Compose, "execute") as execute,
             redirect_stdout(io.StringIO()) as status,
         ):
-            options = ["status", "--project-dir", str(ROOT), "--config-dir", config_dir, "--version", "v2"]
+            options = ["status", "--project-dir", str(ROOT), "--config-dir", config_dir, "--namespace", "v2"]
             self.assertEqual(cli.main(options), 0)
             self.assertEqual(execute.call_args.args[0].arguments, ("ps", "--all"))
             self.assertIn("Deployment  loaf-v2", status.getvalue())

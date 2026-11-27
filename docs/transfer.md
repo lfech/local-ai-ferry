@@ -18,8 +18,8 @@ available type and restore recovers everything in the archive.
 | Type | Contents | Restored to |
 | --- | --- | --- |
 | `source` | Git history and working files of a source checkout, without settings, installer caches or the virtualenv | The project directory, replacing existing files with the archived ones |
-| `config` | Settings, saved Modelfiles and APT source files from `config/` | The configuration directory |
-| `installers` | Cached Python wheels, NVIDIA and Docker Debian packages from `install-cache/` | The project's `install-cache/` |
+| `config` | Settings, saved Modelfiles and APT source files from `config/`, with links to other files there | The configuration directory |
+| `installers` | Cached Python wheels, NVIDIA and Docker Debian packages and the standalone Python runtime downloads from `install-cache/` | The project's `install-cache/` |
 | `images` | The three core images and the matching Open Terminal image when available locally | The Docker image store |
 | `models` | Ollama blobs, manifests and saved Modelfiles | The Ollama volume, merged |
 | `webui` | The Open WebUI volume: accounts, chat history, settings and the saved terminal connection | A new or empty volume |
@@ -31,11 +31,21 @@ available type and restore recovers everything in the archive.
 | `volumes` | `models`, `webui`, and `terminal` when the terminal server is enabled |
 
 `source` exists only in a source checkout. Backups without names include
-`terminal` only with `[terminal_server] include_in_backup = true`, because
-the archive then contains the bearer key in plaintext. `terminal` always
-brings `webui`, which owns the accounts that the folders belong to. Chat
-containers, with their `/home/chat` folders and installed packages, stay on
-the source host.
+`terminal` when the terminal server is enabled and `[terminal_server]
+include_in_backup` is true, the default. Open WebUI saves its terminal
+connection with the bearer key in `webui`, so a restored WebUI needs the same
+key. The archive then contains the key in plaintext. `terminal` always brings
+`webui`, which owns the accounts that the folders belong to. Chat containers,
+with their `/home/chat` folders and installed packages, stay on the source
+host.
+
+`loaf backup --no-terminal-server` leaves out the terminal server: the Open
+Terminal image and the `terminal` type with the user volume and key.
+`loaf.json` records it. A restore of such a backup sets `[terminal_server]
+enabled = false` in the restored settings and removes loaf's saved terminal
+connection from the restored WebUI data, so Open WebUI starts without a
+terminal. The removal runs Python in a network-disabled container from the
+local `loaf/open-webui` image; restore `images` too where it is missing.
 
 ```bash
 loaf backup project images
@@ -58,7 +68,7 @@ loaf restore models --archive /media/transfer/YYYYMMDD-HHMM_local-ai-ferry
 ```
 
 The model store is portable across deployment namespaces: restore `models`
-with another `--version` than the backup's. The same holds for `source` and
+with another `--namespace` than the backup's. The same holds for `source` and
 `installers`. Backup stops the selected deployment's downloader. The online
 or offline serving profile can stay running if its Ollama container is the
 only running consumer of the volume.
@@ -101,9 +111,11 @@ backup/YYYYMMDD-HHMM_local-ai-ferry/
 ```
 
 `SHA256SUMS` lists the launcher and the archive. Check both without loaf
-with `sha256sum -c SHA256SUMS` inside the folder. In a source checkout, use a
-connected machine. Backup builds `dist/loaf` from the current working files
-before accessing Docker and includes the result in the folder. A standalone
+with `sha256sum -c SHA256SUMS` inside the folder. In a source checkout,
+backup builds `dist/loaf` from the current working files before accessing
+Docker and includes the result in the folder. The first build needs a
+connected machine; later builds reuse the downloads cached in
+`install-cache/python/`. A standalone
 deployment includes the binary that launched it.
 [Local binary build](releases.md#build-and-check-locally)
 
@@ -111,7 +123,8 @@ The archive's first member, `loaf.json`, lists its types. loaf reads it
 before any payload, so it can refuse an unsupported archive or a missing type
 without unpacking the rest. Then each type has one plain tar member.
 `terminal` has two: `terminal/users.tar` with the user volume, absent before
-any account used the terminal, and `terminal/terminal-server.key`.
+any account used the terminal, and `terminal/terminal-server.key`. A backup
+made with `--no-terminal-server` adds `"skip_terminal_server": true`.
 
 ```json
 {
@@ -128,7 +141,7 @@ any account used the terminal, and `terminal/terminal-server.key`.
 }
 ```
 
-`deployment` is the backup's `[launcher] version`. The bearer key stays
+`deployment` is the backup's namespace name, `[launcher] namespace`. The bearer key stays
 out of `loaf.json`. Restore accepts archive format 3, which stores the
 terminal type as one user volume. `[transfer] backup_version_min` names the
 oldest accepted format. Releases before v1.0.0 read only their own format.
@@ -150,7 +163,9 @@ directory and the generated names.
 Keep the transfer folder private. The archive contains WebUI data and may
 include Git history. The release executable supplies the packaged defaults and
 Docker files. Copy required `.env` settings and other external data
-separately. The `config` type excludes the configured terminal key file. Open
+separately. The `config` type excludes the configured terminal key file. A
+link in `config/` stays a link when it points, relatively, to another
+configuration file there; backup refuses any other link and names it. Open
 WebUI's saved connection and its credential are part of `webui`. Restore
 `terminal` with `webui`, or update the saved connection to the destination's key.
 [Terminal server transfer](terminal-server.md#offline-transfer-and-shutdown)
@@ -159,7 +174,9 @@ Source checkout backups prepare the launcher wheel, dependency wheels and wheel
 cache record for `installers`. Backup reuses a current cache and refreshes it
 with package indexes disabled when the package source or Python environment
 changes. Run `loaf install` while connected to populate the cache before your
-first backup from Debian.
+first backup from Debian. Building `dist/loaf` caches its checked standalone
+Python downloads in `install-cache/python/`, so later builds and backups from
+the checkout work offline; `installers` carries them.
 [Python wheel preparation](launcher.md#prepare-python-installation-offline)
 
 On Debian, run `loaf setup` while connected to fill `install-cache/deb/nvidia/`.
@@ -189,29 +206,32 @@ an image export or pauses its stream, the meter shows `waiting for Docker`.
 loaf backup --verify --archive /media/transfer/YYYYMMDD-HHMM_local-ai-ferry
 ```
 
-Verification checks every member against `loaf.json`, lists the types and
-their sizes, and reports the operating system and architecture of any saved
-images. For a backup folder, it also checks the launcher and the archive
-against `SHA256SUMS`. It performs no Docker operations. Allow temporary disk
-space when the archive contains `images`. Without `--archive`, it checks the
-newest backup in the configured directory. Select the backup's namespace with
-`--version` when applicable.
+Verification checks every member against `loaf.json` and runs the same
+content checks as restore: paths and links, model manifests and their blobs,
+volume payloads, image tags and the bearer key. It lists the types and their
+sizes and reports the operating system and architecture of any saved images.
+For a backup folder, it also checks the launcher and the archive against
+`SHA256SUMS`. It performs no Docker operations and needs no temporary disk
+space: it reads the archive once as a stream and keeps only small manifest
+files in memory. Without `--archive`, it checks the newest backup in the
+configured directory. Select the backup's namespace with `--namespace` when
+applicable.
 
-## Versioned transfers
+## Transfers between namespaces
 
-Use the same `--version` for backup and restore.
+Use the same `--namespace` for backup and restore.
 
 ```bash
-loaf --version v1-2-3 backup
-loaf --version v1-2-3 restore --backup-dir /media/transfer
+loaf --namespace v1-2-3 backup
+loaf --namespace v1-2-3 restore --backup-dir /media/transfer
 ```
 
 The folder name is `YYYYMMDD-HHMM_v1-2-3_local-ai-ferry`.
-Restore selects the newest backup for the requested version when searching a
-backup directory. Inside a specific folder, it uses the saved version. It
+Restore selects the newest backup for the requested namespace when searching
+a backup directory. Inside a specific folder, it uses the saved namespace. It
 checks the saved image tags before loading images or extracting volumes. Only
-`source`, `installers` and `models` restore into another version.
-[Launcher options](launcher.md#run-a-versioned-deployment)
+`source`, `installers` and `models` restore into another namespace.
+[Separate namespaces](launcher.md#run-a-separate-namespace)
 
 ## Check saved Modelfiles during backup
 
@@ -267,10 +287,9 @@ The first setup or restore in a backup folder makes it the project. It moves
 the archive, the launcher and `SHA256SUMS` unchanged to
 `backup/YYYYMMDD-HHMM_local-ai-ferry/` and keeps a copy of `loaf` in the
 folder. The archive's name gives the directory name, even if you renamed the
-folder. Restores find the newest backup of the deployment version in the
-settings. Setup and restore end with the command to run next. After setup,
-it includes `--archive` when the backup belongs to another deployment
-version.
+folder. Restores find the newest backup of the namespace in the settings.
+Setup and restore end with the command to run next. After setup, it includes
+`--archive` when the backup belongs to another namespace.
 
 Other commands, or `./loaf` without a command, do not run in a backup
 folder. They list the typical next steps, the alternative of running the
@@ -308,13 +327,18 @@ rebuild `.venv` from the restored wheels when you develop there.
 
 ## Restore behavior
 
-Restore checks the archive's structure and every member's hash before
-calling Docker. For a backup folder, it also checks the launcher and the
-archive against `SHA256SUMS`. It checks volume paths and archive links before
-extracting volumes, and refuses volumes in use. Restore applies the selected
-types in this order: `source`, `config`, `installers`, `images`, `models`,
-`webui`, `terminal`. Restoring `config` keeps the backup's deployment
-version. Restoring `models` or `webui` creates a missing volume with the
+Restore checks the archive's structure, every member's hash and content
+before calling Docker. For a backup folder, it also checks the launcher and
+the archive against `SHA256SUMS`. Before the first change it also checks the
+target volumes: an existing WebUI or terminal user volume must be unused and
+empty, and the user volume must carry the deployment's ownership labels and
+storage settings. The emptiness check runs the local downloader image without
+network; restore `images` first where it is missing. Restore applies the
+selected types in this order: `source`, `config`, `installers`, `images`,
+`models`, `webui`, `terminal`. Restoring `config` keeps the backup's
+namespace and changes only the lines it needs in `config.ini`, so comments
+and other settings stay. A `[launcher] version` line from a backup made
+before the rename becomes `[launcher] namespace`. Restoring `models` or `webui` creates a missing volume with the
 labels that Compose gives its own volumes, so Compose later uses it without a
 warning. Restoring `terminal` creates the user volume with its ownership
 labels and writes the bearer key with owner-only permissions. It refuses a different existing key. Restored
@@ -330,9 +354,13 @@ backup's settings name another path. Writing `/etc/loaf` needs root, so run
 the system restore with `sudo`. In every deployment, restore refuses a
 settings file at the key's path.
 
-Restore starts services only when Modelfile replay is enabled. On a
-recovered host, run `loaf offline` and open the printed address to sign in
-or create the first account.
+Restore starts services only when Modelfile replay is enabled. A project
+without a Compose file gets the `docker-project` link to the packaged
+deployment, as standalone setup creates it. On a recovered host, run the
+printed next command, normally `loaf offline`, and open the printed address
+to sign in or create the first account. When the restored settings enable the
+terminal server but its key is missing, the next command is `loaf setup`,
+which creates a key.
 
 Add `--import` or set `import_models = true` under `[transfer]` to start offline
 Ollama and import all saved Modelfiles after restoring `models`.

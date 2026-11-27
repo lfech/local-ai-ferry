@@ -26,8 +26,10 @@ class FakeDocker:
                                  "running", health="healthy"),
             "c2": self.container(f"{namespace}-ollama-offline-1",
                                  {**project, "com.docker.compose.service": "ollama-offline"}, "exited", code=137),
+            # Chat containers inherit the Compose labels of the provisioner's image.
             "c3": self.container(f"{namespace}-terminal-{KEY}",
-                                 {**terminal, "loaf.terminal.workspace": KEY, "loaf.terminal.chat-id": "chat"}, "running"),
+                                 {**project, "com.docker.compose.service": "terminal-server", **terminal,
+                                  "loaf.terminal.workspace": KEY, "loaf.terminal.chat-id": "chat"}, "running"),
             "c4": self.container(f"{namespace}-terminal-{OTHER_KEY}", {**terminal, "loaf.terminal.workspace": OTHER_KEY},
                                  "exited"),
             # Same labels, but a name this deployment's provisioner never gives.
@@ -155,7 +157,7 @@ Networks (3)
         self.assertEqual(self.docker.removals(), [])
 
     def test_version_selects_another_deployment(self):
-        code, output, _ = self.invoke("ps", "--version", "v2")
+        code, output, _ = self.invoke("ps", "--namespace", "v2")
         self.assertEqual(code, 0)
         self.assertIn("Docker resources of deployment loaf-v2", output)
         for name in ("loaf-v2-open-webui-1", "loaf/open-webui:v2", "loaf-v2-ollama", "loaf-v2_inference"):
@@ -217,7 +219,7 @@ Networks (3)
         self.assertEqual(self.invoke("rm", "volumes", "--yes")[1].splitlines()[-1], "Nothing to remove.")
 
     def test_dry_run_needs_no_docker(self):
-        code, output, _ = self.invoke("rm", "images", "volumes", "--dry-run", "--version", "v2")
+        code, output, _ = self.invoke("rm", "images", "volumes", "--dry-run", "--namespace", "v2")
         self.assertEqual(code, 0)
         self.assertEqual(self.docker.calls, [])
         self.assertEqual(output, """\
@@ -244,7 +246,7 @@ Plan for deployment loaf-v2
             self.assertEqual(self.docker.calls, [])
         with redirect_stderr(io.StringIO()) as errors, self.assertRaises(SystemExit):
             cli.main(["stop", "--yes"])
-        self.assertIn("--yes is only supported by docker rm.", errors.getvalue())
+        self.assertIn("--yes is only supported by docker rm and clean --full.", errors.getvalue())
 
     def test_all_selects_every_type(self):
         self.assertEqual(resources.plan("loaf", resources.KINDS)[0],

@@ -45,7 +45,9 @@ loaf = [
     "data/docker/terminal-server/*.py",
     "data/docker/open-webui/*.py",
     "data/docker/terminal-server/*.list",
-    # Links to the repository's README.md and docs/ in a checkout; the built package holds the files.
+    # Links to the repository's README.md, docs/ and config/model-examples/ in a checkout; the built package
+    # holds the files.
+    "data/config/model-examples/*.ini",
     "data/README.md",
     "data/docs/*.md",
     "data/docs/instructions/architecture.md",

@@ -61,33 +61,57 @@ else
 fi
 
 # Pin the interpreter and the notices for its compiled dependencies.
+# install-cache/python/ keeps the checked downloads, so later builds and backups work offline.
 python_release=20261110
-echo "Fetch the standalone Python runtime…"
-"$host_python" - "$stage" "$python_release" <<'PY'
+"$host_python" - "$stage" "$python_release" "$PWD/install-cache/python" <<'PY'
 from hashlib import sha256
 from pathlib import Path
 import shutil
 import sys
+from tempfile import NamedTemporaryFile
 from urllib.request import urlopen
 
-release = sys.argv[2]
+stage, release, cache = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
 asset = f"cpython-3.13.18+{release}-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
 downloads = (
-    ("python.tar.gz", f"https://github.com/astral-sh/python-build-standalone/releases/download/{release}/{asset}",
+    ("python.tar.gz", asset, f"https://github.com/astral-sh/python-build-standalone/releases/download/{release}/{asset}",
      "f2d2199eb25880e07863b391cf7124e7ffa1338b0d65600dfcec117c4223a7fb"),
-    ("licenses.tar.gz", f"https://codeload.github.com/astral-sh/python-build-standalone/tar.gz/refs/tags/{release}",
+    ("licenses.tar.gz", f"python-build-standalone-{release}.tar.gz",
+     f"https://codeload.github.com/astral-sh/python-build-standalone/tar.gz/refs/tags/{release}",
      "63b8166347616283ee6d3ed449e957bc71b65368bc60945d21ab957e6fcaee49"),
 )
-for name, url, expected in downloads:
-    path = Path(sys.argv[1]) / name
-    with urlopen(url, timeout=60) as response, path.open("wb") as output:
-        shutil.copyfileobj(response, output)
-    with path.open("rb") as download:
-        digest = sha256()
-        for block in iter(lambda: download.read(1024 * 1024), b""):
-            digest.update(block)
-    if digest.hexdigest() != expected:
-        sys.exit(f"SHA-256 mismatch for {url}.")
+
+
+def digest(path):
+    value = sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            value.update(block)
+    return value.hexdigest()
+
+
+for name, cached_name, url, expected in downloads:
+    cached = cache / cached_name
+    if cached.is_file() and not cached.is_symlink() and digest(cached) == expected:
+        print(f"Reuse the cached {cached_name}.")
+    else:
+        print(f"Fetch {cached_name}…")
+        cache.mkdir(parents=True, exist_ok=True)
+        # Publish only a complete, checked download.
+        with NamedTemporaryFile(dir=cache, prefix=".loaf-download-", delete=False) as output:
+            pending = Path(output.name)
+            try:
+                with urlopen(url, timeout=60) as response:
+                    shutil.copyfileobj(response, output)
+            except BaseException:
+                pending.unlink()
+                raise
+        if digest(pending) != expected:
+            pending.unlink()
+            sys.exit(f"SHA-256 mismatch for {url}.")
+        pending.chmod(0o644)
+        pending.replace(cached)
+    shutil.copyfile(cached, stage / name)
 PY
 tar -xzf "$stage/python.tar.gz" -C "$bundle"
 tar -xzf "$stage/licenses.tar.gz" -C "$bundle/python-licenses" --strip-components=1 --wildcards \

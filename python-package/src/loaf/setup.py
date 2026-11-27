@@ -24,6 +24,8 @@ from .progress import format_bytes
 PYTHON_PACKAGE_DIR = Path("python-package")
 INSTALL_CACHE = Path("install-cache")
 PYTHON_WHEEL_DIR = INSTALL_CACHE / "wheels"
+# scripts/build-release.sh keeps its checked standalone Python downloads here for offline builds.
+PYTHON_RUNTIME_DIR = INSTALL_CACHE / "python"
 TOOLKIT_DIR = INSTALL_CACHE / "deb/nvidia"
 DOCKER_DEB_DIR = INSTALL_CACHE / "deb/docker"
 DOCKER_PACKAGES = {
@@ -146,14 +148,24 @@ def config_template(header: str, active: dict[tuple[str, str], str] | None = Non
     return "\n".join(lines) + "\n"
 
 
+def link_packaged_project(project: Path, *, dry_run: bool = False) -> bool:
+    """Link the packaged Docker project unless the project has its own Compose file or another docker-project.
+
+    Returns whether the link is, or in a dry run would be, created or refreshed.
+    """
+    link = project / assets.DOCKER_PROJECT
+    custom = any((path / "compose.yml").is_file() for path in (project, project / assets.CHECKOUT_DATA))
+    if custom or not (assets.loaf_data_link(link) or not (link.exists() or link.is_symlink())):
+        return False
+    assets.link_docker_project(project, dry_run=dry_run)
+    return True
+
+
 def setup_standalone(project: Path) -> None:
     directory = project / "config"
     if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
         raise SetupError(f"{directory} must be a local configuration directory.")
-    link = project / assets.DOCKER_PROJECT
-    custom = any((path / "compose.yml").is_file() for path in (project, project / assets.CHECKOUT_DATA))
-    if not custom and (assets.loaf_data_link(link) or not (link.exists() or link.is_symlink())):
-        assets.link_docker_project(project, dry_run=False)
+    link_packaged_project(project)
     directory.mkdir(exist_ok=True)
     target = directory / config.CONFIG_NAME
     try:
@@ -728,6 +740,9 @@ def install_python(project: Path) -> None:
     environment = project / ".venv"
     if environment.is_symlink() or (environment.exists() and not (environment / "pyvenv.cfg").is_file()):
         raise SetupError(f"{environment} is not a local Python virtualenv.")
+    if environment.exists() and os.geteuid() != 0 and environment.stat().st_uid != os.geteuid():
+        raise SetupError(f"{environment} belongs to UID {environment.stat().st_uid}, so setup cannot replace it. "
+                         f"Remove it with sudo rm -rf {shlex.quote(str(environment))} and run setup again.")
     python = venv_python(environment)
     rebuild = environment_relocated(environment) or not interpreter_works(python, environment)
     previous = None
@@ -795,11 +810,16 @@ def link_checkout_launcher(project: Path) -> Path:
     return launcher
 
 
-def install(project: Path, *, with_docker_deps: bool = False) -> None:
+def install(project: Path, *, with_docker_deps: bool = False, allow_root: bool = False) -> None:
     if sys.platform != "linux" or not shutil.which("apt-get"):
         raise SetupError("loaf install requires Debian with APT (native or WSL2).")
     if not (project / PYTHON_PACKAGE_DIR / "pyproject.toml").is_file():
         raise SetupError(f"No Python package found in {project}.")
+    owner = project.stat().st_uid
+    if os.geteuid() == 0 and owner != 0 and not allow_root:
+        # Root would own the virtualenv and caches and link them to its own Python.
+        raise SetupError(f"{project} belongs to UID {owner}. Run setup as that user, which uses sudo for the APT "
+                         "steps, or add --allow-root to prepare the checkout as root anyway.")
     if with_docker_deps:
         prepare_docker(project)
     print("Prepare the Python environment and wheel cache…", file=sys.stderr, flush=True)

@@ -83,7 +83,10 @@ def containers(namespace: str) -> list[Resource]:
     found = []
     for record in inspect("container", ids):
         name, labels, state = record["Name"].removeprefix("/"), record["Config"]["Labels"] or {}, record["State"]
-        service = labels.get(COMPOSE_SERVICE_LABEL) if labels.get(transfer.COMPOSE_PROJECT_LABEL) == namespace else None
+        # Chat containers inherit the Compose labels of the provisioner's image, so its own labels decide first.
+        terminal = labels.get(transfer.WORKSPACE_PROJECT_LABEL) == namespace or TERMINAL_HELPER_LABEL in labels
+        service = (labels.get(COMPOSE_SERVICE_LABEL)
+                   if not terminal and labels.get(transfer.COMPOSE_PROJECT_LABEL) == namespace else None)
         compose = service is not None
         if not compose:
             if not name.startswith(prefix):

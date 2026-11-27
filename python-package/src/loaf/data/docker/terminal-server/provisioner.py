@@ -222,6 +222,9 @@ class Workspace:
     used: float = 0
     # The working directory as last applied to this container.
     directory: str | None = None
+    # The Open WebUI account and chat of the last lease; unknown for a container recovered after a restart.
+    user: str | None = None
+    session: str = ""
 
     def url(self, path, query=None):
         return URL.build(scheme="http", host=self.address, port=PORT, path=path, query=query)
@@ -537,6 +540,7 @@ class Workspaces:
                     # A chat starts in its own folder unless the account selected another one.
                     self.directories.setdefault(key, CHAT_HOME)
             workspace.active += 1
+            workspace.user, workspace.session = user, session
         ready = False
         try:
             deadline = monotonic() + 30
@@ -568,10 +572,35 @@ class Workspaces:
     async def idle(self, workspace):
         if workspace.active or monotonic() - workspace.used < self.policy.idle_seconds:
             return False
+        await self.close_terminals(workspace)
         processes = await self.docker.call("GET", f"/containers/{workspace.container}/top",
                                            params={"ps_args": "-eo pid"}, missing=True)
         # The init process and Open Terminal itself are the only idle processes.
         return not (processes and len(processes["Processes"] or []) > 2)
+
+    async def close_terminals(self, workspace):
+        """Close the account's terminal shells in an unleased workspace.
+
+        Open Terminal keeps a shell running after its browser tab disconnects. A terminal stream holds a
+        lease while it is attached, so without one every listed shell is disconnected. Open Terminal lists
+        only the shells of the account and chat in the request headers.
+        """
+        if workspace.user is None:
+            return
+        headers = {"X-User-Id": workspace.user, "Authorization": "Bearer " + workspace.credential}
+        if workspace.session:
+            headers["X-Session-Id"] = workspace.session
+        options = {"headers": headers, "timeout": ClientTimeout(total=5), "allow_redirects": False}
+        try:
+            async with self.client.get(workspace.url("/api/terminals"), **options) as response:
+                shells = await response.json() if response.status == 200 else []
+            for shell in shells if isinstance(shells, list) else ():
+                terminal = shell.get("id") if isinstance(shell, dict) else None
+                if isinstance(terminal, str) and re.fullmatch(r"[0-9A-Za-z-]{1,64}", terminal):
+                    async with self.client.delete(workspace.url(f"/api/terminals/{terminal}"), **options):
+                        pass
+        except (ClientError, TimeoutError, ValueError):
+            LOG.warning("Could not close the disconnected terminals of an idle workspace")
 
     async def reclaim_idle(self, *, one=False):
         # The caller holds the lock so a container cannot be leased while it stops.

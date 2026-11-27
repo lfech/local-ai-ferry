@@ -149,8 +149,10 @@ large enough for the executable. [Gitea Actions setup](https://docs.gitea.com/us
 loaf package binary debian
 ```
 
-`binary` builds or updates `dist/loaf` and `dist/LICENSE.txt` on a connected
-Linux amd64 machine. It fetches the pinned standalone Python runtime.
+`binary` builds or updates `dist/loaf` and `dist/LICENSE.txt` on a Linux
+amd64 machine. It fetches the pinned standalone Python runtime and its license
+sources, checks their SHA-256 hashes and keeps them in `install-cache/python/`,
+so later builds work offline. The `installers` backup type carries them.
 Source checkout backups run this build automatically.
 
 `debian` builds `dist/loaf_<version>_all.deb` with

@@ -21,8 +21,8 @@ contains weights and manifests, including newer Ollama catalog entries under
 `models/manifests-v2/`. The volume's `config/` contains exported text Modelfiles.
 The `loaf-open-webui` volume mounts at `/app/backend/data` for accounts, chats,
 settings and caches. Stopping containers preserves both volumes.
-Versioned deployments use separate volume names such as `loaf-v1-2-3-ollama`
-with the same mount paths. [Versioned deployments](launcher.md#run-a-versioned-deployment) ·
+Separate namespaces use separate volume names such as `loaf-v1-2-3-ollama`
+with the same mount paths. [Separate namespaces](launcher.md#run-a-separate-namespace) ·
 [Docker resources](launcher.md#list-and-remove-docker-resources)
 
 ## Project configuration
@@ -49,10 +49,11 @@ starts. `loaf status` lists the settings files in use.
 
 Standalone setup writes a `config/config.ini` with every key commented out,
 so system settings and later packaged defaults stay in effect. When
-`/etc/loaf` has settings and the project uses the same deployment version,
-both operate the same Docker containers and volumes. `setup` and `status`
-warn about this. Set `[launcher] version` in the project for a separate
-deployment. Tests replace the system directory with `LOAF_SYSTEM_CONFIG_DIR`.
+`/etc/loaf` has settings and the project uses the same namespace, both
+operate the same Docker containers and volumes. `setup` and `status` warn
+about this. Set `[launcher] namespace` in the project for a separate
+deployment. A `[launcher] version` line from an earlier release fails with a
+pointer to its new name. Tests replace the system directory with `LOAF_SYSTEM_CONFIG_DIR`.
 
 In a linked workspace with no local `config/`, copy the defaults to customize them.
 
@@ -67,7 +68,7 @@ and an external backup directory.
 
 ```ini
 [launcher]
-version = v2
+namespace = v2
 models_file = model-examples/models.8gb.ini
 wait_timeout = 600
 
@@ -79,6 +80,7 @@ backup_dir = /media/transfer
 ```
 
 Use bare values and put comments on separate lines. Paths are literal.
+`wait_timeout = 0` waits for readiness without a limit.
 For a relative `models_file`, `loaf` checks the override directory and then the
 packaged configuration directory. Leave it blank to select `models.ini`.
 Relative `backup_dir` paths start at the project directory. Relative CLI paths
@@ -90,11 +92,13 @@ value. Archives from earlier releases need the launcher in their backup
 folder. [Archive contents](transfer.md#archive-contents)
 
 Use `[terminal_server]` for the optional Open Terminal service. Its
-`secret_file` path is relative to the project directory. Set
-`include_in_backup = true` to include the `terminal` type in backups
-without type names. It holds the user volume with every account's folder and
-the bearer key. Backup includes the matching local terminal image when
-available. Use `loaf backup --no-terminal-server` to skip that image.
+`secret_file` path is relative to the project directory. With the terminal
+server enabled, backups without type names include the `terminal` type while
+`include_in_backup` is true, the default. It holds the user volume with every
+account's folder and the bearer key, which the WebUI's saved connection
+needs. Backup includes the matching local terminal image when available. Use
+`loaf backup --no-terminal-server` to leave out the image, the user volume
+and the key; restoring that backup disables the terminal server.
 Set `[images] terminal_server_image` to override its
 base image. Set `[terminal_server] apt_source_file` for the terminal image
 build and for `apt` in chat containers. Set `apt_repository_dir` for a
@@ -142,7 +146,7 @@ host that needs these features offline.
 - CLI options override the matching INI values. Use `--no-export` and
   `--no-import` to cancel configured transfer steps for one run. Backup
   still checks saved Modelfiles with either `export_models` setting. Use
-  `--version=` to select the unversioned deployment.
+  `--namespace=` to select the default namespace `loaf`.
   [Modelfile checks](transfer.md#check-saved-modelfiles-during-backup)
 - The four existing Compose variables `OLLAMA_IMAGE`, `OPEN_WEBUI_IMAGE`,
   `OLLAMA_CONTEXT_LENGTH`, and `OLLAMA_STARTUP_TIMEOUT` still work. Compose
@@ -166,9 +170,9 @@ host that needs these features offline.
 The image settings select the base images used by `loaf build` and
 `loaf upgrade`. Use fixed tags or digests for reproducible builds. Run the
 desired serving command after changing runtime settings so Compose can
-recreate the affected containers. Changing the default `version` selects
+recreate the affected containers. Changing the default `namespace` selects
 different images and volumes. Stop a previous deployment by selecting its
-version explicitly. Deployments can use separate host ports while sharing the
+namespace explicitly. Deployments can use separate host ports while sharing the
 same internal WebUI port.
 
 `context_length` sets the Ollama server's default. A saved model parameter
@@ -176,7 +180,8 @@ same internal WebUI port.
 uses more memory. `startup_timeout` bounds the Ollama API wait before
 import. `wait_timeout` covers Compose readiness, including model imports.
 To apply changed Modelfiles, run `loaf stop` and then start the desired serving
-mode. Use `loaf stop -n` if you need to retain the stopped containers' logs.
+mode. Use `loaf stop --no-remove-containers` if you need to retain the stopped
+containers' logs.
 
 The archive includes the project's `config.ini`. Backups made from a
 checkout also include its source files and Git history. Keep credentials in
@@ -219,7 +224,7 @@ Ollama model rejects a follow-up after tool results.
 `WEBUI_AUTH=false` when Compose creates the WebUI container.
 
 Choose the authentication mode before creating users in a fresh WebUI volume.
-A separate versioned deployment gives you a fresh volume for single-user mode.
+A separate namespace gives you a fresh volume for single-user mode.
 Anyone who can reach an instance without sign-in can use it. Keep the default
 loopback binding and check the Docker version's loopback behavior before using
 this mode on a connected host. [Open WebUI single-user mode](https://docs.openwebui.com/getting-started/quick-start/#single-user-mode-no-login) ·

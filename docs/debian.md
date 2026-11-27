@@ -207,5 +207,5 @@ another computer, use [Debian backup](transfer.md#debian-backup).
 ```
 
 The final command removes service containers. Collect their logs first or use
-`./loaf stop -n` to keep them. Start again with `./loaf offline`.
+`./loaf stop --no-remove-containers` to keep them. Start again with `./loaf offline`.
 Data remains in the volumes. [Stop options](launcher.md#stop-and-remove-containers)

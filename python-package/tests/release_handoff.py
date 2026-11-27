@@ -148,7 +148,7 @@ def rehearse(executable, root, compression, retain, *, chat_only, ollama_image, 
 
     launch("setup")
     settings = (
-        f"[launcher]\nversion = {version}\nwait_timeout = 120\n"
+        f"[launcher]\nnamespace = {version}\nwait_timeout = 120\n"
         f"[images]\nollama_image = {ollama_image}\nwebui_image = {WEBUI_IMAGE}\n"
         f"[webui]\nport = {port}\n[ollama]\ncontext_length = 1024\n"
     )
@@ -205,7 +205,7 @@ def rehearse(executable, root, compression, retain, *, chat_only, ollama_image, 
             "docker", "compose", "--project-name", namespace, "--file", str(data / "compose.yml"),
             "--file", str(data / "compose.cpu.yml"), "--profile", "*",
             "down", "--volumes", "--timeout", "5",
-        ], cwd=source, env={**env, "LOAF_VERSION": version}, check=False, timeout=60)
+        ], cwd=source, env={**env, "LOAF_NAMESPACE": version}, check=False, timeout=60)
         subprocess.run(["docker", "image", "rm", *(
             f"loaf/{image}:{version}" for image in ("ollama-online", "ollama-offline", "open-webui")
         )], check=False, capture_output=True, timeout=60)

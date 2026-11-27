@@ -5,7 +5,7 @@ name: loaf
 
 x-ollama-gpu: &ollama-gpu
   scale: 1
-  image: loaf/ollama-offline:${LOAF_VERSION:-latest}
+  image: loaf/ollama-offline:${LOAF_NAMESPACE:-latest}
   pull_policy: never
   volumes:
     - ollama:/ollama
@@ -34,7 +34,7 @@ x-ollama-gpu: &ollama-gpu
 
 x-webui: &webui
   scale: 1
-  image: loaf/open-webui:${LOAF_VERSION:-latest}
+  image: loaf/open-webui:${LOAF_NAMESPACE:-latest}
   pull_policy: never
   volumes:
     - open-webui:/app/backend/data
@@ -57,7 +57,7 @@ services:
   ollama-online:
     scale: 1
     profiles: [download]
-    image: loaf/ollama-online:${LOAF_VERSION:-latest}
+    image: loaf/ollama-online:${LOAF_NAMESPACE:-latest}
     # Consume the locally built image; pulling base images is an explicit build.
     pull_policy: never
     build:
@@ -128,7 +128,7 @@ services:
   terminal-server:
     scale: 1
     profiles: [terminal]
-    image: loaf/open-terminal:${LOAF_VERSION:-latest}
+    image: loaf/open-terminal:${LOAF_NAMESPACE:-latest}
     pull_policy: never
     build:
       context: ${LOAF_DOCKER_DIR:-./docker}/terminal-server
@@ -177,10 +177,10 @@ secrets:
 # --- Durable data: these literal names are also used by backup/restore commands ---
 volumes:
   ollama:
-    # The deployment namespace, loaf or loaf-VERSION, starts each literal name.
-    name: "loaf${LOAF_VERSION:+-}${LOAF_VERSION:-}-ollama"
+    # The deployment namespace, loaf or loaf-NAME, starts each literal name.
+    name: "loaf${LOAF_NAMESPACE:+-}${LOAF_NAMESPACE:-}-ollama"
   open-webui:
-    name: "loaf${LOAF_VERSION:+-}${LOAF_VERSION:-}-open-webui"
+    name: "loaf${LOAF_NAMESPACE:+-}${LOAF_NAMESPACE:-}-open-webui"
 
 # --- Routing: downloader access and browser publishing are separate from Ollama ---
 networks:

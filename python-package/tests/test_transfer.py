@@ -132,6 +132,8 @@ class TransferTests(unittest.TestCase):
         self.webui = tar_payload("webui", None, **{"webui/webui.db": b"accounts and chats"})
         self.definitions = b""
         self.volumes = {}
+        # Volumes whose emptiness check finds data.
+        self.populated = set()
 
     def git(self, *arguments):
         return subprocess.check_output(["git", *arguments], cwd=self.project)
@@ -161,6 +163,9 @@ class TransferTests(unittest.TestCase):
             # Like Docker, fail when a named volume is missing.
             if not set(command[3:]) <= set(self.volumes):
                 return subprocess.CompletedProcess(command, 1, stdout=output)
+        elif command[1:3] == ["run", "--rm"] and "find" in command:
+            mount = next(part for part in command if part.startswith("type=volume,source="))
+            output = b"/volume/data\n" if mount.split(",")[1].removeprefix("source=") in self.populated else b""
         elif command[1:3] == ["volume", "create"]:
             labels = dict(command[index + 1].split("=", 1) for index, part in enumerate(command) if part == "--label")
             driver = command[command.index("--driver") + 1] if "--driver" in command else "local"
@@ -393,19 +398,166 @@ class TransferTests(unittest.TestCase):
     def test_versioned_backups_restore_only_with_the_matching_version(self):
         namespace = "loaf-v2"
         self.images = image_payload(transfer.image_names(namespace))
-        self.assertEqual(self.invoke("backup", "config", "images", "--version", "v2"), 0, self.progress.getvalue())
+        self.assertEqual(self.invoke("backup", "config", "images", "--namespace", "v2"), 0, self.progress.getvalue())
         bundle, = self.backup_dir.iterdir()
         self.assertEqual(bundle.name, f"20261120-1500_v2_{transfer.BUNDLE_NAME}")
         self.assertEqual(self.manifest(next(bundle.glob("*.tar.gz")))["deployment"], "v2")
-        self.assertEqual(self.invoke("restore", "--version", "v3", project=self.destination), 1)
-        self.assertIn(f"No backup found in {self.backup_dir}. It holds backups of other deployment versions. "
+        self.assertEqual(self.invoke("restore", "--namespace", "v3", project=self.destination), 1)
+        self.assertIn(f"No backup found in {self.backup_dir}. It holds backups of other namespaces. "
                       f"Select one with --archive, for example --archive {shlex.quote(str(bundle))}.",
                       self.progress.getvalue())
-        self.assertEqual(self.invoke("restore", "--archive", str(bundle), "--version", "v3", custom=False,
+        self.assertEqual(self.invoke("restore", "--archive", str(bundle), "--namespace", "v3", custom=False,
                                      project=self.destination), 1)
-        self.assertIn("Backup version is v2", self.progress.getvalue())
-        self.assertEqual(self.invoke("restore", "--version", "v2", project=self.destination), 0, self.progress.getvalue())
-        self.assertEqual(config.load(self.destination / "config").version, "v2")
+        self.assertIn("The backup is of namespace loaf-v2", self.progress.getvalue())
+        self.assertEqual(self.invoke("restore", "--namespace", "v2", project=self.destination), 0, self.progress.getvalue())
+        self.assertEqual(config.load(self.destination / "config").namespace_name, "v2")
+
+    def test_config_links_stay_links_and_verify_runs_the_restore_checks(self):
+        examples = self.project / "config/model-examples"
+        examples.mkdir()
+        (examples / "models.8gb.ini").write_text("[models.chat]\nmodel = hf.co/a/b:Q4_K_M\n", encoding="utf-8")
+        (self.project / "config/models.ini").symlink_to("model-examples/models.8gb.ini")
+        self.assertEqual(self.invoke("backup", "config"), 0, self.progress.getvalue())
+        with tarfile.open(fileobj=io.BytesIO(read_members(self.archive)["config.tar"])) as settings:
+            link = settings.getmember("config/models.ini")
+            self.assertEqual((link.issym(), link.linkname), (True, "model-examples/models.8gb.ini"))
+        # Verify streams every member through restore's checks without a temporary copy.
+        with patch("loaf.transfer.TemporaryDirectory", side_effect=AssertionError("verify staged a member")):
+            self.assertEqual(self.invoke("backup", "--verify", "--archive", str(self.bundle), custom=False), 0,
+                             self.progress.getvalue())
+        self.assertIn("Verified SHA-256 hashes and contents", self.output.getvalue())
+        (self.destination / "config").mkdir(parents=True)
+        (self.destination / "config/models.ini").symlink_to("previous.ini")
+        self.assertEqual(self.invoke("restore", "--archive", str(self.bundle), custom=False, project=self.destination),
+                         0, self.progress.getvalue())
+        restored = self.destination / "config/models.ini"
+        self.assertEqual(os.readlink(restored), "model-examples/models.8gb.ini")
+        self.assertEqual(restored.read_text(encoding="utf-8"), "[models.chat]\nmodel = hf.co/a/b:Q4_K_M\n")
+        # A deployment without a Compose file gets the packaged project, as standalone setup links it.
+        self.assertTrue((self.destination / assets.DOCKER_PROJECT).is_symlink())
+
+    def test_links_that_leave_their_backup_scope_are_refused(self):
+        outside = self.root / "outside.ini"
+        outside.write_text("[webui]\n", encoding="utf-8")
+        for name, target in (("absolute.ini", outside), ("parent.ini", Path("../../outside.ini")),
+                             ("unarchived.ini", Path("notes.txt"))):
+            with self.subTest(name=name):
+                (self.project / "config/notes.txt").write_text("not a setting\n", encoding="utf-8")
+                link = self.project / "config" / name
+                link.symlink_to(target)
+                self.assertEqual(self.invoke("backup", "config"), 1)
+                self.assertIn(f"{link} links to {target}", self.progress.getvalue())
+                link.unlink()
+        self.assertFalse(self.backup_dir.exists() and list(self.backup_dir.iterdir()))
+        (self.project / "docs/escape.md").symlink_to("../../outside.ini")
+        self.git("add", "docs/escape.md")
+        self.assertEqual(self.invoke("backup", "source"), 1)
+        self.assertIn("outside the checkout", self.progress.getvalue())
+        # Restore refuses the same links in an archive written elsewhere.
+        for linkname in ("../outside.ini", "/etc/hostname", "missing.ini"):
+            with self.subTest(linkname=linkname):
+                payload = io.BytesIO()
+                with tarfile.open(fileobj=payload, mode="w") as archive:
+                    member = tarfile.TarInfo("config/models.ini")
+                    member.type, member.linkname = tarfile.SYMTYPE, linkname
+                    archive.addfile(member)
+                with self.assertRaisesRegex(transfer.TransferError, "Invalid link in config.tar"):
+                    transfer.check_files(io.BytesIO(payload.getvalue()), "config", "config.tar")
+
+    def test_restore_checks_target_volumes_before_the_first_change(self):
+        self.add_terminal_volume()
+        self.assertEqual(self.invoke("backup", "config", "terminal"), 0, self.progress.getvalue())
+        self.received.clear()
+        self.volumes = {"loaf-open-webui": {"Name": "loaf-open-webui", "Labels": {}, "Driver": "local", "Options": None}}
+        self.populated = {"loaf-open-webui"}
+        self.assertEqual(self.invoke("restore", "--archive", str(self.bundle), custom=False, project=self.destination), 1)
+        self.assertIn("Restore needs a new or empty loaf-open-webui volume", self.progress.getvalue())
+        self.assertFalse((self.destination / "config/config.ini").exists())
+        self.assertEqual(self.received, [])
+        # The user volume's ownership labels are checked before any change, too.
+        users = transfer.terminal_volume(config.DEPLOYMENT)
+        self.populated = set()
+        self.volumes[users] = {"Name": users, "Labels": {"other": "owner"}, "Driver": "local", "Options": None}
+        self.assertEqual(self.invoke("restore", "--archive", str(self.bundle), custom=False, project=self.destination), 1)
+        self.assertIn(f"Terminal volume {users} does not match", self.progress.getvalue())
+        self.assertFalse((self.destination / "config/config.ini").exists())
+        self.assertEqual(self.received, [])
+
+    def test_no_terminal_server_backup_restores_without_the_terminal(self):
+        self.add_terminal_volume()
+        self.settings.write_text("# Local settings\n[terminal_server]\n# The terminal is on here.\nenabled = true\n",
+                                 encoding="utf-8")
+        self.terminal_image = transfer.image_names(config.DEPLOYMENT, include_terminal=True)[-1]
+        # By default the terminal type, with the key, follows an enabled terminal server.
+        self.assertEqual(self.invoke("backup", "config", "volumes"), 0, self.progress.getvalue())
+        self.assertIn("terminal", [item["type"] for item in self.manifest()["items"]])
+        shutil.rmtree(self.backup_dir)
+        self.assertEqual(self.invoke("backup", "--no-terminal-server"), 0, self.progress.getvalue())
+        manifest = self.manifest()
+        self.assertIs(manifest["skip_terminal_server"], True)
+        self.assertNotIn("terminal", [item["type"] for item in manifest["items"]])
+        images = next(item for item in manifest["items"] if item["type"] == "images")["images"]
+        self.assertNotIn(self.terminal_image, images)
+        self.assertNotIn(transfer.TERMINAL_KEY, read_members(self.archive))
+
+        self.volumes.clear()
+        self.docker_calls.clear()
+        self.assertEqual(self.invoke("restore", "--archive", str(self.bundle), custom=False, project=self.destination),
+                         0, self.progress.getvalue())
+        restored = (self.destination / "config/config.ini").read_text(encoding="utf-8")
+        self.assertEqual(restored, "# Local settings\n[terminal_server]\n# The terminal is on here.\nenabled = false\n")
+        drop = [call for call in self.docker_calls if transfer.DROP_TERMINAL_CONNECTION in call]
+        self.assertEqual(len(drop), 1)
+        self.assertIn("type=volume,source=loaf-open-webui,target=/app/backend/data,volume-nocopy", drop[0])
+        self.assertIn("--network", drop[0])
+        self.assertIn("The restored settings disable it.", self.output.getvalue())
+        self.assertIn("Next: ", self.output.getvalue())
+        self.assertTrue(self.output.getvalue().rstrip().endswith("offline"))
+
+    def test_restore_edits_single_settings_lines_and_migrates_renamed_ones(self):
+        self.settings.write_text("# Keep this comment.\n[webui]\n# Port comment\nport = 8818\n", encoding="utf-8")
+        self.images = image_payload(transfer.image_names("loaf-v2"))
+        self.assertEqual(self.invoke("backup", "config", "--namespace", "v2"), 0, self.progress.getvalue())
+        self.assertEqual(self.invoke("restore", "--namespace", "v2", project=self.destination), 0, self.progress.getvalue())
+        self.assertEqual((self.destination / "config/config.ini").read_text(encoding="utf-8"),
+                         "# Keep this comment.\n[webui]\n# Port comment\nport = 8818\n\n[launcher]\nnamespace = v2\n")
+        # Backups from before the rename carry [launcher] version.
+        recovered = self.root / "recovered"
+        recovered.mkdir()
+        (recovered / "config.ini").write_text("[launcher]\n# Name\nversion = v2\n", encoding="utf-8")
+        settings = transfer.stage_configuration(recovered, (), self.destination / "config", "v2")
+        self.assertEqual(settings.namespace_name, "v2")
+        self.assertEqual((recovered / "config.ini").read_text(encoding="utf-8"), "[launcher]\n# Name\nnamespace = v2\n")
+
+    def test_dry_runs_report_the_errors_of_a_real_run(self):
+        self.assertEqual(self.invoke("backup", "config"), 0, self.progress.getvalue())
+        self.assertEqual(self.invoke("restore", "terminal", "--dry-run", "--archive", str(self.bundle), custom=False,
+                                     project=self.destination), 1)
+        self.assertIn("does not contain webui, terminal", self.progress.getvalue())
+        self.destination.mkdir()
+        self.assertEqual(self.invoke("backup", "source", "--dry-run", project=self.destination), 1)
+        self.assertIn("The source type needs a Git checkout", self.progress.getvalue())
+        self.assertEqual(self.invoke("restore", "--dry-run", custom=False, project=self.root / "empty"), 1)
+        self.assertIn("No backup found", self.progress.getvalue())
+
+    def test_restore_without_the_terminal_key_suggests_setup(self):
+        self.settings.write_text("[terminal_server]\nenabled = true\n", encoding="utf-8")
+        self.assertEqual(self.invoke("backup", "config"), 0, self.progress.getvalue())
+        self.assertEqual(self.invoke("restore", "--archive", str(self.bundle), custom=False, project=self.destination),
+                         0, self.progress.getvalue())
+        next_line, = [line for line in self.output.getvalue().splitlines() if line.startswith("Next: ")]
+        self.assertTrue(next_line.endswith(" setup"), next_line)
+
+    def test_installers_carry_the_cached_python_runtime(self):
+        runtime = self.project / setup.PYTHON_RUNTIME_DIR / "cpython-runtime.tar.gz"
+        runtime.parent.mkdir(parents=True)
+        runtime.write_bytes(b"checked runtime download")
+        (runtime.parent / ".loaf-download-partial").write_bytes(b"partial")
+        self.assertEqual(self.invoke("backup", "installers"), 0, self.progress.getvalue())
+        with tarfile.open(fileobj=io.BytesIO(read_members(self.archive)["installers.tar"])) as installers:
+            names = installers.getnames()
+        self.assertIn(runtime.relative_to(self.project).as_posix(), names)
+        self.assertFalse([name for name in names if ".loaf-download-" in name])
 
     def test_changed_old_or_newer_archives_fail_before_any_change(self):
         self.assertEqual(self.invoke("backup", "project", "images"), 0, self.progress.getvalue())
@@ -583,7 +735,7 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(key.read_bytes(), KEY)
 
     def test_setup_in_a_versioned_backup_folder_names_the_archive_to_restore(self):
-        self.assertEqual(self.invoke("backup", "config", "--version", "v2"), 0, self.progress.getvalue())
+        self.assertEqual(self.invoke("backup", "config", "--namespace", "v2"), 0, self.progress.getvalue())
         self.bundle, = self.backup_dir.iterdir()
         folder, _ = self.copied_bundle("versioned backup")
         moved = folder / "backup" / self.bundle.name
@@ -599,7 +751,7 @@ class TransferTests(unittest.TestCase):
             self.assertEqual(self.invoke("restore", "--archive", str(moved), custom=False, project=None), 0,
                              self.progress.getvalue())
         self.assertIn("Next: ./loaf offline\n", self.output.getvalue())
-        self.assertEqual(config.load(folder / "config").version, "v2")
+        self.assertEqual(config.load(folder / "config").namespace_name, "v2")
 
     def test_restore_inside_a_backup_folder_restores_into_it_or_changes_nothing(self):
         self.assertEqual(self.invoke("backup", "project"), 0, self.progress.getvalue())
@@ -1031,7 +1183,12 @@ class ArchiveValidationTests(unittest.TestCase):
             transfer.validate_volume_payload(self.path, volumes)
 
     def test_archive_members_must_match_the_manifest(self):
-        payload = b"settings"
+        settings = io.BytesIO()
+        with tarfile.open(fileobj=settings, mode="w") as config_tar:
+            entry = tarfile.TarInfo("config/config.ini")
+            entry.size = len(b"[webui]\n")
+            config_tar.addfile(entry, io.BytesIO(b"[webui]\n"))
+        payload = settings.getvalue()
         member = {"path": "config.tar", "size": len(payload), "sha256": sha256(payload).hexdigest()}
         manifest = {"format": transfer.ARCHIVE_FORMAT, "version": transfer.ARCHIVE_VERSION, "deployment": "",
                     "items": [{"type": "config", "members": [member]}]}
@@ -1043,7 +1200,7 @@ class ArchiveValidationTests(unittest.TestCase):
             ("duplicate member", [(transfer.MANIFEST, encoded), ("config.tar", payload), ("config.tar", payload)],
              "Unexpected member"),
             ("missing member", [(transfer.MANIFEST, encoded)], "is missing config.tar"),
-            ("changed member", [(transfer.MANIFEST, encoded), ("config.tar", b"changed!")], "verification failed"),
+            ("changed member", [(transfer.MANIFEST, encoded), ("config.tar", payload[:-1] + b"!")], "verification failed"),
         ):
             with self.subTest(label):
                 write_archive(archive, members)

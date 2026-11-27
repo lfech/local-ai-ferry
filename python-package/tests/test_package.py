@@ -87,7 +87,8 @@ class PackageTests(unittest.TestCase):
     def test_every_workflow_defaults_to_current_directory(self):
         with tempfile.TemporaryDirectory(prefix='loaf project with spaces ') as folder:
             root = self.project(folder)
-            for mode in (*cli.MODES, *cli.TRANSFER_MODES):
+            # Restore previews need a backup; without one they fail like a real restore.
+            for mode in (*cli.MODES, "backup"):
                 with self.subTest(mode=mode):
                     result = self.invoke(folder, mode, '--dry-run')
                     self.assertEqual(result.returncode, 0, result.stderr)
@@ -95,6 +96,9 @@ class PackageTests(unittest.TestCase):
                     self.assertIn(str(root.resolve()), output)
                     if mode == 'download':
                         self.assertIn('hf.co/test/cwd-selected:Q4_K_M', output)
+            result = self.invoke(folder, 'restore', '--dry-run')
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn(f'No backup found in {root.resolve() / "backup"}'.encode(), result.stderr)
             self.assertFalse((root/'.run.lock').exists())
 
     def test_verbose_dry_run_prints_copyable_compose_commands(self):
@@ -104,7 +108,7 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             commands = result.stdout.splitlines()
             self.assertEqual(len(commands), 3)
-            self.assertTrue(all(line.startswith(b'+ ') and b'LOAF_VERSION' in line for line in commands))
+            self.assertTrue(all(line.startswith(b'+ ') and b'LOAF_NAMESPACE' in line for line in commands))
             self.assertIn(b'docker', commands[0])
             self.assertIn(b'--no-build', commands[-1])
             self.assertFalse((root / '.run.lock').exists())

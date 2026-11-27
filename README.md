@@ -102,10 +102,10 @@ Once the test succeeds, create the transfer archive.
 ```
 
 Backup stops the project's services and saves the archive in `backup/` by
-default. Backup includes the locally available Open Terminal image. Use
-`loaf backup --no-terminal-server` to skip the image. Set
-`[terminal_server] include_in_backup = true` to include terminal user volumes
-and the bearer key.
+default. With the terminal server enabled, it includes the locally available
+Open Terminal image, the terminal user volume and the bearer key that Open
+WebUI's saved connection needs. Use `loaf backup --no-terminal-server` to
+leave them out; the restored deployment then starts without a terminal.
 Run `./loaf offline` to resume serving, adding `--cpu` on a CPU host.
 [Backup and recovery](docs/transfer.md)
 
@@ -135,11 +135,11 @@ when starting from a prepared archive.
 | `integration` | Print a systemd unit, Continue YAML, or Tether installation instructions. [Host integrations](docs/installation.md#host-integrations) |
 | `build` / `upgrade` | Build the local images. Upgrade refreshes upstream base images first. |
 | `package` | Build the standalone executable (`binary`) or the Debian package (`debian`) from the source checkout into `dist/`. [Local builds](docs/releases.md#build-and-check-locally) |
-| `clean` | Remove temporary files and the runtime cache. Add `--full` to clear generated installation files too. [Cleanup](docs/launcher.md#clean-generated-files) |
+| `clean` | Remove temporary files and the runtime cache. Add `--full` to clear generated installation files too; it asks before removing the installer cache. [Cleanup](docs/launcher.md#clean-generated-files) |
 | `download` | Download selected models using the downloader. |
 | `online` / `offline` | Start Ollama and WebUI with the selected network profile. Add `--cpu` for CPU inference. |
 | `backup` / `restore` | Select any of `source`, `config`, `installers`, `images`, `models`, `webui` and `terminal`, or the aliases `project` and `volumes`. `models` alone transfers the model store. [Archive types](docs/transfer.md#select-archive-types) |
-| `backup --verify` | Check the archive members and the bundled launcher, list the types, and report saved image platforms without Docker. |
+| `backup --verify` | Run restore's checks on the archive members and check the bundled launcher, list the types, and report saved image platforms without Docker. |
 | `version` / `docs` | Show the release and installation, or read the bundled guides and manual page. [Bundled guides](docs/launcher.md#read-the-bundled-guides) |
 | `status` / `stop` | Check deployment readiness and list containers, or stop and remove containers across all profiles. [Keep stopped containers](docs/launcher.md#stop-and-remove-containers) |
 | `test` | Run the checkout's test suite. [Verification guide](docs/verification.md) |
@@ -161,8 +161,8 @@ another checkout or a directory with a `docker-project` link. The Python source
 and [deployment data](python-package/src/loaf/data/) live in `python-package/`.
 Run `loaf --help` for the command list and `loaf COMMAND --help` for its flags.
 [Command reference](docs/cli-help.md)
-Use `--version VERSION` to keep a deployment's images, volumes, and backups
-separate. [Versioned deployments](docs/launcher.md#run-a-versioned-deployment)
+Use `--namespace NAME` to keep a deployment's images, volumes, and backups
+separate in the Docker namespace `loaf-NAME`. [Separate namespaces](docs/launcher.md#run-a-separate-namespace)
 
 ## Choose models and context
 
@@ -175,11 +175,13 @@ INI with `--models-file` or select another settings directory with `--config-dir
 
 | Example list | Intended hardware | Choices |
 | --- | --- | --- |
-| [16 GB VRAM](config/model-examples/models.16gb.ini) | GPUs with about 16 GB of VRAM | Qwen3-14B, Coder-14B, Ministral-3B |
-| [8 GB VRAM](config/model-examples/models.8gb.ini) | GPUs with about 8 GB of VRAM | Qwen3-4B, Coder-7B, Ministral-3B |
+| [16 GB VRAM](config/model-examples/models.16gb.ini) | GPUs with about 16 GB of VRAM | Qwen3-14B, Coder-14B |
+| [8 GB VRAM](config/model-examples/models.8gb.ini) | GPUs with about 8 GB of VRAM | Qwen3-4B, Coder-7B |
 | [6 GB VRAM](config/model-examples/models.6gb.ini) | GPUs with about 6 GB of VRAM | Ministral-3B |
 
-Pass the model file to `loaf download`. [Example commands and hardware estimates](docs/models.md)
+Each 8 GB and 16 GB list also comes as `_chat` and `_code` variants with only
+the chat or only the coding model. Pass the model file to `loaf download`.
+[Example commands and hardware estimates](docs/models.md)
 
 **Context matters:** the server defaults to **16384 tokens**. Set `num_ctx=16384`
 explicitly for the Qwen3 examples to override their larger preset. Start with
@@ -199,7 +201,7 @@ Backend startup imports all saved `.model` files. Models and exports persist
 after you remove an entry from the selection file.
 
 Stop the deployment and remove its service containers with `loaf stop`. Use
-`loaf stop -n` to keep the stopped containers and their logs.
+`loaf stop --no-remove-containers` to keep the stopped containers and their logs.
 
 ```bash
 loaf stop
@@ -237,6 +239,7 @@ See [configuration and offline behavior](docs/configuration.md).
 | [Development specification](docs/instructions/development.md) | Pending validation and development work |
 | [Development record](docs/development-record.md) | Dated implementation milestones |
 | [Architecture](docs/instructions/architecture.md) | Launcher, CPU and GPU serving, Compose networks, Open Terminal and transfer design |
+| [Problems](docs/instructions/problems.md) | Problems discovered that are still open. Decisions will be recorded until resolved in [development.md](docs/instructions/development.md) |
 | [Terminal server setup](docs/terminal-server.md) | Optional per-user Open Terminal workspaces, credentials and acceptance checks |
 | [Troubleshooting](docs/troubleshooting.md) | Context errors, GPU access, imports and connection checks |
 | [Verification guide](docs/verification.md) | Unit, Docker and GPU checks, compact images and release handoff |

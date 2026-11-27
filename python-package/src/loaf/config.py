@@ -10,7 +10,7 @@ import re
 
 
 CONFIG_NAME = "config.ini"
-# The default deployment's namespace. A versioned deployment appends -VERSION.
+# The default deployment's namespace. [launcher] namespace = NAME selects the namespace loaf-NAME.
 DEPLOYMENT = "loaf"
 # The system layer between the packaged defaults and a project's config/.
 SYSTEM_CONFIG_DIR = Path("/etc/loaf")
@@ -34,7 +34,7 @@ class ConfigError(ValueError):
 
 @dataclass(frozen=True)
 class Settings:
-    version: str = ""
+    namespace_name: str = ""
     models_file: Path | None = None
     wait_timeout: int = DEFAULT_WAIT_TIMEOUT
     ollama_image: str = "loaf-ollama-cuda13"
@@ -54,7 +54,7 @@ class Settings:
     compression_level: int = DEFAULT_COMPRESSION_LEVEL
     backup_version_min: int = ARCHIVE_VERSION
     terminal_server_enabled: bool = False
-    terminal_server_include_in_backup: bool = False
+    terminal_server_include_in_backup: bool = True
     terminal_server_secret_file: Path = TERMINAL_SECRET
     terminal_server_apt_source_file: Path | None = None
     terminal_server_apt_repository_dir: Path | None = None
@@ -111,24 +111,24 @@ class Settings:
         return f"http://{host}:{self.port}"
 
 
-def namespace(version: str) -> str:
-    """The deployment's Compose project, which starts the names of its containers, networks and volumes."""
-    if not version:
+def namespace(name: str) -> str:
+    """The deployment's Compose project, loaf-NAME, which starts the names of its containers, networks and volumes."""
+    if not name:
         return DEPLOYMENT
-    name = f"{DEPLOYMENT}-{version}"
-    # The version tags the images, so latest would share the default deployment's images.
-    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", version) or version == "latest" or len(name) > 128:
+    full = f"{DEPLOYMENT}-{name}"
+    # The name tags the images, so latest would share the default deployment's images.
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", name) or name == "latest" or len(full) > 128:
         raise ValueError("expected a lowercase Compose name other than latest within Docker's tag length limit "
                          "(e.g. v1-2-3)")
-    return name
+    return full
 
 
-def namespace_version(namespace: str) -> str:
-    """The deployment version in a namespace; empty for the default deployment."""
+def namespace_name(namespace: str) -> str:
+    """The NAME in a namespace loaf-NAME; empty for the default deployment."""
     return "" if namespace == DEPLOYMENT else namespace.removeprefix(f"{DEPLOYMENT}-")
 
 
-def version_value(value: str) -> str:
+def namespace_value(value: str) -> str:
     namespace(value)
     return value
 
@@ -137,6 +137,13 @@ def positive_int(value: str) -> int:
     number = int(value)
     if number < 1:
         raise ValueError("expected a positive integer")
+    return number
+
+
+def wait_timeout_value(value: str) -> int:
+    number = int(value)
+    if number < 0:
+        raise ValueError("expected 0 to wait without a limit or a positive number of seconds")
     return number
 
 
@@ -229,7 +236,7 @@ def apt_source_file_value(value: str) -> Path | None:
 
 SECTIONS = {
     "launcher": {
-        "version": version_value, "models_file": optional_path_value, "wait_timeout": positive_int,
+        "namespace": namespace_value, "models_file": optional_path_value, "wait_timeout": wait_timeout_value,
         "system_config": system_config_value,
     },
     "images": {
@@ -263,6 +270,53 @@ SECTIONS = {
     },
     "tests": dict.fromkeys(TEST_FLAGS, boolean_value),
 }
+# Settings that were renamed, with their current names.
+RENAMED = {("launcher", "version"): "namespace"}
+
+
+SECTION_LINE = re.compile(r"\s*\[(?P<name>[^]]+)\]\s*")
+KEY_LINE = re.compile(r"(?P<comment>[#;]\s*)?(?P<key>[A-Za-z0-9_.-]+)\s*[=:]")
+
+
+def edit_text(text: str, values: dict[tuple[str, str], str]) -> str:
+    """Set settings in config.ini text by changing single lines; comments and all other lines stay.
+
+    A value replaces the key's line in its section, or else the commented default (# key = ...), or else
+    follows the section header; a missing section is appended. Lines of renamed settings get the current name.
+    """
+    lines = text.splitlines(keepends=True)
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+
+    def entries():
+        section = None
+        for index, line in enumerate(lines):
+            if header := SECTION_LINE.fullmatch(line.rstrip("\r\n")):
+                section = header["name"].strip()
+            elif match := KEY_LINE.match(line):
+                yield index, section, match["key"].lower(), bool(match["comment"])
+
+    for (section, old), new in RENAMED.items():
+        for index, found, key, commented in list(entries()):
+            if (found, key, commented) == (section, old, False):
+                lines[index] = new + lines[index][len(old):]
+    for (section, key), value in values.items():
+        if "\n" in value or "\r" in value:
+            raise ValueError(f"[{section}] {key} must be a single line.")
+        matches = [(index, commented) for index, found, name, commented in entries() if (found, name) == (section, key)]
+        target = next((index for index, commented in sorted(matches, key=lambda match: match[1])), None)
+        if target is not None:
+            ending = lines[target][len(lines[target].rstrip("\r\n")):]
+            lines[target] = f"{key} = {value}{ending}"
+            continue
+        header = next((index for index, line in enumerate(lines)
+                       if (match := SECTION_LINE.fullmatch(line.rstrip("\r\n"))) and match["name"].strip() == section),
+                      None)
+        if header is None:
+            lines += [*(["\n"] if lines and lines[-1].strip() else []), f"[{section}]\n", f"{key} = {value}\n"]
+        else:
+            lines.insert(header + 1, f"{key} = {value}\n")
+    return "".join(lines)
 
 
 def load(*directories: Path) -> Settings:
@@ -297,12 +351,12 @@ def layers(defaults: Path, local: Path) -> tuple[Path, ...]:
     return tuple(dict.fromkeys(directory for directory in (defaults, system, local) if directory is not None))
 
 
-def shared_system_deployment(layer_directories: tuple[Path, ...], version: str) -> Path | None:
+def shared_system_deployment(layer_directories: tuple[Path, ...], name: str) -> Path | None:
     """Return the system configuration when this project uses the same Docker namespace as the system deployment."""
     if len(layer_directories) < 3 or not (layer_directories[1] / CONFIG_NAME).is_file():
         return None
     system = load(*layer_directories[:2])
-    return layer_directories[1] if namespace(system.version) == namespace(version) else None
+    return layer_directories[1] if namespace(system.namespace_name) == namespace(name) else None
 
 
 def read_terminal_secret(path: Path) -> bytes:
@@ -339,11 +393,14 @@ def _read_values(path: Path) -> dict:
             try:
                 convert = SECTIONS[section][key]
             except KeyError as exc:
-                raise ConfigError(f"{path}: unknown setting [{section}] {key}.") from exc
+                renamed = RENAMED.get((section, key))
+                hint = f" It is now [{section}] {renamed}." if renamed else ""
+                raise ConfigError(f"{path}: unknown setting [{section}] {key}.{hint}") from exc
             try:
                 if any(character in value for character in ("\n", "\x00")):
                     raise ValueError("expected a single line of text")
-                setting = f"terminal_server_{key}" if section == "terminal_server" else key
+                setting = (f"terminal_server_{key}" if section == "terminal_server"
+                           else "namespace_name" if (section, key) == ("launcher", "namespace") else key)
                 values[setting] = convert(value)
             except ValueError as exc:
                 raise ConfigError(f"{path}: [{section}] {key}: {exc}.") from exc

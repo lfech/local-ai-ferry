@@ -124,7 +124,7 @@ class SettingsLayerTests(unittest.TestCase):
             self.assertIn(f"packaged defaults, {self.system / 'config.ini'}", output.getvalue())
             self.assertIn("same Docker namespace loaf.", errors.getvalue())
             errors.truncate(0)
-            self.assertEqual(cli.main(["--project-dir", str(self.project), "--version", "v2", "status"]), 0)
+            self.assertEqual(cli.main(["--project-dir", str(self.project), "--namespace", "v2", "status"]), 0)
             self.assertNotIn("Warning", errors.getvalue())
         with (
             patch.object(setup, "install"), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as errors,

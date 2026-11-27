@@ -319,13 +319,24 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
         policy = module.Policy("test-project", 1, 256, 2, 5, 1, "local", {})
         docker = AsyncMock()
 
+        closed = []
+
         class HealthyClient:
             @asynccontextmanager
-            async def get(self, *_args, **_kwargs):
+            async def get(self, url, **kwargs):
                 class Response:
                     status = 200
+
+                    async def json(self):
+                        # Open Terminal lists the shells of the account and chat named in the headers.
+                        return [{"id": f"shell-{kwargs['headers']['X-User-Id']}", "pid": 7}]
                 await asyncio.sleep(0)
                 yield Response()
+
+            @asynccontextmanager
+            async def delete(self, url, **kwargs):
+                closed.append((url.path, kwargs["headers"]["X-User-Id"], kwargs["headers"]["Authorization"]))
+                yield None
 
         manager = module.Workspaces(policy, docker, HealthyClient(), "provisioner", "image", None)
         first = module.Workspace("a", "a-net", "127.0.0.1", "key-a")
@@ -353,12 +364,22 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
         # A full slot list stops one idle container; a busy one keeps running.
         self.assertIs(await open_workspace("C"), third)
         manager.park.assert_awaited_once_with(module.account_key("B"), "b")
+        # Idle workspaces close their disconnected shells before the processes are counted.
+        self.assertEqual(closed, [("/api/terminals/shell-A", "A", "Bearer key-a"),
+                                  ("/api/terminals/shell-B", "B", "Bearer key-b")])
         self.assertEqual(list(manager.active.values()), [first, third])
         with self.assertRaises(web.HTTPServiceUnavailable):
             await open_workspace("D")
         await manager.reap_idle()
         manager.park.assert_awaited_with(module.account_key("A"), "a")
         self.assertEqual(list(manager.active.values()), [third])
+        # A container recovered after a restart has no known account and keeps the process count alone.
+        closed.clear()
+        recovered = module.Workspace("r", "r-net", "127.0.0.1", "key-r")
+        recovered.used = monotonic() - 6
+        docker.call.side_effect = [{"Processes": [["1"], ["2"]]}]
+        self.assertTrue(await manager.idle(recovered))
+        self.assertEqual(closed, [])
 
     def test_container_runs_as_root_with_only_the_account_folder(self):
         module = self.module

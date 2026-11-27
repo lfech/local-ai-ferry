@@ -93,7 +93,7 @@ class CleanupTests(unittest.TestCase):
         tracked = self.put(self.project / "python-package/src/local_ai_ferry.egg-info/note")
         self.git("add", "-f", str(tracked.relative_to(self.project)))
         before = self.git("status", "--porcelain")
-        self.assertEqual(self.invoke("--full")[0], 0)
+        self.assertEqual(self.invoke("--full", "--yes")[0], 0)
         for path in (key, custom_key, source, backup, temp_backup, tracked):
             self.assertEqual(path.read_bytes(), b"fixture")
         self.assertEqual(dist_backup.read_bytes(), custom_archive)
@@ -101,6 +101,25 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual(self.git("status", "--porcelain"), before)
         for path in (".venv", "install-cache", "python-package/build", "docker-project"):
             self.assertFalse(os.path.lexists(self.project / path), path)
+
+    def test_full_asks_before_removing_installers_an_offline_host_cannot_download(self):
+        cached = self.put(self.project / "install-cache/wheels/setuptools.whl")
+        self.put(self.project / ".venv/pyvenv.cfg")
+        # Without a terminal and without --yes, the installers stay.
+        with patch("sys.stdin.isatty", return_value=False):
+            status, output = self.invoke("--full")
+        self.assertEqual(status, 0, output)
+        self.assertIn("Add --yes to remove it", output)
+        self.assertTrue(cached.is_file())
+        self.assertFalse((self.project / ".venv").exists())
+        status, output = self.invoke("--full", "--dry-run")
+        self.assertIn("Would ask before removing", output)
+        for answer, kept in (("n", True), ("y", False)):
+            with self.subTest(answer=answer), patch("sys.stdin.isatty", return_value=True), \
+                    patch("builtins.input", return_value=answer) as asked:
+                self.assertEqual(self.invoke("--full")[0], 0)
+            self.assertIn("cannot download its installers again", asked.call_args.args[0])
+            self.assertEqual(cached.is_file(), kept)
 
     def test_full_keeps_unignored_files_in_build_directory(self):
         self.put(self.project / "python-package/.gitignore", b"!/build/\n!/build/notes.txt\n")

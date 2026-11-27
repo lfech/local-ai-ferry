@@ -176,7 +176,7 @@ All settings below belong to `[terminal_server]` in `config/config.ini`.
 | Setting | Default | Purpose |
 | --- | --- | --- |
 | `enabled` | `false` | Start the provisioner with `loaf online` and `loaf offline`. |
-| `include_in_backup` | `false` | Include the `terminal` type in `loaf backup` without type names: the user volume and the bearer key. |
+| `include_in_backup` | `true` | Include the `terminal` type in `loaf backup` without type names while the terminal server is enabled: the user volume and the bearer key that Open WebUI's saved connection uses. |
 | `secret_file` | `config/terminal-server.key` | Source for the Compose bearer secret. |
 | `apt_source_file` | blank | Use this APT source for terminal image builds and for `apt` in chat containers. [Package mirror](#package-mirror-for-image-builds) |
 | `apt_repository_dir` | blank | Host directory for a `file:` repository, mounted read-only in chat containers. [Install packages in a chat](#install-packages-in-a-chat) |
@@ -205,7 +205,13 @@ Verification and schema discovery create no containers. For workspace
 requests, Open WebUI supplies its authenticated user ID and chat context. The
 provisioner authenticates HTTP requests and terminal WebSockets and routes
 both to the container of the account and chat. Idle cleanup preserves active
-jobs and streams and stops only idle containers. Deleting a saved chat also
+jobs and streams and stops only idle containers. Open Terminal keeps a shell
+running after its browser tab disconnects, which would keep the container
+busy. Once a container has had no request or attached terminal stream for
+`idle_seconds`, the provisioner closes the account's remaining shells in it
+through Open Terminal's `/api/terminals`, then stops the container if no
+other process runs. A container recovered after a provisioner restart keeps
+its shells until the account uses it again. Deleting a saved chat also
 closes its container's streams. [HTTP proxy](https://github.com/open-webui/open-webui/blob/v0.13.4/backend/open_webui/routers/terminals.py#L284) · [WebSocket proxy](https://github.com/open-webui/open-webui/blob/v0.13.4/backend/open_webui/routers/terminals.py#L603)
 
 ### Network access
@@ -220,7 +226,9 @@ With `network = connected`, each container also joins the shared bridge
 reach each other. They reach
 every address the Docker host reaches: an APT mirror, the internet, other
 hosts on its network and the host's published ports, including Open WebUI.
-Use it only where that access is acceptable. Changing the setting replaces
+Use it only where that access is acceptable. `loaf offline` prints a note
+about this access, since local network access can still be intended on an
+offline host. Changing the setting replaces
 existing chat containers on the next start, which removes their `/home/chat`
 folders and installed packages.
 
@@ -340,28 +348,37 @@ read-only in every chat container.
 ## Offline transfer and shutdown
 
 `loaf backup` includes the matching Open Terminal image when capturing images
-if it exists locally.
-Use `loaf backup --no-terminal-server` to skip that image. The `terminal`
-type transfers the user volume with every account's `/home/user` folder and
-the bearer key, together with the `webui` data that owns those accounts. Chat
-folders and installed packages stay behind. Name it, as in
-`loaf backup terminal`, or set `[terminal_server] include_in_backup = true`
-to include it in backups without type names. The archive contains the bearer
+if it exists locally. The `terminal` type transfers the user volume with every
+account's `/home/user` folder and the bearer key, together with the `webui`
+data that owns those accounts. Chat folders and installed packages stay
+behind. With the terminal server enabled, backups without type names include
+it while `[terminal_server] include_in_backup` is true, the default, so the
+restored WebUI keeps a working connection. Name it, as in
+`loaf backup terminal`, to save it on its own. The archive contains the bearer
 key in plaintext and is created with owner-only permissions.
+
+`loaf backup --no-terminal-server` leaves the terminal server out: the image,
+the user volume and the key. Restoring that backup disables the terminal
+server in the restored settings and removes loaf's saved `loaf-terminal`
+connection from the restored WebUI data, so Open WebUI starts without a
+terminal. Enable it again later as described in
+[Enable and connect](#enable-and-connect); Open WebUI then receives the preset
+connection on its next start.
 [Archive types](transfer.md#select-archive-types)
 
-`loaf restore` restores those assets. Restore with the matching deployment
-version so the volume name and WebUI account IDs match. The destination's
+`loaf restore` restores those assets. Restore with the matching namespace so
+the volume name and WebUI account IDs match. The destination's
 `volume_driver` and `volume_options` determine how the user volume is
 created. Restore writes the key to `secret_file` with owner-only permissions,
 reuses a matching key, and refuses to replace a different key or overwrite a
-populated user volume. In the system deployment, the key stays at
+populated user volume. It checks the user volume's data, ownership labels and
+storage settings before it changes anything. In the system deployment, the key stays at
 `/etc/loaf/terminal-server.key`, readable by root and the `docker` group,
 which runs Compose. Setup from the copied backup uses its saved key when
 creating the local file.
 
 For archives without the terminal image, save and load it separately before
-serving. Use the matching image tag for a versioned deployment. If you also
+serving. Use the matching image tag for a separate namespace. If you also
 need to transfer the bearer key separately, copy it to `secret_file`.
 
 ```bash
@@ -373,7 +390,7 @@ To move the user volume separately, stop the provisioner and preserve its
 name, ownership labels, and data. Restore the matching Open WebUI data so the
 account IDs still match the folders, which are named by a hash of the
 account ID. The user volume is `loaf-terminal-users`, or
-`loaf-VERSION-terminal-users` in a versioned deployment. The chat containers
+`loaf-NAME-terminal-users` in the namespace `loaf-NAME`. The chat containers
 and their networks are named `loaf-terminal-KEY`. `loaf docker ps` lists them.
 [Docker resources](launcher.md#list-and-remove-docker-resources)
 
@@ -382,8 +399,9 @@ docker volume inspect --format '{{json .Labels}}' loaf-terminal-users
 ```
 
 `loaf stop` stops the provisioner, which stops the chat containers and keeps
-them, and removes the Compose service containers. Use `loaf stop -n` to keep
-the stopped service containers and their logs. To disable the extension, set
+them, and removes the Compose service containers. Use
+`loaf stop --no-remove-containers` to keep the stopped service containers and
+their logs. To disable the extension, set
 `enabled = false` and run the desired serving command again. Disable the
 saved connection in Open WebUI to hide it from the terminal menu. The user
 volume and the stopped chat containers remain available for re-enabling.

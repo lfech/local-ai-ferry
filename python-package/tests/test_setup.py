@@ -18,17 +18,21 @@ from tests import ROOT
 
 class SetupTests(unittest.TestCase):
     def quick_setup_project(self, directory):
+        """A source checkout: setup prepares its virtualenv instead of a standalone deployment."""
         project = Path(directory).resolve()
         (project / "compose.yml").touch()
+        (project / setup.PYTHON_PACKAGE_DIR).mkdir()
+        (project / setup.PYTHON_PACKAGE_DIR / "pyproject.toml").touch()
         return project
 
     def test_setup_prepares_the_installation_under_one_lock(self):
         with tempfile.TemporaryDirectory() as directory:
             project = self.quick_setup_project(directory)
 
-            def install(path, *, with_docker_deps):
+            def install(path, *, with_docker_deps, allow_root):
                 self.assertEqual(path, project)
                 self.assertFalse(with_docker_deps)
+                self.assertFalse(allow_root)
                 with self.assertRaises(cli.AlreadyRunningError), cli.project_lock(project / ".run.lock"):
                     self.fail("setup released its checkout lock")
 
@@ -38,7 +42,7 @@ class SetupTests(unittest.TestCase):
                 patch.object(cli, "Compose") as compose,
             ):
                 self.assertEqual(cli.main(["--project-dir", directory, "setup"]), 0)
-            prepare.assert_called_once_with(project, with_docker_deps=False)
+            prepare.assert_called_once_with(project, with_docker_deps=False, allow_root=False)
             key = project / cli.config.TERMINAL_SECRET
             cli.config.read_terminal_secret(key)
             self.assertEqual(key.stat().st_mode & 0o777, 0o600)
@@ -96,13 +100,61 @@ class SetupTests(unittest.TestCase):
 
     def test_install_dry_run_creates_no_environment_or_lock(self):
         with tempfile.TemporaryDirectory() as directory:
-            project = Path(directory)
-            (project / "compose.yml").touch()
+            project = self.quick_setup_project(directory)
             with patch.object(setup, "install") as install, redirect_stdout(StringIO()) as log:
                 self.assertEqual(cli.main(["--project-dir", directory, "install", "--dry-run"]), 0)
             self.assertIn(".venv", log.getvalue())
-            self.assertEqual(list(project.iterdir()), [project / "compose.yml"])
+            self.assertEqual(set(project.iterdir()), {project / "compose.yml", project / setup.PYTHON_PACKAGE_DIR})
         install.assert_not_called()
+
+    def test_wheel_installed_setup_outside_a_checkout_prepares_a_deployment(self):
+        # A pip-installed loaf has no bundled release; outside a checkout it sets up like the executable.
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            with (
+                patch.object(setup, "bundled_release", return_value=None),
+                patch.object(setup, "install") as install,
+                redirect_stdout(StringIO()) as log,
+                redirect_stderr(StringIO()),
+            ):
+                self.assertEqual(cli.main(["--project-dir", directory, "setup"]), 0)
+            install.assert_not_called()
+            self.assertIn("Deployment ready", log.getvalue())
+            self.assertTrue((project / "config/config.ini").is_file())
+            self.assertTrue((project / cli.config.TERMINAL_SECRET).is_file())
+            self.assertTrue((project / "docker-project/compose.yml").is_file())
+
+    def test_source_setup_as_root_needs_allow_root_for_another_owners_checkout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = self.quick_setup_project(directory)
+            owner = project.stat().st_uid
+            with (
+                patch.object(setup.sys, "platform", "linux"),
+                patch.object(setup.shutil, "which", return_value="/usr/bin/apt-get"),
+                patch.object(setup.os, "geteuid", return_value=0 if owner else 1),
+                patch.object(setup, "install_python") as python,
+                patch.object(setup, "install_toolkit"),
+                redirect_stderr(StringIO()),
+            ):
+                if owner:
+                    with self.assertRaisesRegex(setup.SetupError, "--allow-root"):
+                        setup.install(project)
+                    python.assert_not_called()
+                    setup.install(project, allow_root=True)
+                    python.assert_called_once_with(project)
+                else:
+                    # The checkout belongs to root itself: nothing to protect.
+                    setup.install(project)
+
+    def test_a_virtualenv_owned_by_another_user_names_the_fix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / ".venv").mkdir()
+            (project / ".venv/pyvenv.cfg").touch()
+            other = project.stat().st_uid + 1
+            with patch.object(setup.os, "geteuid", return_value=other):
+                with self.assertRaisesRegex(setup.SetupError, "sudo rm -rf"):
+                    setup.install_python(project)
 
     def test_setup_tests_installs_only_the_test_packages_under_the_lock(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -210,9 +262,6 @@ class SetupTests(unittest.TestCase):
     def test_setup_opts_in_to_docker_dependencies(self):
         with tempfile.TemporaryDirectory() as directory:
             project = self.quick_setup_project(directory)
-            package = project / setup.PYTHON_PACKAGE_DIR
-            package.mkdir()
-            (package / "pyproject.toml").touch()
             with (
                 patch.object(setup, "prepare_docker") as docker,
                 patch.object(setup, "install_python"),

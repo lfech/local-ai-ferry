@@ -4,6 +4,35 @@
 
 Older entries use the current command and project names in examples.
 
+## 2026-11-27 22:29:54 +0100 — Fixes for the audit of commit 0c47cf0
+
+- Environment: Debian 13 in WSL2, Python 3.13.5 in a scratch virtualenv with
+  the checkout installed editable and the pinned test packages. The
+  checkout's `.venv` still belongs to root and was not used. Tests ran with
+  `PYTHONDONTWRITEBYTECODE=1` because `src/loaf/__pycache__` belongs to root.
+- Docker-free suite: **323 tests, 322 passed, 1 failed, 48 skipped**. The
+  failure is `test_fences_and_local_links` for
+  `docs/instructions/problems.md`, whose links start at the repository root
+  instead of the file's directory. It failed the same way before these
+  changes and was left unchanged, since the file belongs to the author.
+- New or changed tests cover config links through backup, `--verify` without
+  temporary copies and restore, links refused outside their scope, target
+  volume checks before any change, `--no-terminal-server` backups and their
+  restore, single-line settings edits and the `[launcher] version` rename,
+  dry-run errors, the cached Python runtime in `installers`, the `setup` hint
+  for a missing key, `--namespace`, `--wait-timeout 0` and negative values,
+  `offline --models-file`, the stop options, refused abbreviations, the
+  connected-network note, `--allow-root`, standalone setup from a wheel,
+  `clean --full` questions, the systemd units, the Continue YAML, chat
+  containers with inherited Compose labels and closing disconnected shells.
+- `bash -n scripts/build-release.sh` passed. The script's cached-download
+  path did not run: it needs network access for the first download.
+- Skipped: the Docker suite, including the fixed
+  `test_archive_round_trip_preserves_model_names_and_webui_data`, because the
+  Docker daemon (Engine 26.1.5, Compose 2.26.1-4) had no local images or
+  containers. Also skipped: the GPU and CPU model tests, the Open Terminal
+  Docker tests, the Debian package checks and the release build.
+
 ## 2026-11-27 18:21:36 +0100 — Independent audit of commit 0c47cf0
 
 - Environment: Debian 13 in WSL2, Docker Engine 26.1.5, Compose 2.26.1-4,
@@ -30,7 +59,7 @@ Older entries use the current command and project names in examples.
   - In an `auditNNN` namespace, `loaf restore` of `config` and `webui` into
     a deployment whose WebUI volume held data published `config.ini`, then
     failed with `Restore requires empty volumes`.
-  - After restoring a backup made with `--version v2`, the restored
+  - After restoring a backup made with `--namespace v2`, the restored
     `config.ini` had lost all of its comments.
   - `restore models --import --wait-timeout -5` ended with an uncaught
     `ValueError` after the restore.

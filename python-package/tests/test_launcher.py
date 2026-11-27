@@ -165,7 +165,7 @@ class PlanTests(unittest.TestCase):
                 cli.plan(*args)
         for mode in cli.MODES:
             with self.subTest(mode=mode), self.assertRaises(ValueError):
-                cli.plan(mode, self.models, wait_timeout=0)
+                cli.plan(mode, self.models, wait_timeout=-1)
 
     def test_compose_paths_are_absolute_and_not_dependent_on_shell_cwd(self):
         # Spaces catch accidental shell splitting; absolute paths catch cwd leaks.
@@ -185,7 +185,7 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(args[0][-1], self.models[-1])
         self.assertFalse(kwargs['shell'])
         self.assertTrue(kwargs['check'])
-        self.assertEqual(kwargs['env']['LOAF_VERSION'], '')
+        self.assertEqual(kwargs['env']['LOAF_NAMESPACE'], '')
 
     def test_failed_command_prevents_all_later_commands(self):
         # Fail the second planned operation, then prove no later operation ran.
@@ -318,7 +318,7 @@ class HelpTests(unittest.TestCase):
         )
         for flag in ("-h, --help", "--project-dir PATH", "-v, --verbose"):
             self.assertIn(flag, global_options)
-        for flag in ("--cpu", "--archive", "--wait-timeout", "--version"):
+        for flag in ("--cpu", "--archive", "--wait-timeout", "--namespace"):
             self.assertNotIn(flag, output)
 
     def test_each_command_has_help_before_project_validation(self):
@@ -331,11 +331,12 @@ class HelpTests(unittest.TestCase):
     def test_command_help_shows_relevant_flags_and_aliases(self):
         flags = {
             "install": ("--with-docker-deps", "--archive PATH"),
-            "clean": ("--full", "--dry-run"),
+            "clean": ("--full", "--dry-run", "--yes"),
+            "setup": ("--allow-root",),
             "online": ("--cpu", "--wait-timeout SECONDS"),
             "backup": ("--verify", "--no-terminal-server", "--export", "--no-export"),
             "restore": ("--import", "--no-import", "--archive PATH", "--cpu"),
-            "stop": ("-n", "--remove-containers", "--no-remove-containers"),
+            "stop": ("--no-remove-containers",),
             "test": ("--config-dir PATH", "--badges", "--cpu"),
         }
         for command, expected in flags.items():
@@ -355,11 +356,11 @@ class HelpTests(unittest.TestCase):
                     f"usage: loaf integration {integration} ",
                 ))
         systemd = self.read_help("integration", "systemd", "--help")
-        self.assertIn("--version VERSION", systemd)
+        self.assertIn("--namespace NAME", systemd)
         self.assertNotIn("--models-file", systemd)
         continuation = self.read_help("integration", "continue", "--help")
         self.assertIn("--models-file PATH", continuation)
-        self.assertNotIn("--version", continuation)
+        self.assertNotIn("--namespace", continuation)
         self.assertNotIn("\nOptions:\n", self.read_help("integration", "tether", "--help"))
 
 
@@ -485,7 +486,9 @@ class CliTests(unittest.TestCase):
             'offline': ('ollama-offline', 'open-webui'), 'online': ('ollama-connected', 'open-webui-online'),
             'download': ('ollama-online',),
         }
-        for mode in (*cli.MODES, *cli.TRANSFER_MODES):
+        # Restore previews need a backup; the transfer tests cover them. Backup needs a deployment.
+        (self.project / 'config').mkdir(exist_ok=True)
+        for mode in (*cli.MODES, "backup"):
             with (
                 self.subTest(mode=mode), patch('loaf.cli.subprocess.run') as run,
                 redirect_stdout(io.StringIO()) as output,
@@ -501,9 +504,9 @@ class CliTests(unittest.TestCase):
             selected = Path(folder).resolve() / 'my models.ini'
             selected.write_text('[models.example]\nmodel = hf.co/owner/example:Q4_K_M\n', encoding='utf-8')
             with patch('loaf.cli.execute_plan') as run, redirect_stdout(io.StringIO()) as output:
-                self.assertEqual(self.invoke('download', '--version', 'v2', '--models-file', str(selected)), 0)
+                self.assertEqual(self.invoke('download', '--namespace', 'v2', '--models-file', str(selected)), 0)
             self.assertEqual(run.call_args.args[0].project_name, 'loaf-v2')
-            self.assertIn('--version',output.getvalue())
+            self.assertIn('--namespace',output.getvalue())
             self.assertIn('v2',output.getvalue())
             self.assertNotIn('--models-file', output.getvalue())
             self.assertTrue(output.getvalue().strip().endswith(' offline'))
@@ -524,13 +527,24 @@ class CliTests(unittest.TestCase):
         with patch('loaf.cli.execute_plan',side_effect=subprocess.CalledProcessError(-9,'docker')), redirect_stderr(io.StringIO()):
             self.assertEqual(self.invoke('offline'), 1)
 
-    def test_nonpositive_wait_timeout_is_rejected_before_docker(self):
-        for value in ('0','-1'):
-            with self.subTest(value=value), patch('loaf.cli.execute_plan') as mocked, redirect_stderr(io.StringIO()):
+    def test_negative_wait_timeout_is_rejected_before_docker(self):
+        for value in ('-1', 'soon'):
+            with self.subTest(value=value), patch('loaf.cli.execute_plan') as mocked, \
+                    redirect_stderr(io.StringIO()) as errors:
                 with self.assertRaises(SystemExit) as raised:
                     self.invoke('offline', '--wait-timeout', value)
                 self.assertEqual(raised.exception.code,2)
+                self.assertIn('expected 0 to wait without a limit', errors.getvalue())
                 mocked.assert_not_called()
+
+    def test_zero_wait_timeout_waits_without_a_limit(self):
+        with patch('loaf.cli.execute_plan') as execute, redirect_stdout(io.StringIO()):
+            self.assertEqual(self.invoke('offline', '--wait-timeout', '0', '--dry-run'), 0)
+        _, steps = execute.call_args.args
+        start = steps[2]
+        self.assertIn('--wait', start.arguments)
+        self.assertNotIn('--wait-timeout', start.arguments)
+        self.assertTrue(start.description.endswith('and wait for readiness'))
 
     def test_invalid_file_is_rejected_before_docker(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -542,17 +556,31 @@ class CliTests(unittest.TestCase):
             self.assertEqual(exc.exception.code, 2)
             mocked.assert_not_called()
 
+    def test_offline_with_a_connected_terminal_network_notes_the_access(self):
+        with tempfile.TemporaryDirectory() as folder:
+            Path(folder, 'config.ini').write_text('[terminal_server]\nenabled = true\nnetwork = connected\n',
+                                                  encoding='utf-8')
+            for mode, noted in (('offline', True), ('online', False)):
+                with self.subTest(mode=mode), patch('loaf.cli.execute_plan'), \
+                        redirect_stdout(io.StringIO()) as output, redirect_stderr(io.StringIO()):
+                    self.assertEqual(cli.main(['--project-dir', str(ROOT), '--config-dir', folder, mode, '--dry-run']), 0)
+                self.assertEqual('Note: [terminal_server] network = connected' in output.getvalue(), noted)
+                self.assertNotIn('Warning', output.getvalue())
+
     def test_offline_does_not_require_model_list(self):
         # A transferred cache/config volume is sufficient to boot an offline host.
         with patch('loaf.cli.execute_plan') as mocked, redirect_stdout(io.StringIO()):
-            self.assertEqual(self.invoke('offline', '--models-file', 'not-present', '--dry-run'), 0)
+            self.assertEqual(self.invoke('offline', '--dry-run'), 0)
         self.assertEqual(mocked.call_args.args[1], cli.plan('offline'))
+        # offline reads no model list, so it refuses the option instead of ignoring it.
+        with patch('loaf.cli.execute_plan') as mocked, redirect_stderr(io.StringIO()) as errors, \
+                self.assertRaises(SystemExit):
+            self.invoke('offline', '--models-file', 'not-present', '--dry-run')
+        self.assertIn('--models-file is supported by download', errors.getvalue())
+        mocked.assert_not_called()
 
     def test_stop_removes_containers_by_default_and_allows_keeping_them(self):
-        for flags, removes in (
-            ([], True), (["-n"], False), (["--no-remove-containers"], False),
-            (["--remove-containers"], True),
-        ):
+        for flags, removes in (([], True), (["--no-remove-containers"], False)):
             with self.subTest(flags=flags), redirect_stdout(io.StringIO()) as output:
                 self.assertEqual(cli.main(["stop", "--dry-run", "--project-dir", str(ROOT), *flags]), 0)
                 self.assertIn("Stop all deployment services", output.getvalue())
@@ -560,6 +588,10 @@ class CliTests(unittest.TestCase):
         step = cli.plan("stop", terminal_server=True)[-1]
         self.assertIn("terminal", step.profiles)
         self.assertEqual(step.arguments, ("rm", "--force"))
+        # -n and --remove-containers are gone: removal is the default and -n means dry run elsewhere.
+        for flag in ("-n", "--remove-containers"):
+            with self.subTest(flag=flag), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                cli.main(["stop", "--dry-run", "--project-dir", str(ROOT), flag])
 
     def test_cpu_serving_uses_the_override_only_when_requested(self):
         for mode in ("online", "offline"):
@@ -585,15 +617,19 @@ class CliTests(unittest.TestCase):
             (("package",), "package requires a target: binary, debian or both"),
             (("package", "images"), "invalid package target"),
             (("package", "binary", "binary"), "Specify each package target once"),
-            (("package", "debian", "--version", "v2"), "Unexpected option for package"),
+            (("package", "debian", "--namespace", "v2"), "Unexpected option for package"),
             (("package", "binary", "--attach"), "--attach is available for Compose"),
             (("package", "debian"), "package requires the loaf source directory"),
             (("backup", "logs"), "Unknown archive type logs"),
             (("backup", "images", "images"), "Specify each archive type once"),
-            (("offline", "-n"), "only supported by stop"),
+            (("offline", "--no-remove-containers"), "only supported by stop"),
             (("restore", "--verify"), "--verify is only supported by backup"),
             (("backup", "images", "--verify"), "--verify checks the whole archive"),
-            (("backup", "volumes", "--no-terminal-server"), "creating a backup that includes images"),
+            (("backup", "terminal", "--no-terminal-server"), "--no-terminal-server leaves out the terminal type"),
+            (("restore", "--no-terminal-server"), "only supported when creating a backup"),
+            (("offline", "--allow-root"), "--allow-root is only supported by setup and install"),
+            (("clean", "--yes"), "--yes is only supported by docker rm and clean --full"),
+            (("offline", "--wait-timeout", "-5"), "expected 0 to wait without a limit"),
             (("backup", "--delete"), "--delete is only supported by restore"),
             (("restore", "config", "--delete"), "--delete applies to the models type"),
             (("build", "--cpu"), "--cpu is only supported by"),
@@ -608,12 +644,12 @@ class CliTests(unittest.TestCase):
             (("setup", "--link-docker-project", "--terminal-server-key"), "only links the Docker project"),
             (("setup", "tests", "--link-docker-project"), "only links the Docker project"),
             (("setup", "--link-docker-project", "--config-dir", "config"), "only links the Docker project"),
-            (("setup", "--link-docker-project", "--version", "v2"), "Omit --version"),
+            (("setup", "--link-docker-project", "--namespace", "v2"), "Omit --namespace"),
             (("offline", "--badges"), "--badges is only supported by test"),
             (("offline", "--full"), "--full is only supported by clean"),
             (("offline", "--backup-dir", "backup"), "--backup-dir is only supported by backup"),
             (("backup", "--verify", "--attach"), "--attach is available for Compose"),
-            (("clean", "--version", "v2"), "Unexpected option for clean"),
+            (("clean", "--namespace", "v2"), "Unexpected option for clean"),
             (("restore", "--backup-dir", "a", "--archive", "b"), "Use either --backup-dir or --archive"),
             (("offline", "--archive", "a.tar.gz"), "--archive is for standalone setup"),
             (("offline", "--import"), "--import/--no-import are only supported by restore"),
@@ -623,7 +659,7 @@ class CliTests(unittest.TestCase):
             (("setup", "extra"), "setup accepts only the tests argument"),
             (("setup", "tests", "--test-local-repository"), "setup tests installs only the test packages"),
             (("install", "tests", "--archive", "backup"), "setup tests installs only the test packages"),
-            (("setup", "tests", "--version", "v2"), "Unexpected option for setup"),
+            (("setup", "tests", "--namespace", "v2"), "Unexpected option for setup"),
         ):
             with (
                 self.subTest(arguments=arguments), redirect_stderr(io.StringIO()) as errors,
@@ -649,14 +685,14 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(raised.exception.code, 2)
                 self.assertIn("--no-terminal-server is only supported when creating a backup", errors.getvalue())
 
-    def test_restore_dry_run_from_another_directory_needs_no_selection_file(self):
+    def test_restore_dry_run_reports_a_missing_backup_like_a_real_run(self):
         with tempfile.TemporaryDirectory() as folder:
             child = subprocess.run([
                 sys.executable, '-m', 'loaf', '--project-dir', str(self.project), 'restore', 'models',
                 '--backup-dir', 'archives', '--dry-run',
             ], cwd=folder, capture_output=True, text=True)
-        self.assertEqual(child.returncode, 0, child.stderr)
-        self.assertIn(f'Restore models from the newest backup in {Path(folder).resolve() / "archives"}', child.stdout)
+        self.assertEqual(child.returncode, 1, child.stdout)
+        self.assertIn(f'No backup found in {Path(folder).resolve() / "archives"}', child.stderr)
         self.assertNotIn('+ ', child.stdout)
 
     def test_online_rejects_previous_download_options_before_docker(self):

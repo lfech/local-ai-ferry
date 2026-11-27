@@ -7,6 +7,76 @@ Git milestones use commit timestamps. Working-tree milestones use the
 associated verification time where it was recorded.
 Earlier entries use the current names for commands, paths and artifacts.
 
+## 2026-11-27 22:30 CET — Fixes for the audit of commit 0c47cf0
+
+The author decided how to resolve the 23 audit problems in
+[Problems](instructions/problems.md) and asked for the remaining ones to be
+fixed as proposed. The decisions are implemented, and the decision list in
+[Development](instructions/development.md) is cleared.
+
+- **Backups that restore (1, 9, 13).** Links in `config/` stay links. Backup
+  refuses a link that is absolute, leaves `config/` or names no archived
+  configuration file, and a `source` link that leaves the checkout. Restore
+  and `backup --verify` now run the same content checks on each member while
+  it is read once: paths and links, model manifests and blobs, volume
+  payloads, image tags and the key. Verify needs no temporary copy, so `/tmp`
+  no longer limits it. For a ~100 GB archive, verify already decompressed and
+  hashed every byte in one sequential pass; parsing the tar headers on that
+  stream adds little. Memory stays at the copy buffer plus a small-file cache
+  capped at 256 MiB, which holds the manifests that `docker image save` and
+  the model store write after the blobs they name. This was reasoned, not
+  measured. Dry runs report a missing backup, missing types and a missing
+  checkout like real runs.
+- **Checks before changes (2, 16).** Restore checks each existing target
+  volume before the first change: unused, empty, and for the user volume its
+  labels, driver and options. Errors name the real volume. Restored settings
+  change single lines, so comments stay.
+- **Terminal in backups (3, 14).** `include_in_backup` defaults to `true`,
+  and backups without types include `terminal` only with the terminal server
+  enabled. `--no-terminal-server` leaves out the image and the `terminal`
+  type and records `skip_terminal_server` in `loaf.json`. Restoring such a
+  backup sets `enabled = false` and removes loaf's `loaf-terminal` entry from
+  Open WebUI's `terminal_server.connections` config row; an emptied row is
+  deleted so that a later enable seeds the preset again. Open WebUI v0.13.4
+  keeps one config row per key and seeds only missing rows.
+  [models/config.py](https://github.com/open-webui/open-webui/blob/v0.13.4/backend/open_webui/models/config.py)
+- **Namespaces (14).** `--namespace NAME` replaces `--version` and selects
+  `loaf-NAME`; `[launcher] namespace` replaces `[launcher] version`, and
+  Compose receives `LOAF_NAMESPACE` with the name. An old `version` line fails
+  with a pointer to the new name; restore renames it in archived settings.
+  The manifest keeps its `deployment` key.
+- **CLI (10, 11, 12).** `--wait-timeout 0` omits Compose's timeout, which then
+  waits without a limit; negative values fail when parsing. Compose 2.26.1
+  adds a deadline only for positive values.
+  [start.go](https://github.com/docker/compose/blob/v2.26.1/pkg/compose/start.go)
+  `offline` refuses `--models-file`. `stop` keeps only
+  `--no-remove-containers`; `-n` and `--remove-containers` are gone. Option
+  names are no longer abbreviated, so `--all` cannot select `--allow-root`;
+  this goes beyond the decisions and is flagged for the author.
+- **Setup and restore (6, 7, 8).** Source setup as root refuses a checkout
+  that another user owns unless `--allow-root` is given, and names the
+  `sudo rm -rf` for a `.venv` owned by another user. Restore links the
+  packaged Docker project into a project without a Compose file and suggests
+  `setup` when the terminal key is missing. A wheel-installed loaf outside a
+  checkout runs standalone setup.
+- **Terminal workspaces (4, 19).** Before counting processes in an idle
+  container, the provisioner closes the account's shells through Open
+  Terminal 0.17.20's `/api/terminals`, which lists them per `X-User-Id` and
+  `X-Session-Id`. Without a lease no stream is attached, so they are
+  disconnected. `loaf offline` prints a note for `network = connected`.
+- **Other fixes.** `scripts/build-release.sh` caches its checked Python
+  downloads in `install-cache/python/`, which `installers` carries (5).
+  `loaf docker ps` classifies by `loaf.terminal.*` labels first (15). The
+  systemd units require Docker and allow `TimeoutStopSec=90` (17).
+  `clean --full` asks before removing `install-cache/`; `--yes` skips the
+  question (18). The Continue YAML uses Continue's default roles, a
+  commented `capabilities` line and a header on what to check (20).
+  [Continue reference](https://docs.continue.dev/reference) The Docker archive
+  test passes `volumes=` (21). The model examples are packaged through
+  `data/config/model-examples`, the duplicate `model.6gb.ini` is gone, and the
+  guides match the files (22). The working `config.ini` gained `webui_access`
+  (23); the badges are left to the author.
+
 ## 2026-11-27 17:41 CET — Open WebUI starts with the terminal connection
 
 The author asked for Open WebUI to start with the correct terminal server
@@ -227,7 +297,7 @@ The author's decisions D1 to D5 replace the terminal design.
   directory, and `./loaf docs` with `./loaf docs transfer`. It exits with 2.
 - Setup from a backup ends with `Next:` and the restore command, followed by
   the docs hint. Every restore ends with `Next:` and the offline command.
-  Inside the project they use the short `./loaf` form and name `--version`
+  Inside the project they use the short `./loaf` form and name `--namespace`
   only when the project's settings would select another one. In the system
   deployment the follow-up uses `--system` instead of
   `--project-dir /var/lib/loaf`.
@@ -1178,13 +1248,13 @@ The author's decisions D1 to D5 replace the terminal design.
 
 ## 2026-11-21 12:34 CET — Versioned deployments
 
-- Added `loaf --version VERSION` to scope Compose projects, image tags,
+- Added `loaf --namespace NAME` to scope Compose projects, image tags,
   volumes and backup filenames. Commands without a version keep the
   existing default names.
 - Restore selects the newest backup in the requested namespace and checks
   its image tags before loading images or restoring volumes.
-  [Versioned deployments](launcher.md#run-a-versioned-deployment) ·
-  [Versioned transfers](transfer.md#versioned-transfers)
+  [Separate namespaces](launcher.md#run-a-separate-namespace) ·
+  [Transfers between namespaces](transfer.md#transfers-between-namespaces)
 
 ## 2026-11-21 12:29 CET — Repository and verification cleanup
 

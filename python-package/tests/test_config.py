@@ -176,6 +176,17 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("hf.co/example/local", output.getvalue())
         self.assertNotIn("hf.co/example/example", output.getvalue())
 
+    def test_edit_text_changes_single_lines_and_keeps_comments(self):
+        text = "# Header\n[launcher]\n# Blank selects loaf.\nversion = v1\n\n[terminal_server]\n# enabled = false\n"
+        edited = config.edit_text(text, {("launcher", "namespace"): "v2", ("terminal_server", "enabled"): "false",
+                                         ("terminal_server", "secret_file"): "/etc/loaf/terminal-server.key",
+                                         ("webui", "port"): "3100"})
+        self.assertEqual(edited, "# Header\n[launcher]\n# Blank selects loaf.\nnamespace = v2\n\n[terminal_server]\n"
+                                 "secret_file = /etc/loaf/terminal-server.key\nenabled = false\n\n[webui]\nport = 3100\n")
+        self.assertEqual(config.edit_text("[launcher]\r\nversion = v1\r\n", {}), "[launcher]\r\nnamespace = v1\r\n")
+        with self.assertRaises(ValueError):
+            config.edit_text("", {("launcher", "namespace"): "a\nb"})
+
     def test_bad_ini_stops_before_docker(self):
         for ini, error in (
             ("[webui]\nport = 65536\n", "port from 1 to 65535"),
@@ -184,7 +195,9 @@ class ConfigTests(unittest.TestCase):
             ("[transfer]\ncompression_level = -1\n", "compression level from 0 to 9"),
             ("[online]\nwebui_downloads = maybe\n", "expected true or false"),
             ("[webui]\nbind_address = example.org\n", "expected an IPv4 or IPv6 address"),
-            ("[launcher]\nversion = Invalid.1\n", "expected a lowercase Compose name"),
+            ("[launcher]\nnamespace = Invalid.1\n", "expected a lowercase Compose name"),
+            ("[launcher]\nversion = v2\n", "unknown setting [launcher] version. It is now [launcher] namespace."),
+            ("[launcher]\nwait_timeout = -1\n", "expected 0 to wait without a limit"),
             ("[webui]\nprt = 3030\n", "unknown setting"),
             ("[web]\nport = 3030\n", "unknown section"),
             ("[webui]\nport = 3030\nport = 3031\n", "already exists"),
@@ -204,7 +217,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_configured_deployment_model_file_and_timeout_can_be_overridden(self):
         self.path.write_text(
-            "[launcher]\nversion = v2\nmodels_file = model list.ini\nwait_timeout = 420\n",
+            "[launcher]\nnamespace = v2\nmodels_file = model list.ini\nwait_timeout = 420\n",
             encoding="utf-8",
         )
         (self.config_dir / "models.ini").write_text("[models.default]\nmodel = hf.co/example/default\n", encoding="utf-8")
@@ -219,7 +232,7 @@ class ConfigTests(unittest.TestCase):
             self.assertIn(value, plan)
         self.assertNotIn("hf.co/example/default", plan)
         with patch("loaf.cli.subprocess.run") as override_run, redirect_stdout(io.StringIO()) as output:
-            self.assertEqual(cli.main([*args, "--version=", "--models-file", str(override), "--wait-timeout", "50"]), 0)
+            self.assertEqual(cli.main([*args, "--namespace=", "--models-file", str(override), "--wait-timeout", "50"]), 0)
         plan = output.getvalue()
         for value in ("(loaf)", "hf.co/example/override", "wait up to 50s"):
             self.assertIn(value, plan)
@@ -242,7 +255,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_verification_environment_overrides_ini_opt_ins(self):
         self.path.write_text(
-            "[launcher]\nversion = v2\n[tests]\nrun_docker_tests = true\nrun_gpu_tests = true\n"
+            "[launcher]\nnamespace = v2\n[tests]\nrun_docker_tests = true\nrun_gpu_tests = true\n"
             "allow_legacy_terminal_bridge = true\n",
             encoding="utf-8",
         )

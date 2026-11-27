@@ -64,13 +64,14 @@ class CompletionScriptTests(unittest.TestCase):
     def test_options_follow_the_command_and_skip_option_values(self):
         self.assertEqual(self.complete("--"), ["--help", "--project-dir", "--system", "--verbose"])
         self.assertEqual(self.complete("docker", "rm", "--"),
-                         ["--config-dir", "--version", "--dry-run", "--yes", "--help", "--project-dir", "--system",
+                         ["--config-dir", "--namespace", "--dry-run", "--yes", "--help", "--project-dir", "--system",
                           "--verbose"])
-        self.assertIn("-n", self.complete("stop", "-"))
+        self.assertIn("--no-remove-containers", self.complete("stop", "-"))
+        self.assertNotIn("-n", self.complete("stop", "-"))
         # A command without positional words offers its options right away.
         self.assertIn("--wait-timeout", self.complete("offline", ""))
         self.assertEqual(self.complete("--project-dir", "/tmp", "restore", "mo"), ["models"])
-        self.assertEqual(self.complete("backup", "--version", "=", "v1", "vol"), ["volumes"])
+        self.assertEqual(self.complete("backup", "--namespace", "=", "v1", "vol"), ["volumes"])
         self.assertEqual(self.complete("frobnicate", "--h"), ["--help"])
 
     def test_option_values_complete_directories_files_or_nothing(self):
@@ -78,7 +79,7 @@ class CompletionScriptTests(unittest.TestCase):
         self.assertEqual(self.complete("--project-dir", "mod"), [])
         self.assertEqual(self.complete("download", "--models-file", "mod"), ["models.ini"])
         self.assertEqual(self.complete("download", "--models-file", "=", "mod"), ["models.ini"])
-        self.assertEqual(self.complete("offline", "--version", ""), [])
+        self.assertEqual(self.complete("offline", "--namespace", ""), [])
 
     @unittest.skipUnless(completion.BASH_COMPLETION.is_file(), "bash-completion is not installed.")
     def test_bash_completion_loads_the_user_file_on_first_use(self):

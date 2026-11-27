@@ -2,6 +2,7 @@
 
 from contextlib import ExitStack
 import os
+from typing import Callable
 from pathlib import Path
 import shutil
 import subprocess
@@ -13,8 +14,10 @@ from . import assets, config, locks, setup, transfer
 
 STAGING_PREFIXES = (".loaf-backup-", ".loaf-restore-", ".loaf-toolkit-", ".loaf-badges-", ".loaf-bootstrap-",
                     ".loaf-terminal-key-", ".loaf-wheels-", ".loaf-docker-", ".loaf-binary-", ".loaf-link-", ".loaf-docs-",
-                    ".loaf-repository-")
+                    ".loaf-repository-", ".loaf-download-")
 FULL_PATHS = (".venv", "dist", "install-cache", "python-package/build", "python-package/dist")
+# Full paths that an offline host cannot download again; clean asks before removing them.
+OFFLINE_ONLY_PATHS = ("install-cache",)
 PROTECTED_NAMES = {".git", "backup", transfer.CHECKSUMS, ".env", config.TERMINAL_SECRET.name}
 # Staged archive members inside backup and restore directories.
 STAGED_MEMBERS = {Path(name).name for name in transfer.MEMBER_NAMES}
@@ -46,7 +49,7 @@ def project_targets(project: Path, runtime: Path, full: bool) -> set[Path]:
     targets = {project / ".test-artifacts", project / "__pycache__"}
     for directory in (
         project, project / "backup", project / "config", project / "dist",
-        project / setup.PYTHON_WHEEL_DIR, project / setup.DOCKER_DEB_DIR,
+        project / setup.PYTHON_WHEEL_DIR, project / setup.DOCKER_DEB_DIR, project / setup.PYTHON_RUNTIME_DIR,
     ):
         if local_directory(directory):
             targets.update(path for path in directory.iterdir() if path.name.startswith(STAGING_PREFIXES))
@@ -166,7 +169,8 @@ def contains_saved_data(path: Path, runtime: Path) -> bool:
     return False
 
 
-def clean(project: Path, *, full: bool, dry_run: bool) -> None:
+def clean(project: Path, *, full: bool, dry_run: bool, confirm: Callable[[Path], bool] = lambda path: False) -> None:
+    """Remove regenerable state. confirm decides about paths an offline host cannot download again."""
     home = locks.data_home().resolve()
     runtime = home / "loaf"
     if project.is_relative_to(runtime) or runtime.is_symlink():
@@ -196,6 +200,12 @@ def clean(project: Path, *, full: bool, dry_run: bool) -> None:
             if any(item.is_relative_to(path) for item in protected) or contains_saved_data(path, runtime):
                 print(f"Keep {path} (protected Git work, backup, credentials or mount).")
                 continue
+            if path in {project / name for name in OFFLINE_ONLY_PATHS}:
+                if dry_run:
+                    print(f"Would ask before removing {path}, whose installers an offline host cannot download again")
+                    continue
+                if not confirm(path):
+                    continue
             planned.append(path)
 
         for path in planned:

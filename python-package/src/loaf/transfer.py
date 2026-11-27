@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from configparser import ConfigParser
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime
@@ -20,13 +19,14 @@ import subprocess
 import sys
 import tarfile
 from tempfile import NamedTemporaryFile, TemporaryDirectory, TemporaryFile
-from typing import Callable
+from typing import Callable, Iterable
 
 from . import assets, config, locks
 from .progress import Progress, TrackedStream
 from .setup import (
-    INSTALL_CACHE, PYTHON_PACKAGE_DIR, PYTHON_WHEEL_DIR, SYSTEM_GROUP, TEST_WHEEL_RECORD, TOOLKIT_DIR,
-    WHEEL_CACHE_RECORD, docker_installer_files, file_digest, prepare_python_wheels, protect_terminal_key, toolkit_files,
+    INSTALL_CACHE, PYTHON_PACKAGE_DIR, PYTHON_RUNTIME_DIR, PYTHON_WHEEL_DIR, SYSTEM_GROUP, TEST_WHEEL_RECORD,
+    TOOLKIT_DIR, WHEEL_CACHE_RECORD, docker_installer_files, file_digest, prepare_python_wheels, protect_terminal_key,
+    toolkit_files,
 )
 
 
@@ -41,7 +41,7 @@ EXECUTABLE_HEADER = b"#!/bin/bash\n# loaf standalone backup launcher v1\n"
 # Archive types in backup and restore order. Each type has one destination.
 TYPES = ("source", "config", "installers", "images", "models", "webui", "terminal")
 ALIASES = {"project": ("config", "installers"), "volumes": ("models", "webui", "terminal")}
-# Types without namespaced Docker resources or settings can restore into another deployment version.
+# Types without namespaced Docker resources or settings can restore into another namespace.
 PORTABLE_TYPES = ("source", "installers", "models")
 # Types whose capture requires stopped services. Models use a consistent snapshot instead.
 SERVICE_TYPES = ("webui", "terminal")
@@ -51,7 +51,7 @@ MEMBER_NAMES = frozenset({*(f"{kind}.tar" for kind in TYPES), TERMINAL_VOLUME, T
 CHECKOUT_RESERVED_PATHS = {CHECKSUMS, "backup", "dist", "docker-project", LAUNCHER, ".run.lock"}
 CONFIG_SUFFIXES = {".ini", ".model", ".list", ".sources"}
 TERMINAL_KEY_STAGING = ".loaf-terminal-key-"
-# The core image repositories; the deployment version or latest tags them.
+# The core image repositories; the namespace name or latest tags them.
 IMAGES = ("loaf/ollama-online", "loaf/ollama-offline", "loaf/open-webui")
 TERMINAL_IMAGE = "loaf/open-terminal"
 # Compose volume keys and their archive types. The namespace prefixes each volume name.
@@ -63,6 +63,9 @@ WORKSPACE_PROJECT_LABEL = "loaf.terminal.project"
 # The provisioner's user volume holds every account's /home/user folder.
 TERMINAL_USERS_LABEL = "loaf.terminal.users"
 COPY_BUFFER = 1024 * 1024
+# Checks read each member once as a stream. Manifests can follow the files they name, so small files stay in memory.
+SMALL_FILE = 1024 * 1024
+SMALL_FILES_LIMIT = 256 * 1024 * 1024
 MANIFEST_LIST_TYPE = "application/vnd.ollama.manifest.list.v2+json"
 
 # Check every mount before extracting. On a failed extract,
@@ -81,6 +84,33 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 tar -xpf - -C /transfer
 trap - EXIT
+"""
+
+# Open WebUI keeps each setting as one row of its config table and seeds only missing rows at startup.
+# Dropping an emptied row lets a later start with the terminal server enabled seed loaf's connection again.
+DROP_TERMINAL_CONNECTION = """\
+import json, sqlite3, sys
+database = "/app/backend/data/webui.db"
+key = "terminal_server.connections"
+try:
+    db = sqlite3.connect(f"file:{database}?mode=rw", uri=True)
+except sqlite3.OperationalError:
+    sys.exit(0)
+with db:
+    try:
+        row = db.execute("SELECT value FROM config WHERE key = ?", (key,)).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    connections = json.loads(row[0]) if row else None
+    if isinstance(connections, list):
+        kept = [entry for entry in connections if not (isinstance(entry, dict) and entry.get("id") == "loaf-terminal")]
+        if kept != connections:
+            if kept:
+                db.execute("UPDATE config SET value = ? WHERE key = ?", (json.dumps(kept), key))
+            else:
+                db.execute("DELETE FROM config WHERE key = ?", (key,))
+            print("Removed loaf's saved terminal connection from the restored Open WebUI data.")
+db.close()
 """
 
 SHOW_SAVED_MODELFILES = """\
@@ -117,7 +147,7 @@ class TransferError(ValueError):
 
 
 def image_names(namespace: str, *, include_terminal: bool = False) -> tuple[str, ...]:
-    tag = config.namespace_version(namespace) or "latest"
+    tag = config.namespace_name(namespace) or "latest"
     return tuple(f"{image}:{tag}" for image in (*IMAGES, *((TERMINAL_IMAGE,) if include_terminal else ())))
 
 
@@ -153,14 +183,14 @@ def expand_types(names, *, terminal_available: bool = True) -> tuple[str, ...]:
 
 
 def default_backup_types(project: Path, *, terminal: bool) -> tuple[str, ...]:
-    """Back up every available type. The source exists only in a checkout; the terminal type is opt-in."""
+    """Back up every available type. The source exists only in a checkout; the settings decide the terminal type."""
     checkout = checkout_paths(project) is not None
     return tuple(kind for kind in TYPES if (kind != "source" or checkout) and (kind != "terminal" or terminal))
 
 
 def backup_path(directory: Path, *, namespace: str = config.DEPLOYMENT) -> Path:
-    """A new backup folder: YYYYMMDD-HHMM_local-ai-ferry, with the deployment version before the suffix."""
-    name = "_".join(part for part in (f"{datetime.now():%Y%m%d-%H%M}", config.namespace_version(namespace),
+    """A new backup folder: YYYYMMDD-HHMM_local-ai-ferry, with the namespace name before the suffix."""
+    name = "_".join(part for part in (f"{datetime.now():%Y%m%d-%H%M}", config.namespace_name(namespace),
                                       BUNDLE_NAME) if part)
     target = directory / name
     sequence = 2
@@ -171,8 +201,8 @@ def backup_path(directory: Path, *, namespace: str = config.DEPLOYMENT) -> Path:
 
 
 def latest_backup(directory: Path, *, namespace: str = config.DEPLOYMENT) -> Path | None:
-    version = config.namespace_version(namespace)
-    prefix = re.escape(f"{version}_" if version else "")
+    name = config.namespace_name(namespace)
+    prefix = re.escape(f"{name}_" if name else "")
     folders = re.compile(r"([0-9]{8}-[0-9]{4})_" + prefix + re.escape(BUNDLE_NAME) + r"(?:-([0-9]+))?")
     backups = []
     for path in directory.iterdir() if directory.is_dir() else ():
@@ -260,8 +290,13 @@ class Archive:
     digest: str | None = None
 
     @property
-    def deployment(self) -> str:
+    def namespace_name(self) -> str:
+        # The manifest keeps its original key for the namespace name.
         return self.manifest["deployment"]
+
+    @property
+    def skip_terminal_server(self) -> bool:
+        return self.manifest.get("skip_terminal_server") is True
 
     @property
     def items(self) -> dict[str, dict]:
@@ -290,7 +325,7 @@ def validate_manifest(data, minimum: int, name: str) -> dict:
             "[transfer] backup_version_min. Restore it with the loaf release that created it.")
     deployment = data.get("deployment")
     if not isinstance(deployment, str):
-        raise invalid("missing deployment version.")
+        raise invalid("missing deployment namespace.")
     try:
         config.namespace(deployment)
     except ValueError as exc:
@@ -314,6 +349,8 @@ def validate_manifest(data, minimum: int, name: str) -> dict:
             paths.add(path)
     if "terminal" in kinds and "webui" not in kinds:
         raise invalid("terminal without the WebUI data that owns its accounts.")
+    if data.get("skip_terminal_server", True) is not True or ("skip_terminal_server" in data and "terminal" in kinds):
+        raise invalid("unexpected skip_terminal_server.")
     return data
 
 
@@ -366,25 +403,60 @@ def open_archive(selection: Path, *, minimum: int = ARCHIVE_VERSION, verify_laun
 
 
 class HashingReader:
-    """Hash what a reader consumes and optionally report its progress."""
+    """Hash what a reader consumes, optionally copy it to an output and report its progress."""
 
-    def __init__(self, stream, progress: Progress | None = None) -> None:
+    def __init__(self, stream, progress: Progress | None = None, output=None) -> None:
         self.stream = stream
         self.progress = progress
+        self.output = output
         self.digest = sha256()
 
     def read(self, size: int = -1) -> bytes:
         data = self.stream.read(size)
         self.digest.update(data)
+        if self.output is not None:
+            self.output.write(data)
         if self.progress is not None:
             self.progress.advance(len(data))
         return data
 
 
-def unpack(archive: Archive, staging: Path, select: set[str]) -> None:
-    """Check every member against the manifest and stage the selected ones, before any change."""
+def check_member(name: str, stream):
+    """Validate one archive member while it is read. Restore and backup --verify run the same checks.
+
+    Returns the image platforms for images.tar and None for the other members.
+    """
+    try:
+        if name == "images.tar":
+            return saved_image_tags(stream, name)
+        if name == "models.tar":
+            validate_model_archive(stream, name)
+        elif name == "webui.tar":
+            validate_volume_payload(stream, {"webui"}, name)
+        elif name == TERMINAL_VOLUME:
+            validate_volume_payload(stream, {"users"}, name)
+        elif name == "config.tar":
+            check_files(stream, "config", name)
+        elif name == "installers.tar":
+            check_files(stream, INSTALL_CACHE.as_posix(), name)
+        elif name == "source.tar":
+            check_checkout(stream, name)
+        elif name == TERMINAL_KEY and not config.TERMINAL_KEY_PATTERN.fullmatch(stream.read(515)):
+            raise TransferError("Invalid terminal server key in the backup.")
+    except tarfile.TarError as exc:
+        raise TransferError(f"Invalid {name} in the backup: {exc}") from exc
+    return None
+
+
+def unpack(archive: Archive, staging: Path | None, select: set[str]) -> dict:
+    """Check every member against the manifest and its content checks, and stage the selected ones.
+
+    Each member is read once: the same bytes are hashed, checked and staged. Nothing changes before
+    the whole archive passed. Returns the image platforms by member name.
+    """
     expected = {member["path"]: member for item in archive.manifest["items"] for member in item["members"]}
     seen = set()
+    results = {}
     with archive.path.open("rb") as raw:
         whole = HashingReader(raw)
         with gzip.GzipFile(fileobj=whole, mode="rb") as compressed:
@@ -408,10 +480,20 @@ def unpack(archive: Archive, staging: Path, select: set[str]) -> None:
                         Progress(f"{'Unpack' if stage else 'Check'} {member.name}", member.size) as progress,
                         members.extractfile(member) as payload,
                     ):
-                        reader = HashingReader(payload, progress)
-                        while block := reader.read(COPY_BUFFER):
-                            if output is not None:
-                                output.write(block)
+                        reader = HashingReader(payload, progress, output)
+                        try:
+                            if (result := check_member(member.name, reader)) is not None:
+                                results[member.name] = result
+                        except TransferError as problem:
+                            # A changed member reports the hash mismatch rather than what it broke.
+                            while reader.read(COPY_BUFFER):
+                                pass
+                            if reader.digest.hexdigest() != expected[member.name]["sha256"]:
+                                raise TransferError(f"SHA-256 verification failed for {member.name}.") from problem
+                            raise
+                        # The content check can end before the member does, for example at tar padding.
+                        while reader.read(COPY_BUFFER):
+                            pass
                     if reader.digest.hexdigest() != expected[member.name]["sha256"]:
                         raise TransferError(f"SHA-256 verification failed for {member.name}.")
                     seen.add(member.name)
@@ -424,6 +506,7 @@ def unpack(archive: Archive, staging: Path, select: set[str]) -> None:
         raise TransferError(f"{archive.path.name} is missing {', '.join(sorted(set(expected) - seen))}.")
     if archive.digest is not None and whole.digest.hexdigest() != archive.digest:
         raise TransferError(f"SHA-256 verification failed for {archive.path.name}.")
+    return results
 
 
 def member_record(staging: Path, path: str) -> dict:
@@ -451,6 +534,101 @@ def write_archive(staging: Path, pending: Path, manifest: dict, compression_leve
                     archive.addfile(entry, TrackedStream(payload, progress))
 
 
+# --- Member checks on streams ---
+
+@contextmanager
+def tar_stream(source):
+    """Read a tar once from start to end, from a path or a stream, without seeking or temporary files."""
+    with ExitStack() as stack:
+        stream = stack.enter_context(open(source, "rb")) if isinstance(source, (str, os.PathLike)) else source
+        yield stack.enter_context(tarfile.open(fileobj=stream, mode="r|", bufsize=COPY_BUFFER))
+
+
+def member_label(source, name: str | None) -> str:
+    return name or (Path(source).name if isinstance(source, (str, os.PathLike)) else "archive member")
+
+
+class SmallFiles:
+    """The small regular files of a tar read once, for manifests that name files stored before them."""
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+        self.files: dict[str, bytes] = {}
+        self.size = 0
+
+    def add(self, archive: tarfile.TarFile, member: tarfile.TarInfo) -> None:
+        if not member.isfile() or member.size > SMALL_FILE:
+            return
+        self.size += member.size
+        if self.size > SMALL_FILES_LIMIT:
+            raise TransferError(f"{self.label} holds more small files than loaf checks "
+                                f"({SMALL_FILES_LIMIT // 2 ** 20} MiB).")
+        with archive.extractfile(member) as payload:
+            self.files[posixpath.normpath(member.name)] = payload.read()
+
+    def __getitem__(self, name: str) -> bytes:
+        return self.files[posixpath.normpath(name)]
+
+
+def link_target(path: PurePosixPath, linkname: str) -> PurePosixPath | None:
+    """The archive path a symbolic link names, or None when the link is absolute or leaves the archive's root."""
+    if not linkname or PurePosixPath(linkname).is_absolute():
+        return None
+    target = PurePosixPath(posixpath.normpath(posixpath.join(path.parent.as_posix(), linkname)))
+    return None if target.parts[:1] == ("..",) else target
+
+
+def check_file_members(members: Iterable[tarfile.TarInfo], prefix: str, label: str) -> None:
+    """Accept regular files below one top-level directory. config.tar may also hold links to its own files."""
+    files, links, seen = set(), {}, set()
+    for member in members:
+        path = PurePosixPath(member.name)
+        link = prefix == "config" and member.issym()
+        if (not (member.isfile() or link) or not path.is_relative_to(prefix) or ".." in path.parts
+                or path.is_absolute() or path in seen or (prefix == "config" and path.suffix not in CONFIG_SUFFIXES)):
+            raise TransferError(f"Invalid file in {label}: {member.name!r}")
+        seen.add(path)
+        if link:
+            links[path] = link_target(path, member.linkname)
+        else:
+            files.add(path)
+    for path, target in links.items():
+        if target is None or target not in files:
+            raise TransferError(f"Invalid link in {label}: {str(path)!r} must point to a configuration file "
+                                f"archived in {prefix}/.")
+
+
+def check_files(source, prefix: str, label: str | None = None) -> None:
+    with tar_stream(source) as archive:
+        check_file_members(archive, prefix, member_label(source, label))
+
+
+def check_checkout_members(members: Iterable[tarfile.TarInfo], label: str) -> None:
+    """Accept checkout paths and links that stay in the checkout, and require a complete loaf checkout."""
+    seen, files = set(), set()
+    for member in members:
+        path = PurePosixPath(member.name)
+        if (not path.parts or path.is_absolute() or ".." in path.parts or path in seen
+                or path.parts[0] in CHECKOUT_RESERVED_PATHS or path.parts[0].startswith(".loaf-")
+                or not (member.isfile() or member.isdir() or member.issym() or member.islnk())):
+            raise TransferError(f"Invalid checkout path in {label}: {member.name!r}")
+        if member.issym() and link_target(path, member.linkname) is None:
+            raise TransferError(f"Checkout link in {label} leaves the checkout: {member.name!r}")
+        if member.islnk() and (PurePosixPath(member.linkname) not in files):
+            raise TransferError(f"Invalid hard link in {label}: {member.name!r}")
+        seen.add(path)
+        if member.isfile():
+            files.add(path)
+    if PurePosixPath(PYTHON_PACKAGE_DIR, "pyproject.toml") not in files or not any(
+            path.parts[0] == "docs" for path in seen):
+        raise TransferError("The source type in this backup is not a complete loaf checkout.")
+
+
+def check_checkout(source, label: str | None = None) -> None:
+    with tar_stream(source) as archive:
+        check_checkout_members(archive, member_label(source, label))
+
+
 # --- File types ---
 
 def checkout_paths(project: Path) -> set[Path] | None:
@@ -475,13 +653,19 @@ def write_tar(destination: Path, label: str, entries) -> None:
                 archive.add(path, arcname=name, recursive=False)
 
 
-def archive_config(project: Path, config_dir: Path, destination: Path, *, exclude_file: Path | None) -> None:
-    """Archive settings and saved Modelfiles."""
-    # Settings can come entirely from the system or packaged layers, but the directory must be a deployment.
-    if not (config_dir.is_dir() or (project / "docker-project").is_symlink() or checkout_paths(project) is not None):
-        raise TransferError("Backup needs a deployment prepared by loaf setup or a Git checkout.")
+def archive_config(config_dir: Path, destination: Path, *, exclude_file: Path | None) -> None:
+    """Archive settings and saved Modelfiles. Links stay links and must name one of the archived files."""
     files = sorted(path for path in config_dir.rglob("*") if path.suffix in CONFIG_SUFFIXES and path.is_file()
                    and path.resolve() != exclude_file) if config_dir.is_dir() else []
+    regular = {path for path in files if not path.is_symlink()}
+    for path in files:
+        if path.is_symlink():
+            link = os.readlink(path)
+            target = link_target(PurePosixPath(path.relative_to(config_dir).as_posix()), link)
+            if target is None or config_dir / target not in regular:
+                raise TransferError(
+                    f"{path} links to {link}. A backup keeps a link only when it points, relatively, to another "
+                    f"configuration file in {config_dir}. Replace it with such a link or a copy.")
     write_tar(destination, "Archive config.tar",
               ((path, (Path("config") / path.relative_to(config_dir)).as_posix()) for path in files))
 
@@ -499,6 +683,9 @@ def archive_installers(project: Path, destination: Path, *, exclude_file: Path |
             paths.add(record.relative_to(project))
     paths.update(path.relative_to(project) for path in wheels.glob("*.whl") if path.is_file() and not path.is_symlink())
     paths.update(path.relative_to(project) for path in docker_installer_files(project))
+    # The checked standalone Python runtime downloads that scripts/build-release.sh caches.
+    paths.update(path.relative_to(project) for path in (project / PYTHON_RUNTIME_DIR).glob("*.tar.gz")
+                 if path.is_file() and not path.is_symlink())
     entries = [(package.resolve(), (TOOLKIT_DIR / package.name).as_posix())
                for package in packages if package.resolve() != exclude_file]
     entries += [(project / relative, relative.as_posix()) for relative in sorted(paths)]
@@ -515,13 +702,19 @@ def archive_source(project: Path, destination: Path, *, exclude_file: Path | Non
                    if path.name == CHECKSUMS and path.parent != Path(".") and (project / path.parent / LAUNCHER).is_file()}
     project_parts = {"config", INSTALL_CACHE.name, ".venv"}
 
-    def exclude_secret(member):
-        return None if project / member.name == exclude_file else member
+    def checked(member):
+        if project / member.name == exclude_file:
+            return None
+        # Restore refuses links that leave the checkout, so the backup refuses them first.
+        if member.issym() and link_target(PurePosixPath(member.name), member.linkname) is None:
+            raise TransferError(f"{project / member.name} links to {member.linkname}, outside the checkout. "
+                                "A source backup keeps only links that stay inside it.")
+        return member
 
     with Progress("Archive source.tar") as progress, destination.open("wb") as output:
         stream = TrackedStream(output, progress)
         with tarfile.open(fileobj=stream, mode="w|", bufsize=COPY_BUFFER, copybufsize=COPY_BUFFER) as archive:
-            archive.add(project / ".git", arcname=".git", filter=exclude_secret)
+            archive.add(project / ".git", arcname=".git", filter=checked)
             for relative in sorted(paths):
                 path = project / relative
                 # Staging folders of this and other loaf operations stay out, like the backup folders.
@@ -531,31 +724,34 @@ def archive_source(project: Path, destination: Path, *, exclude_file: Path | Non
                 if relative == Path(LAUNCHER) and path.is_symlink():
                     continue
                 if path.exists() or path.is_symlink():
-                    archive.add(path, arcname=relative.as_posix(), recursive=False)
+                    archive.add(path, arcname=relative.as_posix(), recursive=False, filter=checked)
 
 
 def stage_files(source: Path, target: Path, prefix: str) -> None:
-    """Extract regular files below one top-level directory, refusing any other path."""
+    """Extract the files below one top-level directory, and config.tar's links to its own files."""
     with tarfile.open(source, "r:") as archive:
-        for member in archive:
-            path = PurePosixPath(member.name)
-            if (not member.isfile() or not path.is_relative_to(prefix) or ".." in path.parts or path.is_absolute()
-                    or (prefix == "config" and path.suffix not in CONFIG_SUFFIXES)):
-                raise TransferError(f"Invalid file in {source.name}: {member.name!r}")
-            destination = target / path
+        members = archive.getmembers()
+        check_file_members(members, prefix, source.name)
+        for member in members:
+            destination = target / member.name
             destination.parent.mkdir(parents=True, exist_ok=True)
+            if member.issym():
+                destination.symlink_to(member.linkname)
+                continue
             with destination.open("xb") as output, archive.extractfile(member) as payload:
                 shutil.copyfileobj(payload, output, length=COPY_BUFFER)
 
 
 def project_file_targets(source: Path, target: Path) -> list[tuple[Path, Path]]:
+    """Map staged files and links onto a directory. Each replaces the entry at its path, never writes through it."""
     files = []
     for path in sorted(source.rglob("*")) if source.is_dir() else ():
-        if not path.is_file():
+        if path.is_dir() and not path.is_symlink():
             continue
         destination = target / path.relative_to(source)
-        if destination.resolve() != destination or (destination.exists() and not destination.is_file()):
-            raise TransferError(f"Cannot restore a regular file to {destination}.")
+        if (destination.parent.resolve() != destination.parent
+                or (destination.exists() and not (destination.is_file() or destination.is_symlink()))):
+            raise TransferError(f"Cannot restore a file to {destination}.")
         for parent in destination.parents:
             if parent.exists() and not parent.is_dir():
                 raise TransferError(f"Cannot restore through {parent}.")
@@ -579,38 +775,44 @@ def publish_project_files(files: list[tuple[Path, Path]], group: int | None = No
                 directory.chmod(0o750)
         with TemporaryDirectory(dir=destination.parent, prefix=".loaf-restore-") as directory:
             replacement = Path(directory) / destination.name
-            shutil.copyfile(source, replacement)
-            if group is not None:
-                os.chown(replacement, -1, group)
-            replacement.chmod(0o600 if group is None else 0o640)
+            if source.is_symlink():
+                replacement.symlink_to(os.readlink(source))
+            else:
+                shutil.copyfile(source, replacement)
+                if group is not None:
+                    os.chown(replacement, -1, group)
+                replacement.chmod(0o600 if group is None else 0o640)
             replacement.replace(destination)
 
 
-def stage_configuration(recovered: Path, lower: tuple[Path, ...], destination: Path, version: str,
-                        terminal_key: Path | None = None) -> config.Settings:
-    """Load recovered settings over the lower configuration layers and keep the backup's version.
+def stage_configuration(recovered: Path, lower: tuple[Path, ...], destination: Path, namespace_name: str,
+                        terminal_key: Path | None = None, *, disable_terminal: bool = False) -> config.Settings:
+    """Load recovered settings over the lower configuration layers and keep the backup's namespace.
 
-    A given terminal key path stays configured: the system deployment's key does not move with its settings.
+    Changes edit single lines, so comments stay. Renamed settings get their current names. A given terminal
+    key path stays configured: the system deployment's key does not move with its settings. A backup made
+    without the terminal server restores it disabled.
     """
     target = recovered / config.CONFIG_NAME
-    current = recovered if target.is_file() else destination
-    settings = config.load(*lower, current)
-    keep_key = terminal_key is not None and settings.terminal_server_secret_file != terminal_key
-    if settings.version == version and not keep_key:
-        return settings
-    parser = ConfigParser(interpolation=None)
-    parser.read(current / config.CONFIG_NAME, encoding="utf-8-sig")
-    pinned = {("launcher", "version"): version}
-    if keep_key:
+    source = target if target.is_file() else destination / config.CONFIG_NAME
+    text = source.read_text(encoding="utf-8-sig") if source.is_file() else ""
+
+    def write(content: str) -> config.Settings:
+        recovered.mkdir(parents=True, exist_ok=True)
+        target.unlink(missing_ok=True)
+        target.write_text(content, encoding="utf-8")
+        return config.load(*lower, recovered)
+
+    current = config.edit_text(text, {})
+    settings = write(current) if current != text else config.load(*lower, source.parent)
+    pinned = {}
+    if settings.namespace_name != namespace_name:
+        pinned[("launcher", "namespace")] = namespace_name
+    if terminal_key is not None and settings.terminal_server_secret_file != terminal_key:
         pinned[("terminal_server", "secret_file")] = str(terminal_key)
-    for (section, key), value in pinned.items():
-        if not parser.has_section(section):
-            parser.add_section(section)
-        parser.set(section, key, value)
-    recovered.mkdir(parents=True, exist_ok=True)
-    with target.open("w", encoding="utf-8") as output:
-        parser.write(output)
-    return config.load(*lower, recovered)
+    if disable_terminal and settings.terminal_server_enabled:
+        pinned[("terminal_server", "enabled")] = "false"
+    return write(config.edit_text(current, pinned)) if pinned else settings
 
 
 def stage_checkout(source: Path, checkout: Path) -> None:
@@ -630,16 +832,8 @@ def stage_checkout(source: Path, checkout: Path) -> None:
     checkout.mkdir()
     with tarfile.open(source, "r:") as archive:
         members = archive.getmembers()
-        seen = set()
-        for member in members:
-            path = PurePosixPath(member.name)
-            if (not path.parts or path.is_absolute() or ".." in path.parts or path in seen
-                    or path.parts[0] in CHECKOUT_RESERVED_PATHS or path.parts[0].startswith(".loaf-")):
-                raise TransferError(f"Invalid checkout path in backup: {member.name!r}")
-            seen.add(path)
+        check_checkout_members(members, source.name)
         archive.extractall(checkout, members=members, filter=checked_member)
-    if not (checkout / PYTHON_PACKAGE_DIR / "pyproject.toml").is_file() or not (checkout / "docs").is_dir():
-        raise TransferError("The source type in this backup is not a complete loaf checkout.")
 
 
 def checkout_targets(checkout: Path, project: Path) -> list[tuple[Path, Path]]:
@@ -685,13 +879,48 @@ def require_inactive_volume(project: Path, volume: str) -> None:
         raise TransferError(f"The {volume} volume is in use. Stop its containers before transferring it.")
 
 
+def local_image(project: Path, image: str) -> bool:
+    return not subprocess.run(["docker", "image", "inspect", image], cwd=project,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+
+
 def require_helper_image(project: Path, namespace: str) -> None:
     image = image_names(namespace)[0]
-    try:
-        subprocess.run(["docker", "image", "inspect", image], cwd=project,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True)
-    except subprocess.CalledProcessError as exc:
-        raise TransferError(f"Restoring volumes without images requires the local helper image {image}.") from exc
+    if not local_image(project, image):
+        raise TransferError(f"Restoring volumes without images requires the local helper image {image}.")
+
+
+def existing_volume(project: Path, name: str) -> dict | None:
+    listed = subprocess.check_output(["docker", "volume", "ls", "--quiet", "--filter", f"name={name}"], cwd=project)
+    if name not in listed.decode().split():
+        return None
+    volume, = json.loads(subprocess.check_output(["docker", "volume", "inspect", name], cwd=project))
+    return volume
+
+
+def require_empty_volume(project: Path, namespace: str, name: str) -> dict | None:
+    """Refuse an existing restore target that is in use or holds data, before the restore changes anything.
+
+    Returns the existing volume's record, or None when restore will create the volume.
+    """
+    volume = existing_volume(project, name)
+    if volume is None:
+        return None
+    require_inactive_volume(project, name)
+    image = image_names(namespace)[0]
+    if not local_image(project, image):
+        raise TransferError(f"The {name} volume exists. Checking that it is empty needs the local image {image}. "
+                            "Restore the images first, then the volumes.")
+    entry = subprocess.check_output([
+        "docker", "run", "--rm", "--pull", "never", "--network", "none", "--read-only",
+        "--mount", f"type=volume,source={name},target=/volume,readonly,volume-nocopy",
+        "--entrypoint", "find", image, "/volume", "-mindepth", "1", "-print", "-quit",
+    ], cwd=project)
+    if entry.strip():
+        raise TransferError(
+            f"Restore needs a new or empty {name} volume, but it holds data. Save it with loaf backup if you need "
+            f"it, remove it with 'docker volume rm {name}', or restore into another namespace with --namespace.")
+    return volume
 
 
 def volume_command(*, restore: bool = False, namespace: str = config.DEPLOYMENT,
@@ -850,47 +1079,51 @@ def check_backup_modelfiles(project: Path, models: Path, staging: Path, namespac
     return problems
 
 
-def saved_image_tags(path: Path) -> dict[str, set[str]]:
-    """Return each image tag in a docker image save archive with its platforms."""
+def saved_image_tags(source, label: str | None = None) -> dict[str, set[str]]:
+    """Return each image tag in a docker image save archive with its platforms, reading the archive once.
+
+    docker image save writes manifest.json after the blobs it names, so small files stay in memory.
+    """
+    label = member_label(source, label)
+    small = SmallFiles(label)
+    with tar_stream(source) as images:
+        for member in images:
+            small.add(images, member)
     try:
-        with tarfile.open(path, "r:") as images:
-            with images.extractfile("manifest.json") as manifest:
-                entries = json.load(manifest)
-            platforms = {}
-            for image in entries:
-                with images.extractfile(image["Config"]) as metadata:
-                    platform = json.load(metadata)
-                fields = [platform["os"], platform["architecture"]]
-                if platform.get("variant"):
-                    fields.append(platform["variant"])
-                for tag in image["RepoTags"] or ():
-                    platforms.setdefault(tag, set()).add("/".join(fields))
+        platforms = {}
+        for image in json.loads(small["manifest.json"]):
+            platform = json.loads(small[image["Config"]])
+            fields = [platform["os"], platform["architecture"]]
+            if platform.get("variant"):
+                fields.append(platform["variant"])
+            for tag in image["RepoTags"] or ():
+                platforms.setdefault(tag, set()).add("/".join(fields))
     except (AttributeError, KeyError, ValueError, TypeError) as exc:
-        raise TransferError(f"Invalid Docker image manifest in {path.name}.") from exc
+        raise TransferError(f"Invalid Docker image manifest in {label}.") from exc
     return platforms
 
 
-def image_platforms(path: Path, namespace: str) -> dict[str, set[str]]:
-    platforms = saved_image_tags(path)
+def check_image_tags(platforms: dict[str, set[str]], namespace: str) -> dict[str, set[str]]:
     core = set(image_names(namespace))
     if platforms.keys() not in (core, set(image_names(namespace, include_terminal=True))):
         raise TransferError(
-            f"Backup image tags {', '.join(sorted(platforms))} do not match deployment {namespace}. Select the "
-            "matching --version, or restore the images with the loaf release that created the backup.")
+            f"Backup image tags {', '.join(sorted(platforms))} do not match namespace {namespace}. Select the "
+            "matching --namespace, or restore the images with the loaf release that created the backup.")
     return platforms
 
 
-def validate_volume_payload(path: Path, volumes: set[str]) -> None:
+def validate_volume_payload(source, volumes: set[str], label: str | None = None) -> None:
     """Accept only the named volume directories, each present, without links leaving their volume."""
+    label = member_label(source, label)
     missing = set(volumes)
     entries, links, targets = set(), set(), set()
-    with tarfile.open(path, "r:") as archive:
+    with tar_stream(source) as archive:
         for member in archive:
             name = PurePosixPath(member.name)
             if not name.parts or name.parts[0] not in volumes or ".." in name.parts or name in entries:
-                raise TransferError(f"Unexpected path in {path.name}: {member.name!r}")
+                raise TransferError(f"Unexpected path in {label}: {member.name!r}")
             if member.ischr() or member.isblk() or (len(name.parts) == 1 and not member.isdir()):
-                raise TransferError(f"Unexpected file type in {path.name}: {member.name!r}")
+                raise TransferError(f"Unexpected file type in {label}: {member.name!r}")
             entries.add(name)
             if len(name.parts) == 1:
                 missing.discard(name.name)
@@ -899,12 +1132,12 @@ def validate_volume_payload(path: Path, volumes: set[str]) -> None:
             if member.islnk():
                 target = PurePosixPath(member.linkname)
                 if not target.parts or target.parts[0] != name.parts[0] or ".." in target.parts:
-                    raise TransferError(f"Invalid hard link in {path.name}: {member.name!r}")
+                    raise TransferError(f"Invalid hard link in {label}: {member.name!r}")
                 targets.add(target)
     if any(not links.isdisjoint(entry.parents) for entry in entries | targets):
-        raise TransferError(f"A path in {path.name} traverses an archived link.")
+        raise TransferError(f"A path in {label} traverses an archived link.")
     if missing:
-        raise TransferError(f"{path.name} is missing data for {', '.join(sorted(missing))}.")
+        raise TransferError(f"{label} is missing data for {', '.join(sorted(missing))}.")
 
 
 MODEL_TRANSFER_SETUP = """\
@@ -954,11 +1187,10 @@ def model_blob(entries: dict[PurePosixPath, tarfile.TarInfo], digest: str) -> ta
     return blob
 
 
-def read_model_manifest(archive: tarfile.TarFile, member: tarfile.TarInfo, digest: str | None = None) -> dict:
-    if member.size > COPY_BUFFER:
+def read_model_manifest(files: SmallFiles, member: tarfile.TarInfo, digest: str | None = None) -> dict:
+    if member.size > SMALL_FILE:
         raise ValueError("Model manifest exceeds 1 MiB.")
-    with archive.extractfile(member) as payload:
-        data = payload.read()
+    data = files[member.name]
     if digest is not None and "sha256:" + sha256(data).hexdigest() != digest:
         raise ValueError(f"Manifest blob digest mismatch for {digest}.")
     definition = json.loads(data)
@@ -975,10 +1207,12 @@ def validate_model_layers(entries: dict[PurePosixPath, tarfile.TarInfo], definit
             raise ValueError(f"Missing or incomplete blob {digest}.")
 
 
-def validate_model_archive(path: Path) -> None:
-    with tarfile.open(path, "r:") as archive:
-        entries = {}
-        manifests = []
+def validate_model_archive(source, label: str | None = None) -> None:
+    """Check a model snapshot in one pass: its paths, and each manifest's blobs with their sizes."""
+    small = SmallFiles(member_label(source, label))
+    entries = {}
+    manifests = []
+    with tar_stream(source) as archive:
         for member in archive:
             name = PurePosixPath(member.name)
             # A v2 tag path ends in registry/namespace/model/tag.
@@ -992,39 +1226,41 @@ def validate_model_archive(path: Path) -> None:
             entries[name] = member
             if (v2_manifest and not member.isdir()) or (member.isfile() and name.parts[:2] == ("models", "manifests")):
                 manifests.append((name, member))
-        if PurePosixPath("models") not in entries:
-            raise TransferError("The model archive is missing the models directory.")
-        for name in entries:
-            for parent in name.parents:
-                if parent in entries and not entries[parent].isdir():
-                    raise TransferError(f"Model archive member {str(name)!r} has a non-directory parent {str(parent)!r}.")
-        for name, manifest in manifests:
-            try:
-                if manifest.issym():
-                    filename = PurePosixPath(manifest.linkname).name
-                    expected = posixpath.relpath(f"models/blobs/{filename}", name.parent.as_posix())
-                    if not filename.startswith("sha256-") or manifest.linkname != expected:
-                        raise ValueError("Expected a relative link to a manifest blob.")
-                    digest = filename.replace("-", ":", 1)
-                    definition = read_model_manifest(archive, model_blob(entries, digest), digest)
-                else:
-                    definition = read_model_manifest(archive, manifest)
+            if name.parts[:2] in (("models", "manifests"), ("models", "manifests-v2"), ("models", "blobs")):
+                small.add(archive, member)
+    if PurePosixPath("models") not in entries:
+        raise TransferError("The model archive is missing the models directory.")
+    for name in entries:
+        for parent in name.parents:
+            if parent in entries and not entries[parent].isdir():
+                raise TransferError(f"Model archive member {str(name)!r} has a non-directory parent {str(parent)!r}.")
+    for name, manifest in manifests:
+        try:
+            if manifest.issym():
+                filename = PurePosixPath(manifest.linkname).name
+                expected = posixpath.relpath(f"models/blobs/{filename}", name.parent.as_posix())
+                if not filename.startswith("sha256-") or manifest.linkname != expected:
+                    raise ValueError("Expected a relative link to a manifest blob.")
+                digest = filename.replace("-", ":", 1)
+                definition = read_model_manifest(small, model_blob(entries, digest), digest)
+            else:
+                definition = read_model_manifest(small, manifest)
 
-                if definition.get("mediaType") == MANIFEST_LIST_TYPE:
-                    children = definition["manifests"]
-                    if not isinstance(children, list) or not children:
-                        raise ValueError("Expected a non-empty manifest list.")
-                    for child in children:
-                        if not isinstance(child, dict):
-                            raise ValueError("Expected a child manifest object.")
-                        if "digest" in child:
-                            digest = child["digest"]
-                            child = read_model_manifest(archive, model_blob(entries, digest), digest)
-                        validate_model_layers(entries, child)
-                else:
-                    validate_model_layers(entries, definition)
-            except (KeyError, TypeError, ValueError) as exc:
-                raise TransferError(f"Invalid model manifest {manifest.name!r}. {exc}") from exc
+            if definition.get("mediaType") == MANIFEST_LIST_TYPE:
+                children = definition["manifests"]
+                if not isinstance(children, list) or not children:
+                    raise ValueError("Expected a non-empty manifest list.")
+                for child in children:
+                    if not isinstance(child, dict):
+                        raise ValueError("Expected a child manifest object.")
+                    if "digest" in child:
+                        digest = child["digest"]
+                        child = read_model_manifest(small, model_blob(entries, digest), digest)
+                    validate_model_layers(entries, child)
+            else:
+                validate_model_layers(entries, definition)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise TransferError(f"Invalid model manifest {manifest.name!r}. {exc}") from exc
 
 
 def model_volume_command(project: Path, namespace: str, *, restore: bool = False, delete: bool = False) -> list[str]:
@@ -1081,6 +1317,12 @@ def terminal_volume_exists(project: Path, namespace: str) -> bool:
     return True
 
 
+def check_volume_settings(volume: dict, labels: dict[str, str], driver: str, options: dict[str, str]) -> None:
+    if (volume["Labels"] or {}) != labels or volume["Driver"] != driver or (volume["Options"] or {}) != options:
+        raise TransferError(f"Terminal volume {volume['Name']} does not match the deployment's ownership or "
+                            "storage settings.")
+
+
 def create_labeled_volume(project: Path, name: str, labels: dict[str, str], driver: str, options: dict[str, str]) -> None:
     command = ["docker", "volume", "create", "--driver", driver]
     for label, value in labels.items():
@@ -1089,8 +1331,16 @@ def create_labeled_volume(project: Path, name: str, labels: dict[str, str], driv
         command += ["--opt", f"{option}={value}"]
     subprocess.check_output([*command, name], cwd=project)
     volume, = json.loads(subprocess.check_output(["docker", "volume", "inspect", name], cwd=project))
-    if volume["Labels"] != labels or volume["Driver"] != driver or (volume["Options"] or {}) != options:
-        raise TransferError(f"Terminal volume {name} does not match the deployment's ownership or storage settings.")
+    check_volume_settings(volume, labels, driver, options)
+
+
+def drop_terminal_connection(project: Path, namespace: str, volume: str) -> None:
+    """Remove loaf's saved terminal connection from restored Open WebUI data, with the network-less WebUI image."""
+    subprocess.run([
+        "docker", "run", "--rm", "--pull", "never", "--network", "none", "--read-only", "--tmpfs", "/tmp",
+        "--mount", f"type=volume,source={volume},target=/app/backend/data,volume-nocopy",
+        "--entrypoint", "python3", image_names(namespace)[2], "-c", DROP_TERMINAL_CONNECTION,
+    ], cwd=project, check=True)
 
 
 def matching_terminal_key(path: Path, key: bytes) -> bool:
@@ -1136,16 +1386,30 @@ class Terminal:
 
 
 def read_terminal(item: dict, staging: Path) -> Terminal:
-    key = (staging / TERMINAL_KEY).read_bytes()
-    if not config.TERMINAL_KEY_PATTERN.fullmatch(key):
-        raise TransferError("Invalid terminal server key in the backup.")
-    users = TERMINAL_VOLUME in {member["path"] for member in item["members"]}
-    if users:
-        validate_volume_payload(staging / TERMINAL_VOLUME, {"users"})
-    return Terminal(key, users)
+    """Read the terminal type that unpack already checked."""
+    return Terminal((staging / TERMINAL_KEY).read_bytes(), TERMINAL_VOLUME in {member["path"] for member in item["members"]})
 
 
 # --- Backup ---
+
+def check_backup_types(project: Path, config_dir: Path, types: tuple[str, ...], *, terminal_key: Path,
+                       skip_terminal_server: bool = False) -> None:
+    """Refuse types this deployment cannot back up, before any service stops. Dry runs use the same checks."""
+    if not types or set(types) - set(TYPES):
+        raise TransferError(f"Select archive types from {', '.join(TYPES)}.")
+    if "terminal" in types and "webui" not in types:
+        raise TransferError("The terminal type needs the WebUI data that owns its accounts. Add webui.")
+    if "terminal" in types and skip_terminal_server:
+        raise TransferError("--no-terminal-server leaves out the terminal type. Omit one of them.")
+    checkout = checkout_paths(project) is not None if {"source", "config"} & set(types) else False
+    if "source" in types and not checkout:
+        raise TransferError("The source type needs a Git checkout. Omit source for this deployment.")
+    # Settings can come entirely from the system or packaged layers, but the directory must be a deployment.
+    if "config" in types and not (config_dir.is_dir() or (project / "docker-project").is_symlink() or checkout):
+        raise TransferError("Backup needs a deployment prepared by loaf setup or a Git checkout.")
+    if "terminal" in types:
+        config.read_terminal_secret(terminal_key)
+
 
 def backup(
     project: Path,
@@ -1154,20 +1418,22 @@ def backup(
     *,
     types: tuple[str, ...],
     namespace: str = config.DEPLOYMENT,
-    version: str = "",
+    namespace_name: str = "",
     compression_level: int = config.DEFAULT_COMPRESSION_LEVEL,
     terminal_key: Path | None = None,
-    include_terminal_image: bool = True,
+    skip_terminal_server: bool = False,
     config_dir: Path | None = None,
 ) -> None:
-    """Write one archive: loaf.json first, then the members of each selected type."""
+    """Write one archive: loaf.json first, then the members of each selected type.
+
+    skip_terminal_server leaves out the terminal image and type and records that in loaf.json, so restore
+    disables the terminal server.
+    """
     if destination.is_relative_to(project / ".git"):
         raise TransferError("Choose a backup directory outside .git.")
-    if not types or set(types) - set(TYPES):
-        raise TransferError(f"Select archive types from {', '.join(TYPES)}.")
-    if "terminal" in types and "webui" not in types:
-        raise TransferError("The terminal type needs the WebUI data that owns its accounts. Add webui.")
     terminal_key = terminal_key or project / config.TERMINAL_SECRET
+    config_dir = config_dir or project / "config"
+    check_backup_types(project, config_dir, types, terminal_key=terminal_key, skip_terminal_server=skip_terminal_server)
     key = config.read_terminal_secret(terminal_key) if "terminal" in types else None
     destination.parent.mkdir(parents=True, exist_ok=True)
     items = []
@@ -1182,7 +1448,7 @@ def backup(
             archive_source(project, staging / "source.tar", exclude_file=terminal_key)
             add("source", "source.tar")
         if "config" in types:
-            archive_config(project, config_dir or project / "config", staging / "config.tar", exclude_file=terminal_key)
+            archive_config(config_dir, staging / "config.tar", exclude_file=terminal_key)
             add("config", "config.tar")
         if "installers" in types:
             print("Collecting cached installers…", file=sys.stderr, flush=True)
@@ -1190,7 +1456,7 @@ def backup(
             add("installers", "installers.tar")
         if "images" in types:
             images = image_names(namespace)
-            if include_terminal_image:
+            if not skip_terminal_server:
                 terminal_image = image_names(namespace, include_terminal=True)[-1]
                 if subprocess.check_output(
                     ["docker", "image", "ls", "--quiet", "--filter", f"reference={terminal_image}"], cwd=project,
@@ -1229,7 +1495,8 @@ def backup(
 
         manifest = {
             "format": ARCHIVE_FORMAT, "version": ARCHIVE_VERSION, "created": datetime.now().astimezone().isoformat(),
-            "loaf": assets.release_version(), "deployment": version, "items": items,
+            "loaf": assets.release_version(), "deployment": namespace_name,
+            **({"skip_terminal_server": True} if skip_terminal_server else {}), "items": items,
         }
         # Publish only after all payloads are complete, preserving any old backup
         # if a command fails or the operation is interrupted.
@@ -1240,7 +1507,7 @@ def backup(
 
 
 def backup_bundle(project: Path, destination: Path, prepare_services: Callable[[], None], *,
-                  version: str, executable: Path | None = None, **options) -> None:
+                  namespace_name: str, executable: Path | None = None, **options) -> None:
     """Publish a backup folder with the archive, the launcher that can restore it and their checksums."""
     if destination.is_relative_to(project / ".git"):
         raise TransferError("Choose a backup directory outside .git.")
@@ -1258,7 +1525,8 @@ def backup_bundle(project: Path, destination: Path, prepare_services: Callable[[
         shutil.copyfile(executable, copy)
         copy.chmod(runnable)
         archive = bundle / f"{destination.name}.tar.gz"
-        backup(project, archive, prepare_services, namespace=config.namespace(version), version=version, **options)
+        backup(project, archive, prepare_services, namespace=config.namespace(namespace_name),
+               namespace_name=namespace_name, **options)
         sums = bundle / CHECKSUMS
         sums.write_text(f"{file_digest(copy)}  {LAUNCHER}\n{file_digest(archive)}  {archive.name}\n", encoding="utf-8")
         sums.chmod(private)
@@ -1270,19 +1538,20 @@ def backup_bundle(project: Path, destination: Path, prepare_services: Callable[[
 def describe(archive: Archive) -> list[str]:
     lines = [f"Archive format {archive.manifest['version']}, created {archive.manifest.get('created', 'unknown')} "
              f"by loaf {archive.manifest.get('loaf', 'unknown')} for "
-             f"deployment {config.namespace(archive.deployment)}."]
+             f"namespace {config.namespace(archive.namespace_name)}."]
     for item in archive.manifest["items"]:
         size = sum(member["size"] for member in item["members"])
         lines.append(f"  {item['type']:<10} {size:>15,} bytes")
+    if archive.skip_terminal_server:
+        lines.append("  Made with --no-terminal-server: restore disables the terminal server.")
     return lines
 
 
 def verify_backup(archive: Archive, namespace: str) -> None:
-    with TemporaryDirectory(prefix="loaf-verify-") as folder:
-        staging = Path(folder)
-        unpack(archive, staging, {"images.tar"})
-        platforms = image_platforms(staging / "images.tar", namespace) if "images" in archive.items else {}
-    print(f"Verified SHA-256 hashes for all members of {archive.path}")
+    """Run restore's archive checks on the stream, without Docker or temporary copies."""
+    checked = unpack(archive, None, set())
+    platforms = check_image_tags(checked["images.tar"], namespace) if "images.tar" in checked else {}
+    print(f"Verified SHA-256 hashes and contents of all members of {archive.path}")
     for line in describe(archive):
         print(line)
     for image, supported in sorted(platforms.items()):
@@ -1309,6 +1578,16 @@ def setup_from_archive(archive: Archive, project: Path, *, installers: bool) -> 
     return None
 
 
+def requested_types(archive: Archive, types) -> tuple[str, ...]:
+    """The types a restore applies: the named ones, which the archive must contain, or all of its types."""
+    items = archive.items
+    requested = expand_types(types) if types else tuple(kind for kind in TYPES if kind in items)
+    missing = [kind for kind in requested if kind not in items]
+    if missing:
+        raise TransferError(f"{archive.path.name} does not contain {', '.join(missing)}.")
+    return requested
+
+
 def restore(project: Path, archive: Archive, types: tuple[str, ...] | None = None, *,
             namespace: str = config.DEPLOYMENT,
             settings: config.Settings | None = None, configuration: tuple[tuple[Path, ...], Path, str] | None = None,
@@ -1316,13 +1595,11 @@ def restore(project: Path, archive: Archive, types: tuple[str, ...] | None = Non
     """Verify the whole archive, then restore the selected types in order.
 
     The system deployment shares restored settings and installers with its directories' group,
-    keeps its terminal key path and lets that group read a restored key.
+    keeps its terminal key path and lets that group read a restored key. A backup made with
+    --no-terminal-server restores the terminal server disabled and without loaf's saved WebUI connection.
     """
     items = archive.items
-    requested = expand_types(types) if types else tuple(kind for kind in TYPES if kind in items)
-    missing = [kind for kind in requested if kind not in items]
-    if missing:
-        raise TransferError(f"{archive.path.name} does not contain {', '.join(missing)}.")
+    requested = requested_types(archive, types)
     settings = settings or config.Settings()
     config_dir = configuration[1] if configuration else project / "config"
     project.mkdir(parents=True, exist_ok=True)
@@ -1330,15 +1607,11 @@ def restore(project: Path, archive: Archive, types: tuple[str, ...] | None = Non
     with TemporaryDirectory(prefix=".loaf-restore-", dir=project) as folder:
         staging = Path(folder)
         print(f"Checking and unpacking {archive.path}…", file=sys.stderr, flush=True)
-        unpack(archive, staging, {member["path"] for kind in requested for member in items[kind]["members"]})
+        checked = unpack(archive, staging, {member["path"] for kind in requested for member in items[kind]["members"]})
 
-        # Check everything before the first change.
+        # Check everything before the first change. unpack checked each member's content.
         if "images" in requested:
-            image_platforms(staging / "images.tar", namespace)
-        if "models" in requested:
-            validate_model_archive(staging / "models.tar")
-        if "webui" in requested:
-            validate_volume_payload(staging / "webui.tar", {"webui"})
+            check_image_tags(checked["images.tar"], namespace)
         terminal = read_terminal(items["terminal"], staging) if "terminal" in requested else None
         checkout = staging / "checkout"
         if "source" in requested:
@@ -1348,10 +1621,11 @@ def restore(project: Path, archive: Archive, types: tuple[str, ...] | None = Non
         if "config" in requested:
             stage_files(staging / "config.tar", files, "config")
             if configuration is not None:
-                lower, _, version = configuration
+                lower, _, namespace_name = configuration
                 system_key = config.terminal_secret_path(project, settings.terminal_server_secret_file) if system else None
-                settings = restored_settings = stage_configuration(files / "config", lower, config_dir, version,
-                                                                   system_key)
+                settings = restored_settings = stage_configuration(
+                    files / "config", lower, config_dir, namespace_name, system_key,
+                    disable_terminal=archive.skip_terminal_server)
         if "installers" in requested:
             stage_files(staging / "installers.tar", files, INSTALL_CACHE.as_posix())
         checkout_entries = checkout_targets(checkout, project) if "source" in requested else []
@@ -1367,10 +1641,20 @@ def restore(project: Path, archive: Archive, types: tuple[str, ...] | None = Non
             require_helper_image(project, namespace)
         webui = next(name for name, role in volume_names(namespace).items() if role == "webui")
         if "webui" in requested:
-            require_inactive_volume(project, webui)
+            require_empty_volume(project, namespace, webui)
         users = terminal_volume(namespace)
+        users_options = json.loads(settings.terminal_server_volume_options)
         if terminal is not None and terminal.users:
-            require_inactive_volume(project, users)
+            existing = require_empty_volume(project, namespace, users)
+            if existing is not None:
+                check_volume_settings(existing, terminal_volume_labels(namespace), settings.terminal_server_volume_driver,
+                                      users_options)
+        drop_connection = archive.skip_terminal_server and "webui" in requested
+        webui_image = image_names(namespace)[2]
+        if drop_connection and "images" not in requested and not local_image(project, webui_image):
+            raise TransferError(f"This backup leaves out the terminal server, so restore removes loaf's saved terminal "
+                                f"connection from the WebUI data with the local image {webui_image}, which is missing. "
+                                "Restore the images too.")
         model_command = model_volume_command(project, namespace, restore=True, delete=delete) if "models" in requested else None
 
         publish_checkout(checkout_entries, staging / "replaced")
@@ -1385,14 +1669,17 @@ def restore(project: Path, archive: Archive, types: tuple[str, ...] | None = Non
             ensure_compose_volume(project, namespace, "open-webui")
             docker_archive(project, volume_command(restore=True, namespace=namespace, volumes={webui: "webui"}),
                            staging / "webui.tar", "Restore webui.tar", send=True)
+            if drop_connection:
+                drop_terminal_connection(project, namespace, webui)
         if terminal is not None:
             if terminal.users:
                 create_labeled_volume(project, users, terminal_volume_labels(namespace),
-                                      settings.terminal_server_volume_driver,
-                                      json.loads(settings.terminal_server_volume_options))
+                                      settings.terminal_server_volume_driver, users_options)
             with restore_terminal_key(terminal_key, terminal.key, group=SYSTEM_GROUP if system else None):
                 if terminal.users:
                     docker_archive(project, volume_command(restore=True, namespace=namespace, volumes={users: "users"}),
                                    staging / TERMINAL_VOLUME, f"Restore {TERMINAL_VOLUME}", send=True)
             print(f"Terminal server key available at {terminal_key}.")
+        if archive.skip_terminal_server and restored_settings is not None:
+            print("The backup leaves out the terminal server. The restored settings disable it.", flush=True)
         return RestoredBackup(requested, restored_settings)

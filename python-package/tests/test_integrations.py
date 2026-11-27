@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from loaf import cli
+from tests import ROOT
 
 
 class IntegrationTests(unittest.TestCase):
@@ -19,7 +20,7 @@ class IntegrationTests(unittest.TestCase):
         self.config = self.project / "config dir"
         self.config.mkdir()
         (self.config / "config.ini").write_text(
-            "[launcher]\nversion = demo\n[webui]\nbind_address = ::\nport = 3100\n", encoding="utf-8",
+            "[launcher]\nnamespace = demo\n[webui]\nbind_address = ::\nport = 3100\n", encoding="utf-8",
         )
 
     def generate(self, mode, *options):
@@ -64,9 +65,14 @@ class IntegrationTests(unittest.TestCase):
         for key, mode in (("ExecStart", "offline --attach"), ("ExecStop", "stop")):
             line, = [line for line in unit.splitlines() if line.startswith(key + "=")]
             self.assertIn('"--config-dir" "' + str(self.config).replace("%", "%%") + '"', line)
-            self.assertIn('"--version" "demo"', line)
+            self.assertIn('"--namespace" "demo"', line)
             self.assertTrue(line.endswith(" " + mode))
-        self.assertIn('"--version="', self.generate("systemd", "--version="))
+        self.assertIn('"--namespace="', self.generate("systemd", "--namespace="))
+        # Like the packaged unit, it needs Docker and leaves the terminal server time to stop its chats.
+        self.assertIn("Requires=docker.service\nAfter=docker.service network-online.target\n", unit)
+        self.assertIn("TimeoutStopSec=90\n", unit)
+        packaged = (ROOT / "packaging/debian/loaf.service").read_text(encoding="utf-8")
+        self.assertIn("TimeoutStopSec=90\n", packaged)
 
     def test_continue_uses_the_webui_url_and_selected_ollama_ids(self):
         (self.config / "models.ini").write_text(
@@ -79,6 +85,12 @@ class IntegrationTests(unittest.TestCase):
             self.assertIn(f'model: "{model_id}"', yaml)
         self.assertEqual(yaml.count('apiBase: "http://[::1]:3100/api"'), 3)
         self.assertEqual(yaml.count("apiKey: REPLACE_WITH_OPEN_WEBUI_API_KEY"), 3)
+        # Safe defaults: Continue's default roles and its own capability detection, with hints to widen them.
+        self.assertEqual(yaml.count("    roles: [chat, edit, apply, summarize]\n"), 3)
+        self.assertEqual(yaml.count("    # capabilities: [tool_use, image_input]\n"), 3)
+        for role in ("embed", "rerank", "autocomplete"):
+            self.assertNotIn(role, "".join(line for line in yaml.splitlines(True) if not line.startswith("#")))
+        self.assertIn("# - autocomplete needs a code model", yaml)
         override = self.project / "override.ini"
         override.write_text("[models.default]\nmodel = hf.co/owner/override\n", encoding="utf-8")
         yaml = self.generate("continue", "--models-file", str(override))

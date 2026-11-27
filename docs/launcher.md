@@ -72,7 +72,10 @@ python -m pip install --no-index --find-links install-cache/wheels local-ai-ferr
 ```
 
 Run `loaf link-docker-project` in the directory where you want to work.
-Use the source checkout for host setup and full backups when installing
+Outside a source checkout, `loaf setup` from a wheel installation prepares a
+deployment like the standalone executable: it copies the missing
+configuration, links the packaged Docker project and creates the terminal
+key. Use the source checkout for host setup and full backups when installing
 from a wheel. [Release executable setup](releases.md#run-the-executable)
 
 ### Test packages
@@ -94,7 +97,7 @@ tries local wheels first and fetches missing packages through pip's
 configured sources. Backups from the checkout carry the test wheels and
 their record. A recovered checkout with the same Python version and
 platform can install them offline. Some wheels are platform-specific.
-`loaf clean --full` removes them with the rest of the install cache.
+`loaf clean --full` asks before it removes them with the rest of the install cache.
 [pip local install reference](https://pip.pypa.io/en/stable/cli/pip_install/#examples)
 
 ## Upgrade the standalone executable
@@ -109,7 +112,7 @@ newer images from a backup. `./loaf version` shows the release in use.
 Releases up to 0.4.0 named the default deployment `local-inference`. Its
 images were `local/NAME:latest`, its volumes `ollama` and `open-webui`, and
 the terminal user volume `loaf-tools-HASH-users`. Every name now starts with
-the deployment namespace `loaf`, or `loaf-VERSION` for a versioned deployment.
+the deployment namespace `loaf`, or `loaf-NAME` for a separate namespace.
 Docker cannot rename volumes or images, so the new release starts with empty
 volumes until you move the data. [Docker names](#list-and-remove-docker-resources)
 
@@ -173,9 +176,11 @@ copy_volume open-webui loaf-open-webui --label com.docker.compose.project=loaf -
 copy_volume loaf-tools-HASH-users loaf-terminal-users --label loaf.terminal.project=loaf --label loaf.terminal.users=true
 ```
 
-For a versioned deployment, add the same `--version` to the loaf commands. The
-old names were `VERSION-local-inference` for the project and volume prefix and
-`local/NAME:VERSION-local-inference` for the images.
+For a deployment that used `--version VERSION`, add `--namespace VERSION` to
+the new loaf commands, and rename `[launcher] version` to `[launcher] namespace`
+in its `config.ini`. The old names were `VERSION-local-inference` for the
+project and volume prefix and `local/IMAGE:VERSION-local-inference` for the
+images.
 
 ## Bash completion
 
@@ -241,8 +246,8 @@ containing the link for those commands. For manual Compose commands, enter
 the link directory. Direct Compose reads its environment and Compose defaults.
 Without further settings, it uses the default deployment `loaf`, and Open
 WebUI starts without the terminal connection that `loaf` presets. For a
-versioned deployment, set `LOAF_VERSION` and the matching project name, for
-example `LOAF_VERSION=v1-2-3 docker compose --project-name loaf-v1-2-3`.
+separate namespace, set `LOAF_NAMESPACE` and the matching project name, for
+example `LOAF_NAMESPACE=v1-2-3 docker compose --project-name loaf-v1-2-3`.
 [Configuration overrides](configuration.md#overrides)
 
 ## Select models
@@ -281,7 +286,12 @@ PYTHONPATH=python-package/src python3 -m loaf setup
 
 The command prepares the virtualenv, Python wheel cache, NVIDIA toolkit
 packages and terminal key under the checkout lock. `install` runs the same
-preparation. Use `setup --terminal-server-key` to prepare only the key. Use
+preparation. Run it as the checkout's owner: the APT steps use `sudo`. As
+root, setup refuses a checkout that another user owns, because root would own
+the virtualenv and caches and link them to its own Python. Add `--allow-root`
+to prepare the checkout as root anyway. If an earlier root setup left a
+`.venv` that your user cannot replace, setup names the `sudo rm -rf` command
+that removes it. Use `setup --terminal-server-key` to prepare only the key. Use
 `setup --dry-run` to preview it. Once installed, run `build` or `upgrade`, then
 `download`, `offline` to check the deployment, and `backup` to archive it.
 [Host prerequisites](debian.md) · [Quick Setup](../README.md#quick-setup) ·
@@ -333,8 +343,8 @@ NVIDIA inference.
 Run `loaf stop` to stop the selected deployment and remove its Compose service
 containers. The command keeps named volumes, bind-mounted files, images
 and networks. It removes container logs and files stored only in a container's
-writable layer. Use `loaf stop -n` or `loaf stop --no-remove-containers` to keep
-stopped containers and their logs. Preview either form with `--dry-run`.
+writable layer. Use `loaf stop --no-remove-containers` to keep stopped
+containers and their logs. Preview either form with `--dry-run`.
 To remove networks, volumes or images as well, use
 [`loaf docker rm`](#list-and-remove-docker-resources).
 [Compose container removal](https://docs.docker.com/reference/cli/docker/compose/rm/)
@@ -342,7 +352,7 @@ To remove networks, volumes or images as well, use
 ### List and remove Docker resources
 
 Every Docker resource of a deployment starts with its namespace: `loaf` for
-the default deployment, or `loaf-VERSION` with `--version`. `loaf docker ps`
+the default deployment, or `loaf-NAME` with `--namespace NAME`. `loaf docker ps`
 lists the selected deployment's containers, images, volumes and networks.
 
 ```bash
@@ -424,29 +434,31 @@ can run from another terminal.
 [Docker Compose logs](https://docs.docker.com/reference/cli/docker/compose/logs/)
 
 The startup command printed after a download retains the selected project,
-override directory and version. [Configuration guide](configuration.md#project-configuration)
+override directory and namespace. [Configuration guide](configuration.md#project-configuration)
 
-## Run a versioned deployment
+## Run a separate namespace
 
-Pass the same version to each command that operates on the deployment.
-Use a lowercase identifier starting with a letter or digit. The remaining
-characters can include lowercase letters, digits, hyphens and underscores.
-For example, use `v1-2-3` for version 1.2.3.
+`--namespace NAME` runs a separate deployment in the Docker namespace
+`loaf-NAME`. Pass the same name to each command that operates on the
+deployment. Use a lowercase identifier starting with a letter or digit. The
+remaining characters can include lowercase letters, digits, hyphens and
+underscores. A release number works well, for example `v1-2-3` for 1.2.3.
 
 ```bash
-loaf --version v1-2-3 build
-loaf --version v1-2-3 download
-loaf --version v1-2-3 backup models
-loaf --version v1-2-3 offline
+loaf --namespace v1-2-3 build
+loaf --namespace v1-2-3 download
+loaf --namespace v1-2-3 backup models
+loaf --namespace v1-2-3 offline
 ```
 
 This uses Compose project `loaf-v1-2-3`, image tags such as
 `loaf/ollama-offline:v1-2-3`, and volumes such as `loaf-v1-2-3-ollama`.
-Set `[launcher]` `version` in `config.ini` to select it by default. The
-unversioned project is `loaf`, with images tagged `latest`, so `latest`
-is not available as a version. Each serving deployment needs its own host
-port if you run them together. Set `[webui]` `port` in each checkout as needed.
-[Versioned transfers](transfer.md#versioned-transfers)
+Set `[launcher]` `namespace` in `config.ini` to select it by default, and
+`--namespace=` to select the default namespace `loaf` for one command. The
+default namespace has images tagged `latest`, so `latest` is not available as
+a name. Each serving deployment needs its own host port if you run them
+together. Set `[webui]` `port` in each checkout as needed.
+[Transfers between namespaces](transfer.md#transfers-between-namespaces)
 
 ## Clean generated files
 
@@ -460,8 +472,11 @@ loaf clean --full
 or `$XDG_DATA_HOME/loaf/` when configured. It also clears recognized
 temporary files and Python bytecode from the selected project.
 
-`--full` also clears `install-cache/`, the project virtualenv, generated
-build and release files, and the packaged Docker link. Both modes preserve
+`--full` also clears the project virtualenv, generated build and release
+files, and the packaged Docker link. It asks before it removes
+`install-cache/`, because an offline host cannot download those installers
+again. Without a terminal it keeps the cache; add `--yes` to remove it
+without asking. Both modes preserve
 Git history and working files, saved backups, configuration, credentials,
 and Docker data. A generated directory that contains Git work or a
 backup archive is kept. Lock files stay in place so commands can coordinate

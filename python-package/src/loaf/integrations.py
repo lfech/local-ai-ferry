@@ -35,8 +35,9 @@ WantedBy=multi-user.target
 
 [Unit]
 Description=OpenWebUI Server
+Requires=docker.service
+After=docker.service network-online.target
 Wants=network-online.target
-After=network-online.target
 
 [Service]
 Type=exec
@@ -48,7 +49,8 @@ StandardOutput=null
 StandardError=journal
 Restart=on-failure
 RestartSec=5
-TimeoutStopSec=30
+# The terminal server may take 45 seconds to stop its chat containers.
+TimeoutStopSec=90
 Environment=PYTHONUNBUFFERED=1
 """
 
@@ -58,6 +60,13 @@ def continue_config(webui_url: str, models: Iterable[tuple[str, str]]) -> str:
     lines = [
         "# VS Code Continue integration config.",
         "# Enable API keys in Open WebUI, generate a key and replace each apiKey placeholder.",
+        "#",
+        "# Each model starts with Continue's default roles and its detected capabilities. Before you widen them,",
+        "# check the model card:",
+        "# - autocomplete needs a code model trained for fill-in-the-middle, such as a Coder model.",
+        "# - embed needs an embedding model and rerank a reranker; chat models fill neither role.",
+        "# - capabilities replaces Continue's detection: add tool_use only for models with tool calls",
+        "#   (Agent mode needs it) and image_input only for models with a vision projector.",
         "name: Local Inference",
         "version: 1.0.0",
         "schema: v1",
@@ -76,8 +85,8 @@ def continue_config(webui_url: str, models: Iterable[tuple[str, str]]) -> str:
             "    apiKey: REPLACE_WITH_OPEN_WEBUI_API_KEY",
             "    env:",
             "      useLegacyCompletionsEndpoint: false",
-            "    roles: [chat, edit, apply, embed, autocomplete, rerank, summarize]",
-            "    capabilities: [tool_use, image_input]"
+            "    roles: [chat, edit, apply, summarize]",
+            "    # capabilities: [tool_use, image_input]",
         ])
     lines.extend(["", "context:"])
     for provider in (

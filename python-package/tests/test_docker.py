@@ -261,7 +261,8 @@ class ComposeContractTests(unittest.TestCase):
         self.assertTrue(resolved["networks"]["inference"]["internal"])
 
     def test_retired_compose_variables_do_not_change_the_deployment(self):
-        with patch.dict(os.environ, LOAF_NAMESPACE="other-deployment"):
+        # loaf sets LOAF_NAMESPACE itself; LOAF_VERSION is the name it had before.
+        with patch.dict(os.environ, LOAF_NAMESPACE="other-deployment", LOAF_VERSION="other-deployment"):
             resolved = compose_config()
         self.assertEqual(resolved["name"], "loaf")
         self.assertEqual(resolved["volumes"]["ollama"]["name"], "loaf-ollama")
@@ -383,12 +384,12 @@ class DockerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="loaf archive test ") as folder:
             project = Path(folder)
             archive = project / "volumes.tar"
-            with patch.object(transfer, "VOLUMES", source):
-                transfer.docker_archive(project, transfer.volume_command(), archive, "Save test volumes")
-            with patch.object(transfer, "VOLUMES", target):
-                transfer.docker_archive(
-                    project, transfer.volume_command(restore=True), archive, "Restore test volumes", send=True,
-                )
+            # volume_command names the volumes directly; the deployment's own names stay untouched.
+            transfer.docker_archive(project, transfer.volume_command(volumes=source), archive, "Save test volumes")
+            transfer.docker_archive(
+                project, transfer.volume_command(restore=True, volumes=target), archive, "Restore test volumes",
+                send=True,
+            )
         check_fixture("verify", target, readonly=True)
 
     def test_models_merge_and_mirror_into_another_deployment_version(self):
@@ -424,10 +425,10 @@ class DockerTests(unittest.TestCase):
             (project / "dist").mkdir()
             (project / "dist/loaf").write_bytes(transfer.EXECUTABLE_HEADER + b"\n__LOAF_PAYLOAD__\n\x1f\x8bfixture")
             launcher = [sys.executable, "-m", "loaf"]
-            command([*launcher, "--version", source, "backup", "models", "--backup-dir", "archives"], cwd=project)
+            command([*launcher, "--namespace", source, "backup", "models", "--backup-dir", "archives"], cwd=project)
             bundle, = (project / "archives").iterdir()
             # Models carry no namespaced resources, so they restore into another deployment version.
-            restore = [*launcher, "--version", target, "restore", "models", "--archive", str(bundle)]
+            restore = [*launcher, "--namespace", target, "restore", "models", "--archive", str(bundle)]
             command(restore, cwd=project)
             self.assertEqual(store_shell(target_volume, "ls /ollama/config").split(), ["local.model", "source.model"])
             command([*restore, "--delete"], cwd=project)
@@ -461,7 +462,7 @@ class DockerTests(unittest.TestCase):
 
         self.addCleanup(invoke, "down", "--volumes", "--timeout", "5")
         invoke("up", "-d", "--no-build", "--pull", "never")
-        stop = [sys.executable, "-m", "loaf", "--version", version, "stop"]
+        stop = [sys.executable, "-m", "loaf", "--namespace", version, "stop"]
         return invoke, stop, project, volume
 
     def test_docker_rm_removes_exactly_the_deployments_resources(self):
@@ -494,7 +495,7 @@ class DockerTests(unittest.TestCase):
                  "--entrypoint", "/bin/true", DEFAULT_IMAGES[0]])
 
         with tempfile.TemporaryDirectory(prefix="loaf-resources-") as folder:
-            loaf = [sys.executable, "-m", "loaf", "--project-dir", folder, "--version", version, "docker"]
+            loaf = [sys.executable, "-m", "loaf", "--project-dir", folder, "--namespace", version, "docker"]
             listing = command([*loaf, "ps"])
             for name in (f"{namespace}-ollama-offline-1", workspace, image, volume, network):
                 self.assertIn(name, listing)

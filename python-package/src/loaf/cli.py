@@ -183,8 +183,8 @@ def plan(
     """Return a deterministic plan; all validation happens before Docker runs."""
     if mode not in MODES:
         raise ValueError(f"Unknown mode: {mode}")
-    if wait_timeout < 1:
-        raise ValueError("The wait timeout must be positive.")
+    if wait_timeout < 0:
+        raise ValueError("The wait timeout must be 0, for no limit, or a positive number of seconds.")
     if mode == "download" and not models:
         raise ValueError("Select at least one model for download or Modelfile export.")
     profiles = PROFILES if terminal_server is None else (*PROFILES, "terminal")
@@ -215,10 +215,10 @@ def plan(
     # Expose only Ollama when a full restore requests Modelfile replay.
     stop = Step(profiles, ("stop",) if import_definitions else ("stop", *others),
                 STOP_ALL.description if import_definitions else "Stop services from other profiles")
-    startup = (
-        "up", "-d", "--no-build", "--pull", "never", "--wait",
-        "--wait-timeout", str(wait_timeout),
-    )
+    # Without --wait-timeout, Compose waits for readiness without a limit.
+    startup = ("up", "-d", "--no-build", "--pull", "never", "--wait",
+               *(("--wait-timeout", str(wait_timeout)) if wait_timeout else ()))
+    wait = f"wait up to {wait_timeout}s for readiness" if wait_timeout else "wait for readiness"
     backend = "Ollama on CPU" if cpu else "Ollama"
     description = {
         "download": "Start the model downloader",
@@ -227,7 +227,7 @@ def plan(
     }[profile]
     if import_definitions:
         description = f"Start offline {backend} and import saved Modelfiles"
-    steps += [stop, Step((profile,), startup + targets, f"{description} and wait up to {wait_timeout}s for readiness")]
+    steps += [stop, Step((profile,), startup + targets, f"{description} and {wait}")]
     if start_terminal:
         steps.append(Step(("terminal",), startup + ("terminal-server",), "Start the terminal server"))
     if mode == "download":
@@ -299,7 +299,7 @@ class Compose:
         return command + list(step.arguments)
 
     def variables(self, step: Step | None = None) -> dict[str, str]:
-        variables = {"LOAF_VERSION": config.namespace_version(self.namespace), **self.settings.compose_variables()}
+        variables = {"LOAF_NAMESPACE": config.namespace_name(self.namespace), **self.settings.compose_variables()}
         compose_dir = self.files[0].parent
         if compose_dir != self.project_dir:
             # Keep the working project's .env while resolving the relocated build contexts.
@@ -431,12 +431,12 @@ class CommandHelp:
 
 
 GLOBAL_OPTIONS = ("--help", "--project-dir", "--system", "--verbose")
-DEPLOYMENT_OPTIONS = ("--config-dir", "--version", "--dry-run")
+DEPLOYMENT_OPTIONS = ("--config-dir", "--namespace", "--dry-run")
 COMPOSE_OPTIONS = (*DEPLOYMENT_OPTIONS, "--attach")
 START_OPTIONS = (*COMPOSE_OPTIONS, "--wait-timeout")
 TRANSFER_OPTIONS = (*DEPLOYMENT_OPTIONS, "--backup-dir", "--archive")
 SETUP_OPTIONS = ("--config-dir", "--dry-run", "--archive", "--with-docker-deps", "--terminal-server-key",
-                 "--test-local-repository", "--link-docker-project")
+                 "--test-local-repository", "--link-docker-project", "--allow-root")
 ADOPT_NOTE = "Run inside a copied backup folder to make it the project. The backup moves to backup/.\n"
 SETUP_NOTES = ADOPT_NOTE + "Run 'setup tests' with the checkout's virtualenv to cache and install the test packages."
 COMMAND_HELP = {
@@ -447,7 +447,10 @@ COMMAND_HELP = {
         "Targets are binary (dist/loaf) and debian (dist/loaf_VERSION_all.deb).\n"
         "Run from the loaf source directory or select it with --project-dir.",
     ),
-    "clean": CommandHelp("Remove generated temporary files and the runtime cache.", ("--dry-run", "--full")),
+    "clean": CommandHelp(
+        "Remove generated temporary files and the runtime cache.", ("--dry-run", "--full", "--yes"),
+        "--full asks before it removes install-cache/, whose installers an offline host cannot download again.",
+    ),
     "version": CommandHelp("Show the loaf release, installation and default deployment."),
     "docs": CommandHelp(
         "List the bundled guides or show one.", (),
@@ -462,7 +465,7 @@ COMMAND_HELP = {
     "offline": CommandHelp("Start Ollama and WebUI for disconnected use.", (*START_OPTIONS, "--cpu")),
     "status": CommandHelp("Check deployment readiness and list containers.", (*COMPOSE_OPTIONS, "--cpu")),
     "stop": CommandHelp(
-        "Stop deployment services and remove their containers.", (*COMPOSE_OPTIONS, "--remove-containers", "-n"),
+        "Stop deployment services and remove their containers.", (*COMPOSE_OPTIONS, "--no-remove-containers"),
     ),
     "docker": CommandHelp("List or remove the deployment's containers, images, volumes and networks."),
     "backup": CommandHelp(
@@ -471,7 +474,8 @@ COMMAND_HELP = {
          "--attach"),
         "Types are source, config, installers, images, models, webui and terminal.\n"
         "project means config and installers; volumes means models, webui and terminal.\n"
-        "terminal adds webui. Omit types to save all available ones. Use --archive with --verify.",
+        "terminal adds webui. Omit types to save all available ones; terminal follows\n"
+        "[terminal_server] enabled and include_in_backup. Use --archive with --verify.",
     ),
     "restore": CommandHelp(
         "Restore selected types from a backup.",
@@ -488,15 +492,15 @@ COMMAND_HELP = {
     ),
 }
 INTEGRATION_HELP = {
-    "systemd": CommandHelp("Print a systemd unit for offline serving.", ("--config-dir", "--version")),
+    "systemd": CommandHelp("Print a systemd unit for offline serving.", ("--config-dir", "--namespace")),
     "continue": CommandHelp("Print Continue YAML for the selected models.", ("--config-dir", "--models-file")),
     "tether": CommandHelp("Print Open WebUI Tether installation instructions."),
 }
 DOCKER_HELP = {
-    "ps": CommandHelp("List the deployment's containers, images, volumes and networks.", ("--config-dir", "--version")),
+    "ps": CommandHelp("List the deployment's containers, images, volumes and networks.", ("--config-dir", "--namespace")),
     "rm": CommandHelp(
         "Remove the deployment's Docker resources of the selected types.",
-        ("--config-dir", "--version", "--dry-run", "--yes"),
+        ("--config-dir", "--namespace", "--dry-run", "--yes"),
         "Types are all, containers, images, volumes and networks. rm lists the resources\n"
         "and asks before it removes them. Volumes hold the models, the Open WebUI accounts\n"
         "and chats and the terminal user folders: save them first with loaf backup.\n"
@@ -515,6 +519,14 @@ SUBCOMMAND_HELP = {"integration": INTEGRATION_HELP, "docker": DOCKER_HELP, "comp
 CLI_USAGE = "%(prog)s [GLOBAL OPTIONS] COMMAND [OPTIONS]"
 
 
+def wait_timeout_option(value: str) -> int:
+    try:
+        return config.wait_timeout_value(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{value!r}: expected 0 to wait without a limit or a positive number "
+                                         "of seconds") from exc
+
+
 def add_options(parser, selected: tuple[str, ...] | None = None) -> None:
     def add(*flags, **settings):
         if selected is None or flags[-1] in selected:
@@ -526,21 +538,23 @@ def add_options(parser, selected: tuple[str, ...] | None = None) -> None:
     add("--system", action="store_true", help="Use the system deployment: settings in /etc/loaf, data in /var/lib/loaf.")
     add("-v", "--verbose", action="store_true", help="Show external commands or individual test names.")
     add("--config-dir", type=Path, metavar="PATH", help="Use PATH for settings (default: project config/).")
-    add("--version", metavar="VERSION", help="Select a deployment namespace. Use --version= to clear it.")
+    add("--namespace", dest="namespace_name", metavar="NAME",
+        help="Select the deployment namespace loaf-NAME. Use --namespace= for the default namespace loaf.")
     add("--dry-run", action="store_true", help="Preview without running Docker or changing the project.")
     add("--models-file", type=Path, metavar="PATH", help="Select the model INI for this run.")
     add("--backup-dir", type=Path, metavar="PATH", help="Override the configured archive directory.")
     add("--archive", type=Path, metavar="PATH", help="Select a backup folder or archive file.")
     add("--verify", action="store_true", help="Check an existing backup's hashes and image platforms without Docker.")
-    add("--no-terminal-server", action="store_true", help="Skip the locally available Open Terminal image.")
+    add("--no-terminal-server", action="store_true",
+        help="Leave out the Open Terminal image, the terminal user volume and the bearer key; restore then disables "
+             "the terminal server.")
     add("--delete", action="store_true", help="Mirror the archived models: delete destination model data absent from it.")
     add("--export", dest="export_models", action=argparse.BooleanOptionalAction,
         help="Enable or disable exporting selected Modelfiles from the cached models before backup.")
     add("--import", dest="import_models", action=argparse.BooleanOptionalAction,
         help="Enable or disable starting offline Ollama to apply saved Modelfiles after restore.")
-    add("--remove-containers", action=argparse.BooleanOptionalAction,
-        help="Remove stopped service containers by default, or keep them with --no-remove-containers.")
-    add("-n", dest="remove_containers", action="store_false", default=None, help="Keep stopped service containers and logs.")
+    add("--no-remove-containers", dest="remove_containers", action="store_false", default=None,
+        help="Keep the stopped service containers and their logs.")
     add("--cpu", action="store_true", help="Use CPU inference instead of the default NVIDIA GPU.")
     add("--with-docker-deps", action="store_true",
         help="On Debian 12 or 13, cache Docker Engine, Compose and Buildx packages and install them as needed.")
@@ -550,10 +564,13 @@ def add_options(parser, selected: tuple[str, ...] | None = None) -> None:
              "into a local APT repository for apt in chat containers.")
     add("--link-docker-project", action="store_true",
         help="Only link the packaged Docker project for direct Compose use.")
+    add("--allow-root", action="store_true",
+        help="Prepare a source checkout as root although another user owns it.")
     add("--badges", action="store_true", help="Record test results and update badges for the groups that ran.")
     add("--full", action="store_true", help="Also remove generated installation files.")
     add("-y", "--yes", action="store_true", help="Remove without asking for confirmation.")
-    add("--wait-timeout", type=int, metavar="SECONDS", help="Override the service readiness wait from config.ini.")
+    add("--wait-timeout", type=wait_timeout_option, metavar="SECONDS",
+        help="Override the service readiness wait from config.ini. 0 waits without a limit.")
     add("-a", "--attach", action="store_true", help="Follow live Compose logs after the workflow.")
 
 
@@ -603,7 +620,8 @@ def show_help(command: str | None, subcommand: str | None) -> None:
     parser.exit()
 
 
-def project_command(project: Path, config_dir: Path | None, version: str | None, *, system: bool = False) -> list[str]:
+def project_command(project: Path, config_dir: Path | None, namespace_name: str | None, *,
+                    system: bool = False) -> list[str]:
     executable = os.environ.get("LOAF_RELEASE_EXECUTABLE")
     if executable and setup.bundled_release() is not None and transfer.standalone_executable(Path(executable)):
         command = [executable]
@@ -613,10 +631,10 @@ def project_command(project: Path, config_dir: Path | None, version: str | None,
     command.extend(("--system",) if system else ("--project-dir", str(project)))
     if config_dir is not None:
         command.extend(("--config-dir", str(config_dir)))
-    if version:
-        command.extend(("--version", version))
-    elif version is not None:
-        command.append("--version=")
+    if namespace_name:
+        command.extend(("--namespace", namespace_name))
+    elif namespace_name is not None:
+        command.append("--namespace=")
     return command
 
 
@@ -626,10 +644,10 @@ def own_launcher(project: Path) -> bool:
     return project == Path.cwd().resolve() and transfer.standalone_executable(project / transfer.LAUNCHER)
 
 
-def next_command(project: Path, config_dir: Path | None, version: str | None, *arguments: str,
+def next_command(project: Path, config_dir: Path | None, namespace_name: str | None, *arguments: str,
                  system: bool = False) -> str:
     """A copyable follow-up command; inside a project with its own launcher, the short ./loaf form."""
-    command = project_command(project, config_dir, version, system=system)
+    command = project_command(project, config_dir, namespace_name, system=system)
     if not system and own_launcher(project):
         command[:command.index("--project-dir") + 2] = ["./loaf"]
     return display_command([*command, *arguments])
@@ -664,6 +682,22 @@ def backup_folder_hints(folder: Path) -> str:
     return "\n".join(lines)
 
 
+def clean_confirmation(yes: bool):
+    """Ask before clean --full removes files an offline host cannot download again."""
+    def confirm(path: Path) -> bool:
+        if yes:
+            return True
+        if not sys.stdin.isatty():
+            print(f"Keep {path}: an offline host cannot download its installers again. Add --yes to remove it.")
+            return False
+        try:
+            answer = input(f"Remove {path}? An offline host cannot download its installers again. [y/N] ")
+        except EOFError:
+            answer = ""
+        return answer.strip().lower() in ("y", "yes")
+    return confirm
+
+
 def package_script(project: Path, target: str) -> Path | None:
     """Return the source checkout's build script for a package target, or None outside a checkout."""
     script = project / PACKAGE_SCRIPTS[target]
@@ -685,18 +719,18 @@ def version_report() -> str:
     )
 
 
-def report_settings(layers: Sequence[Path], version: str, config_dir: Path) -> None:
+def report_settings(layers: Sequence[Path], namespace_name: str, config_dir: Path) -> None:
     files = [str(directory / config.CONFIG_NAME) for directory in layers[1:] if (directory / config.CONFIG_NAME).is_file()]
     print("Settings    " + ", ".join(["packaged defaults", *files]), flush=True)
-    warn_shared_deployment(layers, version, config_dir)
+    warn_shared_deployment(layers, namespace_name, config_dir)
 
 
-def warn_shared_deployment(layers: Sequence[Path], version: str, config_dir: Path) -> None:
-    shared = config.shared_system_deployment(tuple(layers), version)
+def warn_shared_deployment(layers: Sequence[Path], namespace_name: str, config_dir: Path) -> None:
+    shared = config.shared_system_deployment(tuple(layers), namespace_name)
     if shared is not None:
         print(
             f"Warning: this project and the system deployment in {shared} use the same Docker namespace "
-            f"{config.namespace(version)}. Set [launcher] version in "
+            f"{config.namespace(namespace_name)}. Set [launcher] namespace in "
             f"{config_dir / config.CONFIG_NAME} for a separate deployment, or set system_config = to skip "
             "the system settings.", file=sys.stderr, flush=True,
         )
@@ -772,7 +806,8 @@ def command_failure(exc: subprocess.CalledProcessError) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="loaf", usage=CLI_USAGE, add_help=False)
+    # Only full option names: a prefix such as --all must not select --allow-root.
+    parser = argparse.ArgumentParser(prog="loaf", usage=CLI_USAGE, add_help=False, allow_abbrev=False)
     parser.add_argument("mode", nargs="?", choices=COMMAND_HELP)
     parser.add_argument("arguments", nargs="*")
     add_options(parser)
@@ -836,8 +871,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("docker rm requires one or more types: all, containers, images, volumes or networks.")
     if docker_command == "ps" and args.dry_run:
         parser.error("docker ps changes nothing. Omit --dry-run.")
-    if args.yes and docker_command != "rm":
-        parser.error("--yes is only supported by docker rm.")
+    if args.yes and docker_command != "rm" and not (args.mode == "clean" and args.full):
+        parser.error("--yes is only supported by docker rm and clean --full.")
     continue_integration = integration == "continue"
     named = ()
     if components:
@@ -848,8 +883,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         except transfer.TransferError as exc:
             parser.error(str(exc))
     # Named types decide these options before any backup is searched; the defaults are checked later.
-    if args.mode == "backup" and args.no_terminal_server and named and "images" not in named:
-        parser.error("--no-terminal-server is only supported when creating a backup that includes images.")
+    if args.mode == "backup" and args.no_terminal_server and "terminal" in (components or ()):
+        parser.error("--no-terminal-server leaves out the terminal type. Omit one of them.")
     if args.mode == "backup" and args.export_models and named and "models" not in named:
         parser.error("--export requires the models type.")
     if args.mode == "restore" and named and "models" not in named:
@@ -858,14 +893,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.import_models:
             parser.error("--import requires the models type.")
     if args.remove_containers is not None and args.mode != "stop":
-        parser.error("--remove-containers, --no-remove-containers and -n are only supported by stop.")
+        parser.error("--no-remove-containers is only supported by stop.")
     remove_containers = args.remove_containers is not False
     if args.verify and args.mode != "backup":
         parser.error("--verify is only supported by backup.")
     if args.verify and components:
         parser.error("--verify checks the whole archive. Omit the types.")
     if args.no_terminal_server and (args.mode != "backup" or args.verify):
-        parser.error("--no-terminal-server is only supported when creating a backup that includes images.")
+        parser.error("--no-terminal-server is only supported when creating a backup.")
+    if args.allow_root and args.mode not in INSTALL_MODES:
+        parser.error("--allow-root is only supported by setup and install.")
     if args.delete and args.mode != "restore":
         parser.error("--delete is only supported by restore, for the models type.")
     if args.cpu and args.mode not in ("online", "offline", "status", "restore", "test"):
@@ -900,7 +937,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.system and (args.project_dir is not None or args.config_dir is not None):
         parser.error("--system uses /etc/loaf and /var/lib/loaf. Omit --project-dir and --config-dir.")
     unexpected = any(value is not None for value in (
-        args.config_dir, args.version, args.models_file, args.backup_dir, args.archive,
+        args.config_dir, args.namespace_name, args.models_file, args.backup_dir, args.archive,
         args.export_models, args.import_models, args.wait_timeout,
     ))
     if args.mode in ("version", "docs", "completion"):
@@ -966,7 +1003,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     setup.install_test_packages(project_dir)
                 return 0
             if args.mode == "clean":
-                cleanup.clean(project_dir, full=args.full, dry_run=args.dry_run)
+                cleanup.clean(project_dir, full=args.full, dry_run=args.dry_run, confirm=clean_confirmation(args.yes))
                 return 0
             scripts = {target: package_script(project_dir, target) for target in targets}
             if None in scripts.values():
@@ -1003,19 +1040,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.config_dir is not None and not config_dir.is_dir():
         parser.error(f"Configuration directory does not exist: {config_dir}.")
     # --link-docker-project creates the link alone: no default configuration, key or backup.
-    standalone_setup = (args.mode in INSTALL_MODES and setup.bundled_release() is not None and not system_mode
-                        and not args.link_docker_project)
+    # Outside a source checkout, setup prepares a deployment: the standalone executable, or a wheel-installed loaf.
+    source_checkout = (project_dir / setup.PYTHON_PACKAGE_DIR / "pyproject.toml").is_file()
+    standalone_setup = (args.mode in INSTALL_MODES and (setup.bundled_release() is not None or not source_checkout)
+                        and not system_mode and not args.link_docker_project)
     if args.backup_dir is not None and args.archive is not None:
         parser.error("Use either --backup-dir or --archive.")
     if args.archive is not None and args.mode != "restore" and not (args.verify or standalone_setup):
         parser.error("--archive is for standalone setup, restore or backup --verify.")
     archive = None
-    backup_dir = None
     try:
         layer_dirs = layer_dirs or config.layers(defaults_dir, config_dir)
         settings = config.load(*layer_dirs)
-        version = settings.version if args.version is None else args.version
-        namespace = config.namespace(version)
+        namespace_name = settings.namespace_name if args.namespace_name is None else args.namespace_name
+        namespace = config.namespace(namespace_name)
         if args.mode == "restore" or args.verify or standalone_setup or args.terminal_server_key:
             # An explicit archive, else the backup folder this runs in or from, else the newest backup.
             selection = args.archive.resolve() if args.archive is not None else None
@@ -1024,42 +1062,41 @@ def main(argv: Sequence[str] | None = None) -> int:
             if selection is None and (args.mode == "restore" or args.verify):
                 backup_dir = (args.backup_dir or project_dir / settings.backup_dir).resolve()
                 selection = transfer.latest_backup(backup_dir, namespace=namespace)
-                if selection is None and not args.dry_run:
+                if selection is None:
                     others = sorted(path for path in backup_dir.iterdir() if transfer.is_bundle(path)) \
                         if backup_dir.is_dir() else []
-                    hint = (f"It holds backups of other deployment versions. Select one with --archive, for example "
+                    hint = (f"It holds backups of other namespaces. Select one with --archive, for example "
                             f"--archive {display_command([str(others[-1])])}." if others
                             else "Use --backup-dir or --archive.")
                     raise transfer.TransferError(f"No backup found in {backup_dir}. {hint}")
             if selection is not None:
                 archive = transfer.open_archive(selection, minimum=settings.backup_version_min,
                                                 verify_launcher=not args.dry_run)
-                if args.version is None or args.version == archive.deployment:
-                    version = archive.deployment
-                    namespace = config.namespace(version)
+                if args.namespace_name is None or args.namespace_name == archive.namespace_name:
+                    namespace_name = archive.namespace_name
+                    namespace = config.namespace(namespace_name)
                 elif not (args.mode == "restore" and named and set(named) <= set(transfer.PORTABLE_TYPES)):
                     raise transfer.TransferError(
-                        f"Backup version is {archive.deployment or 'unversioned'}. Select the matching --version, "
-                        f"or restore only {', '.join(transfer.PORTABLE_TYPES)} into another deployment.")
+                        f"The backup is of namespace {config.namespace(archive.namespace_name)}. Select the matching "
+                        f"--namespace, or restore only {', '.join(transfer.PORTABLE_TYPES)} into another namespace.")
         selected = ()
         if args.mode == "backup" and not args.verify:
-            selected = (transfer.expand_types(components, terminal_available=settings.terminal_server_enabled)
-                        if components else
-                        transfer.default_backup_types(project_dir, terminal=settings.terminal_server_include_in_backup))
+            terminal = settings.terminal_server_enabled and not args.no_terminal_server
+            selected = (transfer.expand_types(components, terminal_available=terminal) if components else
+                        transfer.default_backup_types(
+                            project_dir, terminal=terminal and settings.terminal_server_include_in_backup))
         elif args.mode == "restore":
-            selected = (transfer.expand_types(components) if components else
-                        tuple(kind for kind in transfer.TYPES if archive is None or kind in archive.items))
+            # Restore always has an archive by now: a missing backup ended above, also in dry runs.
+            selected = transfer.requested_types(archive, components)
     except (OSError, transfer.TransferError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     except config.ConfigError as exc:
         parser.error(str(exc))
     except ValueError as exc:
-        parser.error(f"--version: {exc}.")
+        parser.error(f"--namespace: {exc}.")
     backup_models = args.mode == "backup" and "models" in selected
     restore_models = args.mode == "restore" and "models" in selected
-    if args.no_terminal_server and "images" not in selected:
-        parser.error("--no-terminal-server is only supported when creating a backup that includes images.")
     if args.delete and not restore_models:
         parser.error("--delete applies to the models type of restore.")
     if args.export_models is not None and (args.mode != "backup" or args.verify):
@@ -1081,14 +1118,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         workflow_mode = "download"
     elif import_models:
         workflow_mode = "offline"
-    if (args.models_file is not None and not export_models
-            and args.mode not in ("download", "offline") and not continue_integration):
+    if args.models_file is not None and not export_models and args.mode != "download" and not continue_integration:
         parser.error("--models-file is supported by download, backup --export and integration continue.")
     if args.wait_timeout is not None and workflow_mode not in SERVICES:
         parser.error("--wait-timeout is only supported by commands that start services.")
     if args.mode == "docker":
         override = args.config_dir.resolve() if args.config_dir is not None else None
-        with_containers = next_command(project_dir, override, args.version, "docker", "rm", "containers", *docker_types,
+        with_containers = next_command(project_dir, override, args.namespace_name, "docker", "rm", "containers", *docker_types,
                                        system=system_mode)
         try:
             return docker_resources(docker_command, docker_types, namespace, project_dir / PROJECT_LOCK,
@@ -1103,7 +1139,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("Interrupted.", file=sys.stderr)
             return 130
     if args.mode == "test":
-        if args.dry_run or args.version is not None:
+        if args.dry_run or args.namespace_name is not None:
             parser.error("test supports --project-dir, --config-dir, -v, --cpu and --badges. See 'loaf test --help'.")
         tests_dir = project_dir / TESTS_DIR
         if not tests_dir.is_dir():
@@ -1140,8 +1176,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not cpu_file.is_file():
             parser.error(f"The CPU Compose override is missing: {cpu_file}.")
         compose_files += (cpu_file,)
-    if args.mode in INSTALL_MODES and args.version is not None:
-        parser.error(f"{args.mode} prepares the checkout and host. Omit --version.")
+    if args.mode in INSTALL_MODES and args.namespace_name is not None:
+        parser.error(f"{args.mode} prepares the checkout and host. Omit --namespace.")
     override_dir = config_dir if args.config_dir is not None else None
     lock_path = project_dir / PROJECT_LOCK
     steps = []
@@ -1149,7 +1185,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if integration == "systemd":
             if sys.platform != "linux":
                 parser.error("integration systemd requires Linux.")
-            launcher = project_command(project_dir, override_dir, version, system=system_mode)
+            launcher = project_command(project_dir, override_dir, namespace_name, system=system_mode)
             print(integrations.systemd_unit(project_dir, launcher, 0 if system_mode else os.getuid()), end="")
             return 0
         models = []
@@ -1254,12 +1290,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                             shutil.copyfile(archive.executable, launcher)
                             launcher.chmod(transfer.file_modes(project_dir)[1])
                         print(f"Deployment ready in {project_dir}.")
-                    warn_shared_deployment(layer_dirs, version, config_dir)
+                    warn_shared_deployment(layer_dirs, namespace_name, config_dir)
                     if archive is not None:
                         backup = archive.path.parent if archive.executable is not None else archive.path
-                        # The project finds only the newest backup of its configured deployment version.
+                        # The project finds only the newest backup of its configured namespace.
                         found = transfer.latest_backup(project_dir / settings.backup_dir,
-                                                       namespace=config.namespace(settings.version))
+                                                       namespace=config.namespace(settings.namespace_name))
                         selection = () if found == backup else ("--archive", str(backup))
                         print("Next: " + next_command(project_dir, override_dir, None, "restore", *selection))
                         print(docs_hint(project_dir))
@@ -1274,9 +1310,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 with project_lock(lock_path):
                     try:
-                        setup.install(project_dir, with_docker_deps=args.with_docker_deps)
+                        setup.install(project_dir, with_docker_deps=args.with_docker_deps, allow_root=args.allow_root)
                         setup.ensure_terminal_key(key_path)
-                        warn_shared_deployment(layer_dirs, version, config_dir)
+                        warn_shared_deployment(layer_dirs, namespace_name, config_dir)
                     except (OSError, setup.SetupError, subprocess.CalledProcessError):
                         print("See docs/debian.md for Debian host setup.", file=sys.stderr)
                         raise
@@ -1290,14 +1326,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.mode in TRANSFER_MODES:
             with (nullcontext() if args.dry_run or args.verify else project_lock(lock_path)):
                 if args.verify:
-                    if archive is None:
-                        print(f"Verify the newest backup in {backup_dir}")
-                    elif args.dry_run:
+                    if args.dry_run:
                         print(f"Verify the member hashes and report image platforms of {archive.path}")
                     else:
                         transfer.verify_backup(archive, namespace)
                     return 0
                 if args.mode == "backup":
+                    # Refuse unavailable types before the executable builds or services stop, also in dry runs.
+                    transfer.check_backup_types(project_dir, config_dir, selected, terminal_key=compose.terminal_secret_file(),
+                                                skip_terminal_server=args.no_terminal_server)
                     destination = transfer.backup_path(
                         (args.backup_dir or project_dir / settings.backup_dir).resolve(), namespace=namespace)
                     if set(transfer.SERVICE_TYPES) & set(selected):
@@ -1310,9 +1347,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                         if script is not None:
                             print(f"Build the standalone executable at {project_dir / DIST_DIR / 'loaf'}")
                         print(f"Save {', '.join(selected)} to {destination}")
-                        if "images" in selected:
-                            print("Skip the Open Terminal image" if args.no_terminal_server else
-                                  "Include the Open Terminal image if available locally")
+                        if args.no_terminal_server:
+                            print("Leave out the terminal server: its image, user volume and key")
+                        elif "images" in selected:
+                            print("Include the Open Terminal image if available locally")
                         execute_plan(compose, steps, lock_path=lock_path, dry_run=True)
                         if "models" in selected:
                             print("Check saved Modelfiles against the Ollama model store")
@@ -1330,20 +1368,31 @@ def main(argv: Sequence[str] | None = None) -> int:
 
                         transfer.backup_bundle(
                             project_dir, destination, prepare_services, types=selected,
-                            version=version, executable=executable, compression_level=settings.compression_level,
-                            terminal_key=compose.terminal_secret_file(), include_terminal_image=not args.no_terminal_server,
-                            config_dir=config_dir,
+                            namespace_name=namespace_name, executable=executable,
+                            compression_level=settings.compression_level, terminal_key=compose.terminal_secret_file(),
+                            skip_terminal_server=args.no_terminal_server, config_dir=config_dir,
                         )
                         print(f"Backup saved to {destination}", flush=True)
                 elif args.dry_run:
-                    source = archive.path if archive is not None else f"the newest backup in {backup_dir}"
-                    print(f"Restore {', '.join(selected)} from {source} into {project_dir}")
+                    print(f"Restore {', '.join(selected)} from {archive.path} into {project_dir}")
+                    if archive.skip_terminal_server:
+                        # The backup was made with --no-terminal-server.
+                        if "config" in selected:
+                            print("Disable the terminal server in the restored settings")
+                        if "webui" in selected:
+                            print("Remove loaf's saved terminal connection from the restored WebUI data")
+                    if not system_mode and not assets.compose_path(project_dir).is_file():
+                        setup.link_packaged_project(project_dir, dry_run=True)
                     execute_plan(compose, steps, lock_path=lock_path, dry_run=True)
                 else:
                     restored = transfer.restore(
                         project_dir, archive, components, namespace=namespace, settings=settings,
-                        configuration=(layer_dirs[:-1], config_dir, version), delete=args.delete, system=system_mode,
+                        configuration=(layer_dirs[:-1], config_dir, namespace_name), delete=args.delete,
+                        system=system_mode,
                     )
+                    if not system_mode and not assets.compose_path(project_dir).is_file():
+                        # A deployment without a Compose file uses the packaged one, like after standalone setup.
+                        setup.link_packaged_project(project_dir)
                     if restored.settings is not None:
                         compose = Compose(project_dir, files=compose_files, namespace=namespace, settings=restored.settings,
                                           verbose=args.verbose)
@@ -1351,18 +1400,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                         compose.settings.import_models if args.import_models is None else args.import_models
                     )
                     workflow_mode = "offline" if import_models else "restore"
-                    steps = plan("offline", wait_timeout=args.wait_timeout or compose.settings.wait_timeout,
-                                 import_definitions=True, cpu=args.cpu) if import_models else []
+                    timeout = args.wait_timeout if args.wait_timeout is not None else compose.settings.wait_timeout
+                    steps = plan("offline", wait_timeout=timeout, import_definitions=True, cpu=args.cpu) \
+                        if import_models else []
                     print(f"Restored {', '.join(restored.types)} from {archive.path} into {project_dir}", flush=True)
                     for step in steps:
                         compose.execute(step)
                     if import_models:
                         backend = "CPU Ollama" if args.cpu else "GPU Ollama"
                         print(f"Modelfiles imported. {backend} is ready. Open WebUI is stopped.", flush=True)
-                    # Name the version only when the project's settings would select another one.
-                    followup_version = None if version == compose.settings.version else version
-                    print("Next: " + next_command(project_dir, override_dir, followup_version, "offline",
-                                                  system=system_mode), flush=True)
+                    # Name the namespace only when the project's settings would select another one.
+                    followup_name = None if namespace_name == compose.settings.namespace_name else namespace_name
+                    key = config.terminal_secret_path(project_dir, compose.settings.terminal_server_secret_file)
+                    if compose.settings.terminal_server_enabled and not key.exists() and not system_mode:
+                        # offline would stop at the missing terminal key, which setup creates.
+                        print("Next: " + next_command(project_dir, override_dir, None, "setup"), flush=True)
+                    else:
+                        print("Next: " + next_command(project_dir, override_dir, followup_name, "offline",
+                                                      system=system_mode), flush=True)
                     if adopted is not None and assets.system_deployment_installed():
                         print(system_restore_hint(adopted), flush=True)
             if args.attach:
@@ -1377,7 +1432,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"Deployment  {compose.project_name}", flush=True)
                 print(f"Project     {project_dir}", flush=True)
                 print(f"WebUI URL   {settings.webui_url()}", flush=True)
-                report_settings(layer_dirs, version, config_dir)
+                report_settings(layer_dirs, namespace_name, config_dir)
                 ready = readiness.check(compose, cpu=args.cpu)
                 print("\nContainers across all profiles", flush=True)
                 for step in steps:
@@ -1388,10 +1443,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.attach:
                 follow_logs(compose, args.mode, dry_run=args.dry_run)
             return 0
+        if args.mode == "offline" and settings.terminal_server_enabled and settings.terminal_server_network == "connected":
+            print("Note: [terminal_server] network = connected, so chat containers that models drive can reach every "
+                  "address the Docker host reaches.", flush=True)
         execute_plan(compose, steps, lock_path=lock_path, dry_run=args.dry_run)
         if not args.dry_run:
             # Pin the interpreter and local options in the next command.
-            followup = project_command(project_dir, override_dir, version or args.version)
+            followup = project_command(project_dir, override_dir, namespace_name or args.namespace_name)
             if args.mode in ("online", "offline"):
                 compute = " on CPU" if args.cpu else ""
                 print(f"{args.mode.capitalize()} Ollama{compute} and Open WebUI are ready at {settings.webui_url()}", flush=True)

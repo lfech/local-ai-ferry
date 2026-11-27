@@ -14,7 +14,7 @@ StandardOutput=null
 StandardError=journal
 Restart=on-failure
 RestartSec=5
-TimeoutStopSec=30
+TimeoutStopSec=90
 Environment=PYTHONUNBUFFERED=1
 
 [Install]

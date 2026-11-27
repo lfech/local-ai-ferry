@@ -104,10 +104,13 @@ and the Docker volumes with models and chats remain.
 
 Generate the system-wide unit using the installed `loaf` under the account
 that will run the service. That account needs Docker access. The unit uses
-the selected project, Python environment, override directory and deployment
-version. `ExecStart` runs `loaf offline --attach`, which follows logs in the
+the selected project, Python environment, override directory and namespace.
+Like the Debian package's unit, it requires `docker.service` and starts after
+it. `ExecStart` runs `loaf offline --attach`, which follows logs in the
 foreground after startup. Stopping the unit runs `loaf stop` for the same
-deployment and removes its service containers.
+deployment and removes its service containers. Both units allow 90 seconds
+for that, because the terminal server may take 45 seconds to stop its chat
+containers.
 [Docker access](debian.md#docker-access) · [systemd service options](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html)
 
 ```bash
@@ -130,9 +133,14 @@ to choose another model INI.
 Enable **API Keys** under **Settings → Authentication** in the Open WebUI
 admin area. For a non-admin account, grant the **API Keys** feature permission.
 Under **Settings → Account**, click **Show** next to **Secrets** and create a
-key. Replace each `REPLACE_WITH_OPEN_WEBUI_API_KEY` value and check the
-generated roles and capabilities against each model's supported tasks before
-merging the YAML into your Continue configuration. Keep the key out of
+key. Replace each `REPLACE_WITH_OPEN_WEBUI_API_KEY` value before merging the
+YAML into your Continue configuration. Each model gets Continue's default
+roles, `chat`, `edit`, `apply` and `summarize`, and Continue detects its
+capabilities. The YAML's opening comment says what to check on the model card
+before you widen them: `autocomplete` needs a fill-in-the-middle code model,
+`embed` and `rerank` need embedding and reranker models, and the commented
+`capabilities` line adds `tool_use` or `image_input` only for models that
+support them. Keep the key out of
 version control. The generated model IDs use Ollama aliases when configured.
 Download those models before using Continue.
 [Open WebUI API keys](https://docs.openwebui.com/features/authentication-access/api-keys/) · [Continue OpenAI provider](https://docs.continue.dev/customize/model-providers/top-level/openai)
