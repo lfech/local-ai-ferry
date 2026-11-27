@@ -508,6 +508,30 @@ class TransferTests(unittest.TestCase):
         self.assertFalse(list(folder.glob(".loaf-*")))
         self.assertEqual([call for call in self.docker_calls if call[:2] != ["docker", "compose"]], [])
 
+    def test_link_docker_project_inside_a_backup_folder_makes_it_the_project_and_only_links(self):
+        self.assertEqual(self.invoke("backup", "config"), 0, self.progress.getvalue())
+        folder, before = self.copied_bundle("linked backup")
+        link = folder / assets.DOCKER_PROJECT
+        with (
+            patch.object(Path, "cwd", return_value=folder),
+            patch.object(setup, "bundled_release", return_value=folder / "runtime"),
+            patch.object(setup, "setup_standalone") as prepared,
+            patch("loaf.cli.assets.system_deployment_installed", return_value=False),
+        ):
+            self.assertEqual(self.invoke("setup", "--link-docker-project", "--dry-run", custom=False, project=None), 0,
+                             self.progress.getvalue())
+            self.assertIn(f"Move the backup to {folder / 'backup'} and make {folder} the project.\n"
+                          f"Link {link} to {assets.DATA_DIR}.\n", self.output.getvalue())
+            self.assertEqual({path.name: path.read_bytes() for path in folder.iterdir()}, before)
+            self.assertEqual(self.invoke("setup", "--link-docker-project", custom=False, project=None), 0,
+                             self.progress.getvalue())
+        self.assertIn(f"{folder} is the project now", self.progress.getvalue())
+        self.assertTrue(transfer.is_bundle(folder / "backup" / self.bundle.name))
+        self.assertTrue(link.is_symlink() and link.samefile(assets.DATA_DIR))
+        prepared.assert_not_called()
+        self.assertFalse((folder / "config").exists())
+        self.assertEqual(self.docker_calls, [])
+
     def test_system_restore_shares_files_with_the_group_and_keeps_the_terminal_key(self):
         self.add_terminal_volume()
         self.settings.write_text("[webui]\nport = 8818\n[terminal_server]\nenabled = true\n", encoding="utf-8")

@@ -7,3 +7,7 @@ design, and the [development record](../development-record.md) and
 ## To Do
 
 ### Core functionality (do not remove header)
+
+### Problem Fixes (do not remove header)
+Refer to document [Problems](./problems.md) numberings for reference - here are the decisions:
+

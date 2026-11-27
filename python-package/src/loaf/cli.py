@@ -36,7 +36,6 @@ PROFILES = tuple(SERVICES)
 MODES = ("build", "upgrade", "download", "online", "offline", "status", "stop")
 TRANSFER_MODES = ("backup", "restore")
 INSTALL_MODES = ("setup", "install")
-LINK_MODE = "link-docker-project"
 # Package targets and the source checkout scripts that build them into dist/.
 DIST_DIR = Path("dist")
 PACKAGE_SCRIPTS = {"binary": Path("scripts/build-release.sh"), "debian": Path("scripts/build-deb.sh")}
@@ -437,7 +436,7 @@ COMPOSE_OPTIONS = (*DEPLOYMENT_OPTIONS, "--attach")
 START_OPTIONS = (*COMPOSE_OPTIONS, "--wait-timeout")
 TRANSFER_OPTIONS = (*DEPLOYMENT_OPTIONS, "--backup-dir", "--archive")
 SETUP_OPTIONS = ("--config-dir", "--dry-run", "--archive", "--with-docker-deps", "--terminal-server-key",
-                 "--test-local-repository")
+                 "--test-local-repository", "--link-docker-project")
 ADOPT_NOTE = "Run inside a copied backup folder to make it the project. The backup moves to backup/.\n"
 SETUP_NOTES = ADOPT_NOTE + "Run 'setup tests' with the checkout's virtualenv to cache and install the test packages."
 COMMAND_HELP = {
@@ -449,7 +448,6 @@ COMMAND_HELP = {
         "Run from the loaf source directory or select it with --project-dir.",
     ),
     "clean": CommandHelp("Remove generated temporary files and the runtime cache.", ("--dry-run", "--full")),
-    "link-docker-project": CommandHelp("Link the packaged Docker project for direct Compose use.", ("--dry-run",)),
     "version": CommandHelp("Show the loaf release, installation and default deployment."),
     "docs": CommandHelp(
         "List the bundled guides or show one.", (),
@@ -548,7 +546,10 @@ def add_options(parser, selected: tuple[str, ...] | None = None) -> None:
         help="On Debian 12 or 13, cache Docker Engine, Compose and Buildx packages and install them as needed.")
     add("--terminal-server-key", action="store_true", help="Create the terminal server key only.")
     add("--test-local-repository", action="store_true",
-        help="Download a few Debian command-line tools into a local test APT repository and list them.")
+        help=f"Download {', '.join(setup.TEST_REPOSITORY_PACKAGES[:-1])} and {setup.TEST_REPOSITORY_PACKAGES[-1]} "
+             "into a local APT repository for apt in chat containers.")
+    add("--link-docker-project", action="store_true",
+        help="Only link the packaged Docker project for direct Compose use.")
     add("--badges", action="store_true", help="Record test results and update badges for the groups that ran.")
     add("--full", action="store_true", help="Also remove generated installation files.")
     add("-y", "--yes", action="store_true", help="Remove without asking for confirmation.")
@@ -871,8 +872,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--cpu is only supported by online, offline, status, restore and test.")
     if args.with_docker_deps and args.mode not in INSTALL_MODES:
         parser.error("--with-docker-deps is only supported by setup and install.")
-    if (args.terminal_server_key or args.test_local_repository) and args.mode not in INSTALL_MODES:
-        parser.error("--terminal-server-key and --test-local-repository are only supported by setup and install.")
+    setup_step = args.terminal_server_key or args.test_local_repository or args.link_docker_project
+    if setup_step and args.mode not in INSTALL_MODES:
+        parser.error("--terminal-server-key, --test-local-repository and --link-docker-project are only supported "
+                     "by setup and install.")
+    if args.link_docker_project and (setup_tests or args.terminal_server_key or args.test_local_repository
+                                     or args.with_docker_deps or args.archive is not None
+                                     or args.config_dir is not None):
+        parser.error("--link-docker-project only links the Docker project. Omit tests, --terminal-server-key, "
+                     "--test-local-repository, --with-docker-deps, --archive and --config-dir.")
     if args.terminal_server_key and (args.with_docker_deps or args.archive is not None or args.test_local_repository):
         parser.error("--terminal-server-key is for key setup only.")
     if args.test_local_repository and (args.with_docker_deps or args.archive is not None):
@@ -945,7 +953,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
         if args.mode in (*INSTALL_MODES, "restore") and not args.dry_run:
             project_dir.mkdir(parents=True, exist_ok=True)
-    if args.mode in (LINK_MODE, "package", "clean") or setup_tests:
+    if args.mode in ("package", "clean") or setup_tests:
         if unexpected:
             parser.error(f"Unexpected option for {args.mode}. See 'loaf {args.mode} --help'.")
         try:
@@ -959,9 +967,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 0
             if args.mode == "clean":
                 cleanup.clean(project_dir, full=args.full, dry_run=args.dry_run)
-                return 0
-            if args.mode == LINK_MODE:
-                assets.link_docker_project(project_dir, dry_run=args.dry_run)
                 return 0
             scripts = {target: package_script(project_dir, target) for target in targets}
             if None in scripts.values():
@@ -997,7 +1002,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         layer_dirs = ()
     if args.config_dir is not None and not config_dir.is_dir():
         parser.error(f"Configuration directory does not exist: {config_dir}.")
-    standalone_setup = args.mode in INSTALL_MODES and setup.bundled_release() is not None and not system_mode
+    # --link-docker-project creates the link alone: no default configuration, key or backup.
+    standalone_setup = (args.mode in INSTALL_MODES and setup.bundled_release() is not None and not system_mode
+                        and not args.link_docker_project)
     if args.backup_dir is not None and args.archive is not None:
         parser.error("Use either --backup-dir or --archive.")
     if args.archive is not None and args.mode != "restore" and not (args.verify or standalone_setup):
@@ -1124,7 +1131,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Only the model and volume types stop and inspect Compose services.
     compose_types = {"models", *transfer.SERVICE_TYPES}
     if not (continue_integration or args.verify or (args.mode == "backup" and not compose_types & set(selected))
-            or standalone_setup or args.terminal_server_key or args.test_local_repository or compose_file.is_file()):
+            or standalone_setup or args.terminal_server_key or args.test_local_repository or args.link_docker_project
+            or compose_file.is_file()):
         parser.error(f"No compose.yml in {project_dir}. Run loaf setup or select a project with --project-dir.")
     compose_files = (compose_file,)
     if args.cpu:
@@ -1188,6 +1196,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if archive is not None and archive.path.parent == project_dir:
                     archive = transfer.open_archive(moved, minimum=settings.backup_version_min)
         if args.mode in INSTALL_MODES:
+            if args.link_docker_project:
+                assets.link_docker_project(project_dir, dry_run=args.dry_run)
+                return 0
             key_path = config.terminal_secret_path(project_dir, settings.terminal_server_secret_file)
             if system_mode:
                 if args.dry_run:
@@ -1200,8 +1211,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.test_local_repository:
                 image = transfer.image_names(namespace, include_terminal=True)[-1]
                 if args.dry_run:
-                    print(f"Download a few Debian command-line tools with {image} into "
-                          f"{project_dir / setup.TEST_REPOSITORY_DIR} and write {project_dir / setup.TEST_REPOSITORY_SOURCE}.")
+                    print(f"Download {' '.join(setup.TEST_REPOSITORY_PACKAGES)} and the dependencies that "
+                          f"{image} lacks into {project_dir / setup.TEST_REPOSITORY_DIR} and write "
+                          f"{project_dir / setup.TEST_REPOSITORY_SOURCE}.")
                 else:
                     with project_lock(lock_path):
                         setup.create_test_repository(project_dir, image)

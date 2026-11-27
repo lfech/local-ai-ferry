@@ -4,6 +4,45 @@
 
 Older entries use the current command and project names in examples.
 
+## 2026-11-27 18:21:36 +0100 — Independent audit of commit 0c47cf0
+
+- Environment: Debian 13 in WSL2, Docker Engine 26.1.5, Compose 2.26.1-4,
+  RTX 4070 Ti SUPER, Python 3.13.5 in a scratch virtualenv with the checkout
+  installed editable and the pinned packages from `tests/requirements.txt`.
+  The checkout's `.venv` was unusable for the checkout owner: it is owned by
+  root and links to `/root/.pyenv/versions/3.13.2/bin/python3.13`.
+  `/tmp` is a 7.6 GB tmpfs. The default deployment was serving the online
+  profile with the terminal server and stayed running throughout.
+- The Docker-free suite passed **306 tests with 48 skips**.
+- With `RUN_DOCKER_TESTS=1`, `ComposeContractTests`, `BuiltImageTests`,
+  `ShellHelperTests` and `DockerTests` ran **35 tests in 60 s: 34 passed,
+  1 failed**. `test_archive_round_trip_preserves_model_names_and_webui_data`
+  failed because it patches `transfer.VOLUMES` with full volume names, and
+  `volume_names()` now adds the namespace prefix. Docker created four empty
+  `loaf-loaf-archive-test-…` volumes, which were removed by hand.
+- Read-only checks against the live deployment: `loaf status` passed, and
+  `loaf docker ps` listed the provisioner's chat containers as Compose service
+  `terminal-server`. The chat containers inherit the Compose labels of the
+  `loaf/open-terminal` image.
+- Workflows in scratch projects with a stand-in launcher:
+  - A backup with a symlinked `config/models.ini` passed `backup --verify`,
+    and restoring it failed with `Invalid file in config.tar`.
+  - In an `auditNNN` namespace, `loaf restore` of `config` and `webui` into
+    a deployment whose WebUI volume held data published `config.ini`, then
+    failed with `Restore requires empty volumes`.
+  - After restoring a backup made with `--version v2`, the restored
+    `config.ini` had lost all of its comments.
+  - `restore models --import --wait-timeout -5` ended with an uncaught
+    `ValueError` after the restore.
+  - `loaf setup` with a wheel-installed launcher in an empty directory
+    reported `No compose.yml … Run loaf setup`.
+  - The command in `docs/models.md`,
+    `loaf download --models-file config/model.6gb.ini`, failed because the
+    file does not exist.
+- Not run: GPU and CPU model workflows, the Open Terminal Docker tests, the
+  Debian package checks and the catalog check. Workflows that stop the
+  default deployment were not run.
+
 ## 2026-11-27 17:41:03 +0100 — Open WebUI terminal connection preset
 
 - Environment: Debian 13 in WSL2, Docker Engine 26.1.5, Compose 2.26.1-4, the

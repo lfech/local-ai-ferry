@@ -178,10 +178,10 @@ class PackageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='loaf workspace ') as folder:
             root = Path(folder)
             link = root / 'docker-project'
-            preview = self.invoke(folder, 'link-docker-project', '--dry-run')
+            preview = self.invoke(folder, 'setup', '--link-docker-project', '--dry-run')
             self.assertEqual(preview.returncode, 0, preview.stderr)
             self.assertFalse(link.is_symlink())
-            result = self.invoke(folder, 'link-docker-project')
+            result = self.invoke(folder, 'setup', '--link-docker-project')
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(link.is_symlink())
             self.assertEqual(link.resolve(), DATA)
@@ -190,7 +190,7 @@ class PackageTests(unittest.TestCase):
             cpu_plan = self.invoke(folder, 'offline', '--cpu', '--dry-run', '-v')
             self.assertEqual(cpu_plan.returncode, 0, cpu_plan.stderr)
             self.assertIn(str(DATA / 'compose.cpu.yml').encode(), cpu_plan.stdout)
-            again = self.invoke(folder, 'link-docker-project')
+            again = self.invoke(folder, 'install', '--link-docker-project')
             self.assertEqual(again.returncode, 0, again.stderr)
             self.assertIn(b'already linked', again.stdout)
             plan = self.invoke(folder, 'download', '--dry-run')
@@ -202,7 +202,7 @@ class PackageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             link = Path(folder) / 'docker-project'
             link.symlink_to('missing', target_is_directory=True)
-            result = self.invoke(folder, 'link-docker-project')
+            result = self.invoke(folder, 'setup', '--link-docker-project')
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertIn(b'already exists', result.stderr)
             self.assertEqual(link.readlink(), Path('missing'))

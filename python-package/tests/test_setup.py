@@ -670,7 +670,7 @@ class SetupTests(unittest.TestCase):
 
 
 class TestRepositoryTests(unittest.TestCase):
-    def test_local_repository_lists_its_tools_and_replaces_only_its_own_directory(self):
+    def test_local_repository_holds_the_packages_and_replaces_only_its_own_directory(self):
         calls = []
 
         def docker(command, **kwargs):
@@ -681,24 +681,35 @@ class TestRepositoryTests(unittest.TestCase):
             repository = Path(mount.split("source=", 1)[1].split(",target=", 1)[0])
             self.assertEqual(command[command.index("--user") + 1], "0:0")
             self.assertNotIn("--network", command)
-            self.assertEqual(command[-len(setup.TEST_REPOSITORY_TOOLS):], list(setup.TEST_REPOSITORY_TOOLS))
-            (repository / "jq_1.7_amd64.deb").write_bytes(b"package")
-            (repository / "Packages.gz").write_bytes(b"index")
-            (repository / setup.TEST_REPOSITORY_LIST).write_text("jq\ntree\n", encoding="utf-8")
+            self.assertEqual(command[-len(setup.TEST_REPOSITORY_PACKAGES):], list(setup.TEST_REPOSITORY_PACKAGES))
+            (repository / "vim_9.1_amd64.deb").write_bytes(b"package")
+            (repository / "fzf_0.60_amd64.deb").write_bytes(b"package")
+            (repository / "Packages.xz").write_bytes(b"index")
             return subprocess.CompletedProcess(command, 0)
 
         with tempfile.TemporaryDirectory(prefix="loaf repository ") as folder:
             project = Path(folder)
-            with patch.object(setup.subprocess, "run", side_effect=docker), redirect_stdout(StringIO()) as output:
-                self.assertEqual(setup.create_test_repository(project, "loaf/open-terminal:latest"), ["jq", "tree"])
-                self.assertEqual(setup.create_test_repository(project, "loaf/open-terminal:latest"), ["jq", "tree"])
+            with (
+                patch.object(setup.subprocess, "run", side_effect=docker),
+                redirect_stdout(StringIO()) as output, redirect_stderr(StringIO()) as progress,
+            ):
+                setup.create_test_repository(project, "loaf/open-terminal:latest")
+                setup.create_test_repository(project, "loaf/open-terminal:latest")
             repository = project / setup.TEST_REPOSITORY_DIR
             self.assertEqual(sorted(path.name for path in repository.iterdir()),
-                             ["Packages.gz", "jq_1.7_amd64.deb", setup.TEST_REPOSITORY_LIST])
+                             ["Packages.xz", "fzf_0.60_amd64.deb", setup.TEST_REPOSITORY_LIST, "vim_9.1_amd64.deb"])
+            self.assertEqual((repository / setup.TEST_REPOSITORY_LIST).read_text().split(),
+                             ["dnsutils", "vim", "fzf", "python3-venv", "python3-setuptools", "python3-pip"])
             self.assertEqual((project / setup.TEST_REPOSITORY_SOURCE).read_text(),
                              "deb [trusted=yes] file:/run/loaf-apt/repository ./\n")
-            self.assertIn("  jq\n  tree\n", output.getvalue())
+            self.assertIn("Download dnsutils vim fzf python3-venv python3-setuptools python3-pip and the dependencies "
+                          "that loaf/open-terminal:latest lacks", progress.getvalue())
+            self.assertIn(f"Test APT repository in {repository}: 2 Debian packages, 14 B.\n", output.getvalue())
+            self.assertIn("  dnsutils\n  vim\n  fzf\n  python3-venv\n  python3-setuptools\n  python3-pip\n",
+                          output.getvalue())
             self.assertIn("apt_repository_dir = apt-test-repository", output.getvalue())
+            self.assertIn("apt-get install dnsutils vim fzf python3-venv python3-setuptools python3-pip",
+                          output.getvalue())
             self.assertFalse(list(project.glob(".loaf-repository-*")))
 
             with patch.object(setup.subprocess, "run", side_effect=docker), self.assertRaisesRegex(
@@ -712,3 +723,8 @@ class TestRepositoryTests(unittest.TestCase):
             ):
                 setup.create_test_repository(project, "loaf/open-terminal:latest")
             self.assertEqual(calls, [])
+
+    def test_repository_script_downloads_every_requested_package(self):
+        # --reinstall also downloads a requested package that the terminal image already has.
+        self.assertIn('install -y --download-only --reinstall "$@"', setup.TEST_REPOSITORY_SCRIPT)
+        subprocess.run(["sh", "-n", "-c", setup.TEST_REPOSITORY_SCRIPT], check=True)

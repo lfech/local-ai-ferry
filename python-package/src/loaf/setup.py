@@ -18,6 +18,7 @@ from typing import Iterable, Iterator
 from urllib.request import urlopen
 
 from . import assets, config, docs
+from .progress import format_bytes
 
 
 PYTHON_PACKAGE_DIR = Path("python-package")
@@ -84,39 +85,23 @@ print(sys.prefix)
 # A small local APT repository for trying apt in chat containers offline.
 TEST_REPOSITORY_DIR = Path("apt-test-repository")
 TEST_REPOSITORY_SOURCE = Path("config/apt-test-repository.list")
+# Lists the requested packages and marks the directory as loaf's test repository.
 TEST_REPOSITORY_LIST = "packages.txt"
-TEST_REPOSITORY_TOOLS = (
-    "bc", "cowsay", "dos2unix", "figlet", "hexyl", "jq", "moreutils", "ncdu", "pv", "ripgrep", "sl", "tree", "units",
-)
-TEST_REPOSITORY_COUNT = 3
+TEST_REPOSITORY_PACKAGES = ("dnsutils", "vim", "fzf", "python3-venv", "python3-setuptools", "python3-pip")
 TEST_REPOSITORY_SCRIPT = """\
 set -eu
 export DEBIAN_FRONTEND=noninteractive
 owner=$1
-count=$2
-shift 2
+shift
 apt-get -qq -o APT::Update::Error-Mode=any update
-candidates=
-for package do
-    if dpkg-query -W -f '${Status}' "$package" 2>/dev/null | grep -q 'ok installed'; then
-        continue
-    fi
-    if apt-cache show "$package" >/dev/null 2>&1; then
-        candidates="$candidates $package"
-    fi
-done
-chosen=$(printf '%s\\n' $candidates | shuf -n "$count" | sort)
-if [ -z "$chosen" ]; then
-    echo "The image's APT sources offer none of the candidate tools." >&2
-    exit 1
-fi
-# Download what the terminal image lacks, as apt in a chat container would install it.
+# Download the packages and the dependencies that the terminal image lacks, as apt in a chat container
+# installs them. --reinstall also downloads a requested package that the image already has.
 mkdir -p /tmp/archives/partial
-apt-get -qq -o Dir::Cache::Archives=/tmp/archives/ install -y --download-only $chosen
+apt-get -q -o Dir::Cache::Archives=/tmp/archives/ install -y --download-only --reinstall "$@"
 cp /tmp/archives/*.deb /repository/
 cd /repository
-dpkg-scanpackages --multiversion . /dev/null 2>/dev/null | gzip -9n > Packages.gz
-printf '%s\\n' $chosen > packages.txt
+# apt tries Packages.xz first and reports every missing compressed index as an error.
+dpkg-scanpackages --multiversion . /dev/null 2>/dev/null | xz > Packages.xz
 chown -R "$owner" /repository
 """
 
@@ -823,8 +808,8 @@ def install(project: Path, *, with_docker_deps: bool = False) -> None:
     install_toolkit(project)
 
 
-def create_test_repository(project: Path, image: str) -> list[str]:
-    """Download a few Debian command-line tools into a flat APT repository for apt in chat containers."""
+def create_test_repository(project: Path, image: str) -> None:
+    """Download the test packages and the dependencies that the terminal image lacks into a flat APT repository."""
     target = project / TEST_REPOSITORY_DIR
     if (target.exists() or target.is_symlink()) and not (
         target.is_dir() and not target.is_symlink() and (target / TEST_REPOSITORY_LIST).is_file()
@@ -833,27 +818,31 @@ def create_test_repository(project: Path, image: str) -> list[str]:
     if subprocess.run(["docker", "image", "inspect", image], stdout=subprocess.DEVNULL,
                       stderr=subprocess.DEVNULL).returncode:
         raise SetupError(f"The terminal image {image} is missing. Enable [terminal_server] and run loaf build first.")
+    packages = " ".join(TEST_REPOSITORY_PACKAGES)
+    print(f"Download {packages} and the dependencies that {image} lacks…", file=sys.stderr, flush=True)
     with TemporaryDirectory(prefix=".loaf-repository-", dir=project) as folder:
         staging = Path(folder) / TEST_REPOSITORY_DIR.name
         staging.mkdir()
-        # The terminal image matches the Debian release and architecture of the chat containers.
+        # Chat containers run the terminal image: the same Debian release, architecture and installed packages.
         subprocess.run([
             "docker", "run", "--rm", "--pull", "never", "--user", "0:0", "--entrypoint", "/bin/sh",
             "--mount", f"type=bind,source={staging},target=/repository", image, "-c", TEST_REPOSITORY_SCRIPT,
-            "loaf-test-repository", f"{os.getuid()}:{os.getgid()}", str(TEST_REPOSITORY_COUNT), *TEST_REPOSITORY_TOOLS,
+            "loaf-test-repository", f"{os.getuid()}:{os.getgid()}", *TEST_REPOSITORY_PACKAGES,
         ], check=True)
-        packages = (staging / TEST_REPOSITORY_LIST).read_text(encoding="utf-8").split()
+        files = [path.stat().st_size for path in staging.glob("*.deb")]
+        (staging / TEST_REPOSITORY_LIST).write_text("".join(f"{name}\n" for name in TEST_REPOSITORY_PACKAGES),
+                                                    encoding="utf-8")
         if target.exists():
             shutil.rmtree(target)
         staging.rename(target)
     source = project / TEST_REPOSITORY_SOURCE
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text("deb [trusted=yes] file:/run/loaf-apt/repository ./\n", encoding="utf-8")
-    print(f"Test APT repository in {target} with these tools:")
-    for package in packages:
+    print(f"Test APT repository in {target}: {len(files)} Debian package{'' if len(files) == 1 else 's'}, "
+          f"{format_bytes(sum(files))}.\nIt holds these packages and the dependencies that the terminal image lacks:")
+    for package in TEST_REPOSITORY_PACKAGES:
         print(f"  {package}")
     print(f"Use it for apt in chat containers with these settings in {project / 'config' / config.CONFIG_NAME}:\n"
           f"  [terminal_server]\n  apt_source_file = {TEST_REPOSITORY_SOURCE.as_posix()}\n"
           f"  apt_repository_dir = {TEST_REPOSITORY_DIR.as_posix()}\n"
-          f"Then run loaf offline or loaf online and ask the model to run: apt-get install {packages[0]}")
-    return packages
+          f"Then run loaf offline or loaf online and ask the model to run: apt-get install {packages}")
