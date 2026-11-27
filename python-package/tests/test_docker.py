@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from loaf import cli, config, transfer
 from tests import DATA, TESTS_DIR
-from tests.docker_support import DOCKER_TESTS, command, compose_command, compose_config
+from tests.docker_support import DEFAULT_IMAGES, DOCKER_TESTS, command, compose_command, compose_config
 
 
 DOCKER_DIR = DATA / "docker"
@@ -100,7 +100,7 @@ class ComposeContractTests(unittest.TestCase):
                     self.assertTrue(source.is_relative_to(context), source)
 
     def test_ollama_profiles_share_model_storage(self):
-        self.assertEqual(self.rendered["volumes"]["ollama"]["name"], "ollama")
+        self.assertEqual(self.rendered["volumes"]["ollama"]["name"], "loaf-ollama")
         for name in ("ollama-online", "ollama-offline", "ollama-connected"):
             with self.subTest(service=name):
                 service = self.services[name]
@@ -159,19 +159,19 @@ class ComposeContractTests(unittest.TestCase):
         self.assertEqual(webui["depends_on"]["ollama-connected"]["condition"], "service_healthy")
 
     def test_optional_terminal_uses_the_internal_control_network_and_private_key(self):
-        namespace = "terminal-contract-local-inference"
+        namespace = config.namespace("terminal-contract")
         rendered = compose_config(namespace, profiles=(*cli.PROFILES, "terminal"))
         services = rendered["services"]
         terminal = services["terminal-server"]
-        self.assertEqual(terminal["image"], f"local/open-terminal:{namespace}")
+        self.assertEqual(terminal["image"], "loaf/open-terminal:terminal-contract")
         self.assertEqual(terminal["pull_policy"], "never")
         self.assertEqual(set(terminal["networks"]), {"terminal-control"})
         self.assertTrue(rendered["networks"]["terminal-control"]["internal"])
-        self.assertNotIn("tool-server", (terminal["networks"]["terminal-control"] or {}).get("aliases", ()))
         self.assertFalse(terminal.get("ports"))
         self.assertTrue(terminal["read_only"])
         webui_data, = [mount for mount in terminal["volumes"] if mount["target"] == "/var/lib/loaf-webui"]
         self.assertEqual(webui_data["source"], "open-webui")
+        self.assertEqual(rendered["volumes"]["open-webui"]["name"], f"{namespace}-open-webui")
         self.assertTrue(webui_data["read_only"])
         self.assertEqual({secret["source"] for secret in terminal["secrets"]}, {"terminal-server-key"})
         for name, service in services.items():
@@ -180,8 +180,21 @@ class ComposeContractTests(unittest.TestCase):
         for webui in ("open-webui", "open-webui-online"):
             self.assertIn("terminal-control", services[webui]["networks"])
 
+    def test_enabled_terminal_gives_both_webui_services_the_key_for_their_connection(self):
+        with tempfile.TemporaryDirectory() as folder:
+            key = Path(folder) / "terminal-server.key"
+            key.write_text("k" * 32)
+            settings = config.Settings(terminal_server_enabled=True, terminal_server_secret_file=key,
+                                       terminal_server_webui_access="users")
+            services = compose_config(profiles=(*cli.PROFILES, "terminal"), settings=settings)["services"]
+        for name in ("open-webui", "open-webui-online"):
+            with self.subTest(service=name):
+                self.assertEqual([secret["source"] for secret in services[name]["secrets"]], ["terminal-server-key"])
+                self.assertEqual(services[name]["environment"]["LOAF_TERMINAL_WEBUI_ACCESS"], "users")
+        self.assertFalse(services["ollama-offline"].get("secrets"))
+
     def test_versioned_compose_uses_separate_images_and_volumes(self):
-        namespace = "v1-2-local-inference"
+        namespace = config.namespace("v1-2")
         rendered = compose_config(namespace)
         self.assertEqual(rendered["name"], namespace)
         self.assertEqual(
@@ -248,10 +261,11 @@ class ComposeContractTests(unittest.TestCase):
         self.assertTrue(resolved["networks"]["inference"]["internal"])
 
     def test_retired_compose_variables_do_not_change_the_deployment(self):
-        with patch.dict(os.environ, OWO_NAMESPACE="other-deployment", OWO_DOCKER_DIR="/old/path",
-                        OWO_WEBUI_PORT="5999"):
+        with patch.dict(os.environ, LOAF_NAMESPACE="other-deployment"):
             resolved = compose_config()
-        self.assertEqual(resolved["volumes"]["ollama"]["name"], "ollama")
+        self.assertEqual(resolved["name"], "loaf")
+        self.assertEqual(resolved["volumes"]["ollama"]["name"], "loaf-ollama")
+        self.assertEqual(resolved["services"]["open-webui"]["image"], "loaf/open-webui:latest")
         self.assertEqual(resolved["services"]["open-webui"]["ports"][0]["published"], "3000")
         self.assertEqual(Path(resolved["services"]["ollama-online"]["build"]["context"]), DOCKER_DIR / "ollama")
 
@@ -268,21 +282,21 @@ class BuiltImageTests(unittest.TestCase):
             self.assertEqual(image_config["Entrypoint"], entrypoint)
 
     def test_downloader_image_uses_shared_model_storage(self):
-        self.assert_image_config(transfer.IMAGES[0], {
+        self.assert_image_config(DEFAULT_IMAGES[0], {
             "OLLAMA_MODELS": "/ollama/models", "OLLAMA_NOPRUNE": "true",
         })
 
     def test_gpu_image_uses_offline_wrapper_and_default_context(self):
-        self.assert_image_config(transfer.IMAGES[1], {
+        self.assert_image_config(DEFAULT_IMAGES[1], {
             "OLLAMA_MODELS": "/ollama/models", "OLLAMA_NOPRUNE": "true",
             "OLLAMA_NO_CLOUD": "1", "OLLAMA_CONTEXT_LENGTH": "16384",
         }, entrypoint=["/usr/local/bin/start-ollama-offline"])
 
     def test_webui_image_defaults_to_local_offline_inference(self):
-        self.assert_image_config(transfer.IMAGES[2], {
+        self.assert_image_config(DEFAULT_IMAGES[2], {
             "OLLAMA_BASE_URL": "http://ollama-offline:11434", "OFFLINE_MODE": "true",
             "HF_HUB_OFFLINE": "1", "ENABLE_OPENAI_API": "false",
-        })
+        }, entrypoint=["python3", "/usr/local/lib/loaf/start-webui.py"])
 
 
 @unittest.skipUnless(DOCKER_TESTS, "Set RUN_DOCKER_TESTS=1 to enable Docker tests.")
@@ -293,7 +307,7 @@ class ShellHelperTests(unittest.TestCase):
             "--env", "DISPOSABLE_SCRIPT_TEST=1",
             "--mount", f"type=bind,source={DOCKER_DIR / 'ollama/export-modelfiles.sh'},target=/export.sh,readonly",
             "--mount", f"type=bind,source={DOCKER_DIR / 'ollama/start-ollama-offline.sh'},target=/start.sh,readonly",
-            "--entrypoint", "bash", transfer.IMAGES[0], "-s", "--", case,
+            "--entrypoint", "bash", DEFAULT_IMAGES[0], "-s", "--", case,
         ], input=(TESTS_DIR / "script_checks.sh").read_text(encoding="utf-8"), timeout=90)
 
     def test_exports_namespaced_models_and_both_multimodal_blobs(self):
@@ -360,7 +374,7 @@ class DockerTests(unittest.TestCase):
             command([
                 "docker", "run", "--rm", "--pull", "never", "--network", "none", "-i",
                 "--env", "DISPOSABLE_ARCHIVE_TEST=1",
-                *mounts, "--entrypoint", "bash", transfer.IMAGES[0], "-s", "--", phase,
+                *mounts, "--entrypoint", "bash", DEFAULT_IMAGES[0], "-s", "--", phase,
             ], input=fixture)
 
         source = create_volumes("source")
@@ -387,7 +401,7 @@ class DockerTests(unittest.TestCase):
             image = transfer.image_names(namespace)[0]
             command(["docker", "volume", "create", volume])
             self.addCleanup(command, ["docker", "volume", "rm", volume])
-            command(["docker", "image", "tag", transfer.IMAGES[0], image])
+            command(["docker", "image", "tag", DEFAULT_IMAGES[0], image])
             self.addCleanup(command, ["docker", "image", "rm", image])
             return version, volume
 
@@ -395,7 +409,7 @@ class DockerTests(unittest.TestCase):
             return command([
                 "docker", "run", "--rm", "--pull", "never", "--network", "none",
                 "--mount", f"type=volume,source={volume},target=/ollama,volume-nocopy",
-                "--entrypoint", "/bin/sh", transfer.IMAGES[0], "-c", script,
+                "--entrypoint", "/bin/sh", DEFAULT_IMAGES[0], "-c", script,
             ])
 
         source, source_volume = create_store("source")
@@ -404,7 +418,7 @@ class DockerTests(unittest.TestCase):
         store_shell(target_volume, "mkdir -p /ollama/models /ollama/config; printf local > /ollama/config/local.model")
         with tempfile.TemporaryDirectory(prefix="loaf-model-transfer-") as folder:
             project = Path(folder)
-            compose = {"services": {"ollama-online": {"image": transfer.IMAGES[0]}}}
+            compose = {"services": {"ollama-online": {"image": DEFAULT_IMAGES[0]}}}
             (project / "compose.yml").write_text(json.dumps(compose), encoding="utf-8")
             # Every backup folder carries a launcher; the fixture stands in for the standalone executable.
             (project / "dist").mkdir()
@@ -429,7 +443,7 @@ class DockerTests(unittest.TestCase):
         (project / "compose.yml").write_text(json.dumps({
             "services": {
                 "worker": {
-                    "image": transfer.IMAGES[0],
+                    "image": DEFAULT_IMAGES[0],
                     "pull_policy": "never",
                     "profiles": ["offline"],
                     "init": True,
@@ -449,6 +463,49 @@ class DockerTests(unittest.TestCase):
         invoke("up", "-d", "--no-build", "--pull", "never")
         stop = [sys.executable, "-m", "loaf", "--version", version, "stop"]
         return invoke, stop, project, volume
+
+    def test_docker_rm_removes_exactly_the_deployments_resources(self):
+        version = f"resource-test-{uuid4().hex}"
+        namespace = config.namespace(version)
+        key = "a" * 64
+        project = {"com.docker.compose.project": namespace}
+        terminal = {"loaf.terminal.project": namespace, "loaf.terminal.workspace": key}
+        image = transfer.image_names(namespace)[0]
+        network, workspace, volume = f"{namespace}_inference", f"{namespace}-terminal-{key}", f"{namespace}-ollama"
+
+        def labels(values):
+            return [part for name, value in values.items() for part in ("--label", f"{name}={value}")]
+
+        for kind, names in (("container", (f"{namespace}-ollama-offline-1", workspace)), ("network", (network, workspace)),
+                            ("volume", (volume, transfer.terminal_volume(namespace))), ("image", (image,))):
+            self.addCleanup(subprocess.run, ["docker", kind, "rm", *(("--force",) if kind == "container" else ()),
+                                             *names], capture_output=True)
+        command(["docker", "network", "create", "--internal",
+                 *labels({**project, "com.docker.compose.network": "inference"}), network])
+        command(["docker", "network", "create", "--internal", *labels(terminal), workspace])
+        command(["docker", "volume", "create", *labels({**project, "com.docker.compose.volume": "ollama"}), volume])
+        command(["docker", "volume", "create", *labels({"loaf.terminal.project": namespace, "loaf.terminal.users": "true"}),
+                 transfer.terminal_volume(namespace)])
+        command(["docker", "image", "tag", DEFAULT_IMAGES[0], image])
+        command(["docker", "run", "--detach", "--init", "--network", network, "--mount", f"source={volume},target=/data",
+                 *labels({**project, "com.docker.compose.service": "ollama-offline"}),
+                 "--name", f"{namespace}-ollama-offline-1", "--entrypoint", "/bin/sleep", DEFAULT_IMAGES[0], "180"])
+        command(["docker", "create", "--network", workspace, *labels(terminal), "--name", workspace,
+                 "--entrypoint", "/bin/true", DEFAULT_IMAGES[0]])
+
+        with tempfile.TemporaryDirectory(prefix="loaf-resources-") as folder:
+            loaf = [sys.executable, "-m", "loaf", "--project-dir", folder, "--version", version, "docker"]
+            listing = command([*loaf, "ps"])
+            for name in (f"{namespace}-ollama-offline-1", workspace, image, volume, network):
+                self.assertIn(name, listing)
+            refused = subprocess.run([*loaf, "rm", "volumes", "--yes"], capture_output=True, text=True)
+            self.assertEqual(refused.returncode, 1)
+            self.assertIn("still has 2 containers", refused.stderr)
+            self.assertIn("Removed 7 Docker resources", command([*loaf, "rm", "all", "--yes"]))
+            self.assertIn("Containers: none", command([*loaf, "ps"]))
+        for kind, name in (("container", workspace), ("network", network), ("volume", volume), ("image", image)):
+            self.assertEqual(subprocess.run(["docker", kind, "inspect", name], capture_output=True).returncode, 1, name)
+        command(["docker", "image", "inspect", DEFAULT_IMAGES[0]])
 
     def test_stop_keeps_container_when_removal_is_disabled(self):
         invoke, stop, project, _ = self.start_stop_fixture()

@@ -93,6 +93,8 @@ sudo systemctl enable --now loaf.service
 ```
 
 `man loaf` and `loaf docs` show the documentation for the installed release.
+The package also installs Bash completion for `loaf`, which bash-completion
+loads in new shells. [Bash completion](launcher.md#bash-completion)
 Purging the package removes the generated key and empty directories. Backups
 and the Docker volumes with models and chats remain.
 

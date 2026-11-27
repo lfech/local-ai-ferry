@@ -14,7 +14,7 @@ paths given on the command line start at the shell's current directory.
 
 | Flag | Effect |
 | --- | --- |
-| `-h`, `--help` | Print help for `loaf`, a command, or an integration and exit. |
+| `-h`, `--help` | Print help for `loaf`, a command, an integration or a `docker` command and exit. |
 | `--project-dir PATH` | Select the checkout or deployment. Defaults to the current directory. Setup and restore make a backup folder the project; other commands refuse one. [Debian restore](transfer.md#debian-restore) |
 | `--system` | Operate the system deployment with settings in `/etc/loaf` and data in `/var/lib/loaf`. The Debian package uses it unless `--project-dir` or `--config-dir` selects a project. [Debian package](installation.md#debian-package) |
 | `-v`, `--verbose` | Show external commands where available. With `test`, show individual test names. |
@@ -94,6 +94,27 @@ List the guides bundled with this release, or print one with
 `loaf docs loaf.1 | man -l -`. Standalone setup also writes the guides to
 `docs/` in the deployment. [Bundled guides](launcher.md#read-the-bundled-guides)
 
+### completion
+
+Manage Bash completion for `loaf`. Takes the global flags.
+[Bash completion](launcher.md#bash-completion)
+
+#### completion install
+
+Write the completion script for the current user to bash-completion's
+per-user directory, normally `~/.local/share/bash-completion/completions/loaf`.
+It replaces an earlier loaf script and refuses a file that loaf did not write.
+With the Debian package, it reports the system script and writes nothing.
+
+#### completion remove
+
+Remove the per-user script that `install` wrote. The Debian package's system
+script stays until the package is removed.
+
+#### completion print
+
+Print the completion script to standard output.
+
 ### link-docker-project
 
 Create the `docker-project` symlink to the packaged Compose project. Uses
@@ -149,6 +170,29 @@ Stop the selected deployment's services and remove their containers. Uses
 
 - `--remove-containers` explicitly enables container removal, the default.
 - `-n`, `--no-remove-containers` keep the stopped containers and their logs.
+
+### docker
+
+List or remove the selected deployment's Docker resources. Every name starts
+with the deployment namespace, `loaf` or `loaf-VERSION`. Both commands use
+`--config-dir PATH` and `--version VERSION`.
+[Docker resources](launcher.md#list-and-remove-docker-resources)
+
+#### docker ps
+
+List the containers, images, volumes and networks with their state, size,
+content or purpose.
+
+#### docker rm
+
+Remove the resources of one or more types: `all`, `containers`, `images`,
+`volumes` or `networks`. `rm` lists them and asks for confirmation, then
+stops the running services and removes containers, networks, volumes and
+images in that order. Networks, volumes and images require a deployment
+without containers. Removed volumes lose the models, Open WebUI accounts and
+chats, and terminal user folders. Uses `--dry-run`.
+
+- `-y`, `--yes` removes without asking. Without a terminal, `rm` requires it.
 
 ### backup
 

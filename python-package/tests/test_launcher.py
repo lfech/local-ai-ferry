@@ -174,7 +174,7 @@ class PlanTests(unittest.TestCase):
             command = compose.command(cli.plan('offline')[0])
             self.assertEqual(command[command.index('--project-directory')+1], str(Path(folder).resolve()))
             self.assertEqual(command[command.index('--file')+1], str((Path(folder)/'compose.yml').resolve()))
-            self.assertEqual(command[command.index('--project-name')+1], 'local-inference')
+            self.assertEqual(command[command.index('--project-name')+1], 'loaf')
 
     def test_subprocess_uses_argument_list_without_shell(self):
         compose = cli.Compose()
@@ -185,7 +185,7 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(args[0][-1], self.models[-1])
         self.assertFalse(kwargs['shell'])
         self.assertTrue(kwargs['check'])
-        self.assertEqual(kwargs['env']['LOAF_NAMESPACE'], '')
+        self.assertEqual(kwargs['env']['LOAF_VERSION'], '')
 
     def test_failed_command_prevents_all_later_commands(self):
         # Fail the second planned operation, then prove no later operation ran.
@@ -502,7 +502,7 @@ class CliTests(unittest.TestCase):
             selected.write_text('[models.example]\nmodel = hf.co/owner/example:Q4_K_M\n', encoding='utf-8')
             with patch('loaf.cli.execute_plan') as run, redirect_stdout(io.StringIO()) as output:
                 self.assertEqual(self.invoke('download', '--version', 'v2', '--models-file', str(selected)), 0)
-            self.assertEqual(run.call_args.args[0].project_name, 'v2-local-inference')
+            self.assertEqual(run.call_args.args[0].project_name, 'loaf-v2')
             self.assertIn('--version',output.getvalue())
             self.assertIn('v2',output.getvalue())
             self.assertNotIn('--models-file', output.getvalue())

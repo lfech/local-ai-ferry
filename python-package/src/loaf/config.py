@@ -10,6 +10,8 @@ import re
 
 
 CONFIG_NAME = "config.ini"
+# The default deployment's namespace. A versioned deployment appends -VERSION.
+DEPLOYMENT = "loaf"
 # The system layer between the packaged defaults and a project's config/.
 SYSTEM_CONFIG_DIR = Path("/etc/loaf")
 DEFAULT_WAIT_TIMEOUT = 300
@@ -56,8 +58,10 @@ class Settings:
     terminal_server_secret_file: Path = TERMINAL_SECRET
     terminal_server_apt_source_file: Path | None = None
     terminal_server_apt_repository_dir: Path | None = None
-    # isolated: chat containers reach only the provisioner; outbound: also every address the host reaches.
+    # isolated: chat containers reach only the provisioner; connected: also every address the host reaches.
     terminal_server_network: str = "isolated"
+    # Open WebUI accounts that may use the preset terminal connection: admins, or users for every account.
+    terminal_server_webui_access: str = "admins"
     terminal_server_cpus: int = 2
     terminal_server_memory_mib: int = 2048
     terminal_server_max_workspaces: int = 4
@@ -93,6 +97,7 @@ class Settings:
             "LOAF_TERMINAL_VOLUME_DRIVER": self.terminal_server_volume_driver,
             "LOAF_TERMINAL_VOLUME_OPTIONS": self.terminal_server_volume_options,
             "LOAF_TERMINAL_NETWORK": self.terminal_server_network,
+            "LOAF_TERMINAL_WEBUI_ACCESS": self.terminal_server_webui_access,
         }
 
     def webui_url(self) -> str:
@@ -107,12 +112,20 @@ class Settings:
 
 
 def namespace(version: str) -> str:
+    """The deployment's Compose project, which starts the names of its containers, networks and volumes."""
     if not version:
-        return ""
-    name = f"{version}-local-inference"
-    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", version) or len(name) > 128:
-        raise ValueError("expected a lowercase Compose name within Docker's tag length limit (e.g. v1-2-3)")
+        return DEPLOYMENT
+    name = f"{DEPLOYMENT}-{version}"
+    # The version tags the images, so latest would share the default deployment's images.
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", version) or version == "latest" or len(name) > 128:
+        raise ValueError("expected a lowercase Compose name other than latest within Docker's tag length limit "
+                         "(e.g. v1-2-3)")
     return name
+
+
+def namespace_version(namespace: str) -> str:
+    """The deployment version in a namespace; empty for the default deployment."""
+    return "" if namespace == DEPLOYMENT else namespace.removeprefix(f"{DEPLOYMENT}-")
 
 
 def version_value(value: str) -> str:
@@ -195,9 +208,15 @@ def volume_options_value(value: str) -> str:
     return json.dumps(options)
 
 
+def terminal_webui_access_value(value: str) -> str:
+    if value not in ("admins", "users"):
+        raise ValueError("expected admins or users")
+    return value
+
+
 def terminal_network_value(value: str) -> str:
-    if value not in ("isolated", "outbound"):
-        raise ValueError("expected isolated or outbound")
+    if value not in ("isolated", "connected"):
+        raise ValueError("expected isolated or connected")
     return value
 
 
@@ -233,6 +252,7 @@ SECTIONS = {
         "apt_source_file": apt_source_file_value,
         "apt_repository_dir": optional_path_value,
         "network": terminal_network_value,
+        "webui_access": terminal_webui_access_value,
         "cpus": positive_int,
         "memory_mib": positive_int,
         "max_workspaces": positive_int,

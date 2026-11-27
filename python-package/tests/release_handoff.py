@@ -20,7 +20,7 @@ MODEL = "hf.co/bartowski/SmolLM2-135M-Instruct-GGUF:Q2_K"
 WEBUI_IMAGE = "ghcr.io/open-webui/open-webui:v0.13.4-slim"
 OLLAMA_IMAGE = "loaf-ollama-cpu"
 CUDA_IMAGE = "loaf-ollama-cuda13"
-COLD_IMAGE = "local/loaf-cold-test:28.5.2"
+COLD_IMAGE = "loaf/cold-test:28.5.2"
 
 
 def run(*args, cwd=None, env=None, input=None, capture=False, timeout=180):
@@ -131,7 +131,7 @@ def rehearse(executable, root, compression, retain, *, chat_only, ollama_image, 
     shutil.copyfile(executable, loaf)
     loaf.chmod(0o700)
     version = "loaf-handoff-" + uuid4().hex[:12]
-    namespace = version + "-local-inference"
+    namespace = "loaf-" + version
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
@@ -205,9 +205,9 @@ def rehearse(executable, root, compression, retain, *, chat_only, ollama_image, 
             "docker", "compose", "--project-name", namespace, "--file", str(data / "compose.yml"),
             "--file", str(data / "compose.cpu.yml"), "--profile", "*",
             "down", "--volumes", "--timeout", "5",
-        ], cwd=source, env={**env, "LOAF_NAMESPACE": namespace}, check=False, timeout=60)
+        ], cwd=source, env={**env, "LOAF_VERSION": version}, check=False, timeout=60)
         subprocess.run(["docker", "image", "rm", *(
-            f"local/{image}:{namespace}" for image in ("ollama-online", "ollama-offline", "open-webui")
+            f"loaf/{image}:{version}" for image in ("ollama-online", "ollama-offline", "open-webui")
         )], check=False, capture_output=True, timeout=60)
 
 

@@ -104,7 +104,7 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             commands = result.stdout.splitlines()
             self.assertEqual(len(commands), 3)
-            self.assertTrue(all(line.startswith(b'+ ') and b'LOAF_NAMESPACE' in line for line in commands))
+            self.assertTrue(all(line.startswith(b'+ ') and b'LOAF_VERSION' in line for line in commands))
             self.assertIn(b'docker', commands[0])
             self.assertIn(b'--no-build', commands[-1])
             self.assertFalse((root / '.run.lock').exists())

@@ -81,16 +81,57 @@ class TerminalServerSettingsTests(unittest.TestCase):
             compose = cli.Compose(project, settings=settings)
             self.assertEqual(compose.variables()["LOAF_TERMINAL_SECRET_FILE"], str(project / "private/terminal-server.key"))
             self.assertEqual(compose.variables()["LOAF_TERMINAL_CPUS"], "3")
+            self.assertEqual(compose.variables()["LOAF_TERMINAL_WEBUI_ACCESS"], "admins")
             for mode in ("online", "offline", "build", "stop"):
                 with self.subTest(mode=mode), redirect_stdout(io.StringIO()) as output:
                     self.assertEqual(cli.main([mode, "--project-dir", folder, "--dry-run", "-v"]), 0)
                     self.assertIn("--profile terminal", output.getvalue())
+                    # Open WebUI receives the bearer key for its preset connection.
+                    self.assertIn("compose.terminal-webui.yml", output.getvalue())
                     if mode in ("online", "offline"):
                         self.assertIn("--wait-timeout 300 terminal-server", output.getvalue())
+        disabled = cli.Compose(DATA, settings=config.Settings()).command(cli.Step(("offline",), ("up",)))
+        self.assertNotIn(str(DATA / "compose.terminal-webui.yml"), disabled)
         stop = cli.plan("offline", terminal_server=False)[1]
         self.assertIn("terminal-server", stop.arguments)
         self.assertEqual(cli.plan("build", terminal_server=True)[-1].arguments[-1], "terminal-server")
         self.assertEqual(cli.plan("offline", terminal_server=True, import_definitions=True)[-1].arguments[-1], "ollama-offline")
+
+    def test_webui_access_selects_admins_or_every_account(self):
+        with TemporaryDirectory() as folder:
+            settings = Path(folder)
+            for value in ("admins", "users"):
+                (settings / "config.ini").write_text(f"[terminal_server]\nwebui_access = {value}\n")
+                self.assertEqual(config.load(DATA / "config", settings).compose_variables()["LOAF_TERMINAL_WEBUI_ACCESS"],
+                                 value)
+            (settings / "config.ini").write_text("[terminal_server]\nwebui_access = everyone\n")
+            with self.assertRaisesRegex(config.ConfigError, "webui_access: expected admins or users"):
+                config.load(DATA / "config", settings)
+
+    def test_webui_start_script_presets_one_terminal_connection_from_the_key(self):
+        spec = importlib.util.spec_from_file_location("loaf_test_start_webui", DATA / "docker/open-webui/start-webui.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with TemporaryDirectory() as folder:
+            key = Path(folder) / "terminal-server.key"
+            self.assertEqual(module.environment({"PATH": "/bin"}, key), {"PATH": "/bin"})
+            secret = 'k"\\' + "x" * 30
+            key.write_bytes(secret.encode() + b"\r\n")
+            environment = module.environment({"PATH": "/bin"}, key)
+            connection, = json.loads(environment["TERMINAL_SERVER_CONNECTIONS"])
+            self.assertEqual(environment["PATH"], "/bin")
+            self.assertEqual(connection, {
+                "id": "loaf-terminal", "name": "Terminal", "enabled": True, "url": "http://terminal-server:8000",
+                "path": "/openapi.json", "auth_type": "bearer", "key": secret, "server_type": "terminal",
+                "config": {"access_grants": []},
+            })
+            every, = json.loads(module.environment({"LOAF_TERMINAL_WEBUI_ACCESS": "users"}, key)
+                                ["TERMINAL_SERVER_CONNECTIONS"])
+            self.assertEqual(every["config"]["access_grants"],
+                             [{"principal_type": "user", "principal_id": "*", "permission": "read"}])
+            # Connections that the caller configured stay untouched.
+            own = {"TERMINAL_SERVER_CONNECTIONS": "[]"}
+            self.assertEqual(module.environment(own, key), own)
 
     def test_missing_key_and_disabling_auth_fail_before_docker(self):
         with TemporaryDirectory() as folder:
@@ -120,7 +161,6 @@ class TerminalServerSettingsTests(unittest.TestCase):
             project = Path(folder)
             settings = project / "config"
             settings.mkdir()
-            (settings / "tool-server.key").write_text("a" * 32 + "\n")
             current = project / config.TERMINAL_SECRET
             self.assertEqual(cli.Compose(project).terminal_secret_file(), current)
             with self.assertRaises(FileNotFoundError):
@@ -207,6 +247,7 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
                     self.client = proxy_client
                     self.directories = {}
                     self.leases = []
+                    self.package_source = True
 
                 @asynccontextmanager
                 async def lease(self, user, session=""):
@@ -236,7 +277,9 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
                     paths = (await result.json())["paths"]
                 # Model tools keep Open Terminal's own paths; the chat's single container serves them.
                 self.assertEqual(set(paths), {"/execute", "/api/terminals/user/output"})
-                self.assertIn("so apt and apt-get work", paths["/execute"]["post"]["description"])
+                description = paths["/execute"]["post"]["description"]
+                self.assertTrue(description.startswith("Execute.\n\nTerminal: call run_command"), description)
+                self.assertIn("apt update, then apt install PACKAGE", description)
                 for path, info, status in (("/execute", {}, 401), ("/execute", headers, 403),
                                            ("/api/v1/terminals/templates", headers, 404),
                                            ("/agents", authorized, 404), ("/agent/execute", authorized, 404)):
@@ -340,13 +383,13 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("PortBindings", host)
 
         # Outbound access uses Docker's resolver; a local repository is mounted read-only.
-        outbound_policy = module.Policy("test-project", 2, 512, 2, 5, 1, "local", {}, "outbound")
-        outbound = module.Workspaces(outbound_policy, None, None, "provisioner", "image", None, repository="/srv/repo")
-        mounts = outbound.container_spec("network", labels, "key", owner_key, "chat-1")["HostConfig"]
+        connected_policy = module.Policy("test-project", 2, 512, 2, 5, 1, "local", {}, "connected")
+        connected = module.Workspaces(connected_policy, None, None, "provisioner", "image", None, repository="/srv/repo")
+        mounts = connected.container_spec("network", labels, "key", owner_key, "chat-1")["HostConfig"]
         self.assertNotIn("Dns", mounts)
         self.assertEqual(mounts["Mounts"][-1], {"Type": "bind", "Source": "/srv/repo",
                                                 "Target": "/run/loaf-apt/repository", "ReadOnly": True})
-        self.assertNotEqual(outbound.revision, manager.revision)
+        self.assertNotEqual(connected.revision, manager.revision)
 
         # Ownership needs the deployment, the container name and a matching chat key.
         names = ["/" + policy.asset_name(key)]
@@ -357,16 +400,46 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(policy.container_identity({**labels, module.CHAT_ID: "chat-2"}, names))
         self.assertIsNone(policy.container_identity({**labels, module.PROJECT: "other"}, names))
 
+    def test_model_guidance_names_the_tool_and_whether_apt_can_reach_a_source(self):
+        module = self.module
+        for network, repository, package_source in (("isolated", None, False), ("isolated", "/srv/repo", True),
+                                                    ("connected", None, True)):
+            with self.subTest(network=network, repository=repository):
+                policy = module.Policy("p", 1, 256, 2, 5, 1, "local", {}, network)
+                manager = module.Workspaces(policy, None, None, "provisioner", "image", None, repository=repository)
+                self.assertEqual(manager.package_source, package_source)
+        available, unavailable = module.tool_note(True), module.tool_note(False)
+        for note in (available, unavailable):
+            self.assertIn("call run_command to run shell commands yourself", note)
+            self.assertIn("/home/chat is deleted with the chat; keep lasting files in /home/user.", note)
+            self.assertLess(len(note), 400)
+        self.assertIn("apt update, then apt install PACKAGE", available)
+        self.assertIn("No package source is reachable; use the installed tools.", unavailable)
+
     def test_policy_reads_the_network_access(self):
         module = self.module
         env = {"LOAF_TERMINAL_CPUS": "1", "LOAF_TERMINAL_MEMORY_MIB": "256", "LOAF_TERMINAL_MAX_WORKSPACES": "2",
                "LOAF_TERMINAL_IDLE_SECONDS": "5", "LOAF_TERMINAL_COMMAND_SECONDS": "1",
                "LOAF_TERMINAL_VOLUME_DRIVER": "local"}
         self.assertEqual(module.Policy.load("p", env, bridge_options={}).network, "isolated")
-        self.assertEqual(module.Policy.load("p", {**env, "LOAF_TERMINAL_NETWORK": "outbound"},
-                                            bridge_options={}).network, "outbound")
-        with self.assertRaisesRegex(ValueError, "isolated or outbound"):
+        self.assertEqual(module.Policy.load("p", {**env, "LOAF_TERMINAL_NETWORK": "connected"},
+                                            bridge_options={}).network, "connected")
+        with self.assertRaisesRegex(ValueError, "isolated or connected"):
             module.Policy.load("p", {**env, "LOAF_TERMINAL_NETWORK": "open"}, bridge_options={})
+
+    def test_a_runtime_apt_source_hides_the_images_own_sources(self):
+        with TemporaryDirectory() as folder:
+            etc = Path(folder)
+            (etc / "sources.list.d").mkdir()
+            for name in ("sources.list", "sources.list.d/debian.sources", "sources.list.d/loaf-terminal.list",
+                         "sources.list.d/loaf-terminal.sources", "sources.list.d/notes.txt"):
+                (etc / name).write_text("")
+            runtime = str(etc / "sources.list.d/loaf-terminal.sources")
+            # A build-time source in the other format is inherited as well.
+            self.assertEqual(self.module.inherited_apt_sources(runtime, etc), [
+                str(etc / "sources.list"), str(etc / "sources.list.d/loaf-terminal.list"),
+                str(etc / "sources.list.d/debian.sources"),
+            ])
 
     async def test_open_resumes_a_stopped_container_or_recreates_it_after_a_change(self):
         module = self.module
@@ -489,20 +562,20 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
         manager.remove.assert_awaited_once_with("b", "temporary")
         self.assertEqual(manager.temporary, {})
 
-    async def test_outbound_network_disables_traffic_between_chat_containers(self):
+    async def test_connected_network_disables_traffic_between_chat_containers(self):
         module = self.module
-        policy = module.Policy("test-project", 1, 256, 4, 5, 1, "local", {}, "outbound")
+        policy = module.Policy("test-project", 1, 256, 4, 5, 1, "local", {}, "connected")
         docker = FakeDocker()
-        docker.responses = {("GET", f"/networks/{policy.outbound_network}"): None}
+        docker.responses = {("GET", f"/networks/{policy.connected_network}"): None}
         manager = module.Workspaces(policy, docker, None, "provisioner", "image", None)
-        await manager.ensure_outbound_network()
+        await manager.ensure_connected_network()
         _, _, body = docker.calls[-1]
         self.assertEqual((body["Internal"], body["Options"], body["Labels"]),
-                         (False, {module.INTER_CONTAINER: "false"}, policy.outbound_labels))
-        docker.responses[("GET", f"/networks/{policy.outbound_network}")] = {
-            "Labels": policy.outbound_labels, "Driver": "bridge", "Internal": False, "Options": {}}
+                         (False, {module.INTER_CONTAINER: "false"}, policy.connected_labels))
+        docker.responses[("GET", f"/networks/{policy.connected_network}")] = {
+            "Labels": policy.connected_labels, "Driver": "bridge", "Internal": False, "Options": {}}
         with self.assertRaisesRegex(RuntimeError, "isolation mismatch"):
-            await manager.ensure_outbound_network()
+            await manager.ensure_connected_network()
 
     async def test_workspace_bridge_requires_the_selected_isolation(self):
         module = self.module
@@ -534,7 +607,7 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(os.environ.get("RUN_TERMINAL_SERVER_TESTS") == "1", "Set RUN_TERMINAL_SERVER_TESTS=1 for terminal-server Docker tests.")
 class TerminalServerDockerTests(unittest.TestCase):
-    image = os.environ.get("LOAF_TEST_TERMINAL_IMAGE", "local/open-terminal:latest")
+    image = os.environ.get("LOAF_TEST_TERMINAL_IMAGE", "loaf/open-terminal:latest")
 
     @staticmethod
     def remove_terminal_assets(project):
@@ -550,9 +623,9 @@ class TerminalServerDockerTests(unittest.TestCase):
         self.bridge_options()
         if not shutil.which("dpkg-deb"):
             self.skipTest("dpkg-deb is required to create the local APT fixture.")
-        project_name = f"loaf-terminal-apt-{uuid4().hex}"
+        project_name = f"loaf-test-apt-{uuid4().hex}"
         control = f"{project_name}_terminal-control"
-        image = f"local/open-terminal:{project_name}"
+        image = transfer.image_names(project_name, include_terminal=True)[-1]
         webui = f"{project_name}-open-webui"
         command(["docker", "image", "tag", self.image, image])
         self.addCleanup(command, ["docker", "image", "rm", image])
@@ -622,7 +695,9 @@ assert '/execute' in paths and not any(path.startswith('/agent/') for path in pa
 run('test "$(id -u)" = 0 && test "$PWD" = /home/chat && test "$HOME" = /home/user')
 run('test "$(ls -A /home | sort | xargs)" = "chat user"')
 run('echo personal > /home/user/shared.txt && echo chat > kept.txt')
-run('apt-get update; apt-get install -y loaf-chat-demo')
+# Only the configured source is active, and apt installs without -y or a terminal.
+run('apt-get update >/tmp/update.log 2>&1; ! grep -q deb.debian.org /tmp/update.log')
+run('apt install loaf-chat-demo </dev/null')
 run('test "$(loaf-chat-demo)" = configured')
 run('sudo apt-get install -y --reinstall loaf-chat-demo && sudo -n true')
 run('test -f /home/user/shared.txt && test ! -e /home/chat/kept.txt && ! command -v loaf-chat-demo', chat='second')
@@ -679,9 +754,9 @@ run('printf temporary > /home/chat/note.txt', chat='temporary:first')
 
     def test_runtime_apt_source_is_read_only_and_updates_on_recreate(self):
         self.bridge_options()
-        project_name = f"loaf-terminal-runtime-{uuid4().hex}"
+        project_name = f"loaf-test-runtime-{uuid4().hex}"
         control = f"{project_name}_terminal-control"
-        image = f"local/open-terminal:{project_name}"
+        image = transfer.image_names(project_name, include_terminal=True)[-1]
         command(["docker", "image", "tag", self.image, image])
         self.addCleanup(command, ["docker", "image", "rm", image])
         self.addCleanup(self.remove_terminal_assets, project_name)
@@ -726,6 +801,11 @@ with urlopen(request, timeout=45) as response:
                 self.assertFalse(details["HostConfig"]["ReadonlyRootfs"])
                 self.assertEqual(details["Config"]["User"], "0:0")
                 self.assertEqual(command(["docker", "exec", runner, "/bin/cat", apt_target]), source.read_text())
+                # The runtime source replaces the image's own sources, as it does in a build.
+                active = command(["docker", "exec", runner, "/bin/sh", "-c",
+                                  "cat /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null | grep '^URIs:'"])
+                self.assertEqual(active.splitlines(),
+                                 [line for line in source.read_text().splitlines() if line.startswith("URIs:")])
                 return runner
 
             try:
@@ -745,7 +825,7 @@ with urlopen(request, timeout=45) as response:
                 invoke("down", "--volumes", "--timeout", "45")
 
     def test_terminal_backup_restores_image_user_volume_and_key(self):
-        namespace = f"loaf-terminal-transfer-{uuid4().hex}"
+        namespace = f"loaf-test-transfer-{uuid4().hex}"
         tags = transfer.image_names(namespace, include_terminal=True)
         users = transfer.terminal_volume(namespace)
         folder_name = "a" * 64
@@ -850,7 +930,7 @@ with urlopen(request, timeout=45) as response:
         return key, json.loads(compose_command(packaged, step, env=env))
 
     def check_profile(self, profile, webui, *, bridge_options):
-        project = f"loaf-terminal-test-{uuid4().hex}"
+        project = f"loaf-test-webui-{uuid4().hex}"
         control = f"{project}_terminal-control"
         # The terminal image uses these persisted labels for workspace ownership.
         label = f"label={transfer.WORKSPACE_PROJECT_LABEL}={project}"

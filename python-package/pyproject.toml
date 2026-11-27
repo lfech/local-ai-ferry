@@ -37,11 +37,13 @@ loaf = [
     "data/compose.yml",
     "data/compose.cpu.yml",
     "data/compose.terminal-apt.yml",
+    "data/compose.terminal-webui.yml",
     "data/config/*.ini",
     "data/docker/*/Dockerfile",
     "data/docker/*/.dockerignore",
     "data/docker/*/*.sh",
     "data/docker/terminal-server/*.py",
+    "data/docker/open-webui/*.py",
     "data/docker/terminal-server/*.list",
     # Links to the repository's README.md and docs/ in a checkout; the built package holds the files.
     "data/README.md",

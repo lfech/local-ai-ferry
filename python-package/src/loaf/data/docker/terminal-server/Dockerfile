@@ -21,8 +21,10 @@ RUN --mount=type=secret,id=terminal-apt-source set -eu; \
 
 COPY provisioner.py runner.py /opt/loaf-terminal/
 # Chat containers run commands as root with apt available; sudo keeps the non-interactive frontend.
+# Model commands have no terminal: apt installs without a confirmation and writes plain dpkg output.
 RUN printf 'Defaults env_keep += "DEBIAN_FRONTEND"\n' > /etc/sudoers.d/loaf-terminal \
-    && chmod 0440 /etc/sudoers.d/loaf-terminal
+    && chmod 0440 /etc/sudoers.d/loaf-terminal \
+    && printf 'APT::Get::Assume-Yes "true";\nDpkg::Use-Pty "0";\n' > /etc/apt/apt.conf.d/90loaf-terminal
 ENV OPEN_TERMINAL_MULTI_USER=false \
     OPEN_TERMINAL_ENABLE_BROWSER=false \
     OPEN_TERMINAL_ENABLE_DESKTOP=false \

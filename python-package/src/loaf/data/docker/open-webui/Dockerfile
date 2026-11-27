@@ -18,4 +18,8 @@ ENV OLLAMA_BASE_URL=http://ollama-offline:11434 \
 
 # --- Preserve upstream initialization, database migrations and startup ---
 EXPOSE 8080
-# Keep Open WebUI's official startup command and persistent data layout.
+# The start script presets the terminal connection when Compose supplies the bearer key,
+# then runs Open WebUI's official startup command with its persistent data layout.
+COPY start-webui.py /usr/local/lib/loaf/start-webui.py
+ENTRYPOINT ["python3", "/usr/local/lib/loaf/start-webui.py"]
+CMD ["bash", "start.sh"]

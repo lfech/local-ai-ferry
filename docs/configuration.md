@@ -15,14 +15,15 @@ Run commands from the project directory unless a step says otherwise.
 | `open-webui-online` | Same image as `open-webui` | Browser interface with outbound internet access |
 | `terminal-server` | [terminal-server](../python-package/src/loaf/data/docker/terminal-server/Dockerfile) | Optional per-user Open Terminal provisioner. [Setup](terminal-server.md) |
 
-All services have `scale: 1`. In the default project, the Ollama services mount the `ollama`
+All services have `scale: 1`. In the default project `loaf`, the Ollama services mount the `loaf-ollama`
 volume at `/ollama`, with `OLLAMA_MODELS=/ollama/models`. Its `models/` directory
 contains weights and manifests, including newer Ollama catalog entries under
 `models/manifests-v2/`. The volume's `config/` contains exported text Modelfiles.
-The `open-webui` volume mounts at `/app/backend/data` for accounts, chats,
+The `loaf-open-webui` volume mounts at `/app/backend/data` for accounts, chats,
 settings and caches. Stopping containers preserves both volumes.
-Versioned deployments use separate volume names with the same mount paths.
-[Versioned deployments](launcher.md#run-a-versioned-deployment)
+Versioned deployments use separate volume names such as `loaf-v1-2-3-ollama`
+with the same mount paths. [Versioned deployments](launcher.md#run-a-versioned-deployment) ·
+[Docker resources](launcher.md#list-and-remove-docker-resources)
 
 ## Project configuration
 
@@ -97,7 +98,7 @@ available. Use `loaf backup --no-terminal-server` to skip that image.
 Set `[images] terminal_server_image` to override its
 base image. Set `[terminal_server] apt_source_file` for the terminal image
 build and for `apt` in chat containers. Set `apt_repository_dir` for a
-repository stored on the Docker host. `network = outbound` lets chat
+repository stored on the Docker host. `network = connected` lets chat
 containers reach every address the Docker host reaches; the default
 `isolated` keeps them on their own bridge.
 [Terminal server setup](terminal-server.md#enable-and-connect) · [Package mirror](terminal-server.md#package-mirror-for-image-builds)

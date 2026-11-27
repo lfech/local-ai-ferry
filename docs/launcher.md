@@ -104,6 +104,110 @@ updates `docker-project` and the exported guides to the new release and keeps
 your settings. Build the images while connected with `./loaf build`, or load
 newer images from a backup. `./loaf version` shows the release in use.
 
+## Upgrade from the local-inference names
+
+Releases up to 0.4.0 named the default deployment `local-inference`. Its
+images were `local/NAME:latest`, its volumes `ollama` and `open-webui`, and
+the terminal user volume `loaf-tools-HASH-users`. Every name now starts with
+the deployment namespace `loaf`, or `loaf-VERSION` for a versioned deployment.
+Docker cannot rename volumes or images, so the new release starts with empty
+volumes until you move the data. [Docker names](#list-and-remove-docker-resources)
+
+1. Before you replace `loaf`, save the volumes with the old release and stop
+   the old deployment:
+
+   ```bash
+   loaf backup volumes
+   loaf stop
+   ```
+
+2. Restore the volume types with the new release, which creates the new
+   volumes. Omit `terminal` if the backup has no terminal type. A backup
+   from the old release cannot restore `images`, because its image tags use
+   the old names.
+
+   ```bash
+   loaf restore models webui terminal
+   ```
+
+3. Build the images while connected with `loaf build`, or tag the existing
+   images with the new names on an offline host. Skip `open-terminal` if the
+   terminal server is not in use.
+
+   ```bash
+   for image in ollama-online ollama-offline open-webui open-terminal; do
+       docker image tag "local/$image:latest" "loaf/$image:latest"
+   done
+   ```
+
+4. Start the deployment and check your models, accounts and terminal files.
+   Then remove the old chat containers, networks, volumes and image tags.
+   `loaf docker` covers only the new names. Images tagged in step 3 keep
+   their new tags.
+
+   ```bash
+   old=label=loaf.tool-server.project=local-inference
+   docker container ls -aq --filter "$old" | xargs -r docker container rm
+   docker network ls -q --filter "$old" | xargs -r docker network rm
+   docker network ls -q --filter label=com.docker.compose.project=local-inference | xargs -r docker network rm
+   docker volume ls -q --filter "$old" | xargs -r docker volume rm
+   docker volume rm ollama open-webui
+   docker image rm local/ollama-online:latest local/ollama-offline:latest local/open-webui:latest local/open-terminal:latest
+   ```
+
+Without the old release or its images, copy the volumes directly instead of
+steps 1 and 2. Build the new images first, keep the old deployment stopped,
+and replace `HASH` with the one in the old terminal volume's name. Each target
+volume must be new; it gets the labels that Compose and the terminal server
+expect.
+
+```bash
+loaf build
+copy_volume() {
+    docker volume create "${@:3}" "$2"
+    docker run --rm --network none --mount "source=$1,target=/from,readonly" --mount "source=$2,target=/to" \
+        --entrypoint cp loaf/ollama-online:latest -a /from/. /to/
+}
+copy_volume ollama loaf-ollama --label com.docker.compose.project=loaf --label com.docker.compose.volume=ollama
+copy_volume open-webui loaf-open-webui --label com.docker.compose.project=loaf --label com.docker.compose.volume=open-webui
+copy_volume loaf-tools-HASH-users loaf-terminal-users --label loaf.terminal.project=loaf --label loaf.terminal.users=true
+```
+
+For a versioned deployment, add the same `--version` to the loaf commands. The
+old names were `VERSION-local-inference` for the project and volume prefix and
+`local/NAME:VERSION-local-inference` for the images.
+
+## Bash completion
+
+`loaf` completes its commands, subcommands, archive and resource types,
+guide names and options with the Tab key. Option values complete as
+directories for `--project-dir`, `--config-dir` and `--backup-dir`, and as
+files for `--models-file` and `--archive`.
+
+| Setup | Install | Remove |
+| --- | --- | --- |
+| Local: source checkout, standalone executable or wheel | `loaf completion install` writes the script for the current user to `~/.local/share/bash-completion/completions/loaf`. | `loaf completion remove` |
+| System: Debian package | The package installs `/usr/share/bash-completion/completions/loaf`. | Removing the package removes it. |
+
+```bash
+loaf completion install
+loaf completion remove
+```
+
+Open a new shell after either command. bash-completion loads the script the
+first time you press Tab after `loaf` or `./loaf`. Debian's default
+`~/.bashrc` enables bash-completion; install the Debian package
+`bash-completion` if it is missing. Without it, add
+`source ~/.local/share/bash-completion/completions/loaf` to `~/.bashrc`.
+`XDG_DATA_HOME` and `BASH_COMPLETION_USER_DIR` move the per-user directory
+as they do for bash-completion.
+
+`install` replaces an earlier loaf script, so run it again after updating a
+local installation. Neither command touches a file it did not write. With the
+Debian package, `install` reports the system script and writes nothing.
+`loaf completion print` writes the script to standard output for another
+location.
+
 ## Read the bundled guides
 
 Every installation carries the guides of its release. `loaf docs` lists them
@@ -135,6 +239,10 @@ From a source checkout, `loaf build` and the other launcher commands find the
 deployment files automatically. From a wheel installation, use the directory
 containing the link for those commands. For manual Compose commands, enter
 the link directory. Direct Compose reads its environment and Compose defaults.
+Without further settings, it uses the default deployment `loaf`, and Open
+WebUI starts without the terminal connection that `loaf` presets. For a
+versioned deployment, set `LOAF_VERSION` and the matching project name, for
+example `LOAF_VERSION=v1-2-3 docker compose --project-name loaf-v1-2-3`.
 [Configuration overrides](configuration.md#overrides)
 
 ## Select models
@@ -227,7 +335,45 @@ containers. The command keeps named volumes, bind-mounted files, images
 and networks. It removes container logs and files stored only in a container's
 writable layer. Use `loaf stop -n` or `loaf stop --no-remove-containers` to keep
 stopped containers and their logs. Preview either form with `--dry-run`.
+To remove networks, volumes or images as well, use
+[`loaf docker rm`](#list-and-remove-docker-resources).
 [Compose container removal](https://docs.docker.com/reference/cli/docker/compose/rm/)
+
+### List and remove Docker resources
+
+Every Docker resource of a deployment starts with its namespace: `loaf` for
+the default deployment, or `loaf-VERSION` with `--version`. `loaf docker ps`
+lists the selected deployment's containers, images, volumes and networks.
+
+```bash
+loaf docker ps
+loaf docker rm containers
+loaf docker rm all
+```
+
+| Type | Names in the default deployment |
+| --- | --- |
+| Containers | Compose services such as `loaf-open-webui-1`, and the terminal server's chat containers `loaf-terminal-KEY`. |
+| Images | `loaf/ollama-online`, `loaf/ollama-offline`, `loaf/open-webui` and `loaf/open-terminal`, tagged `latest` or the version. |
+| Volumes | `loaf-ollama` holds the models, `loaf-open-webui` the Open WebUI accounts and chats, and `loaf-terminal-users` the terminal user folders. |
+| Networks | Compose networks such as `loaf_inference`, and the terminal server's chat networks `loaf-terminal-KEY`. |
+
+`loaf docker rm` takes one or more of `all`, `containers`, `images`,
+`volumes` and `networks`. It lists the resources and asks for confirmation.
+Add `--yes` to skip the question, for example in a script. Without a
+terminal, `rm` requires `--yes`. Removal stops the running services within
+their grace periods. The terminal server then stops its chat containers.
+Next, `rm` removes the containers, networks, volumes and images in that
+order. Networks, volumes and images can go only once the deployment has no
+containers. In that case, `rm` refuses and prints the command that includes
+`containers`. `--dry-run` describes the removal without Docker. Removing an
+image tag that another deployment also uses keeps the image for that
+deployment.
+
+Removed volumes cannot be recovered. Save them first with
+`loaf backup volumes`. An offline host cannot rebuild removed images; they
+come back with `loaf restore images`. Base images, build cache and other
+projects' resources are not affected.
 
 ### Check readiness with status
 
@@ -265,8 +411,9 @@ loaf -v download --models-file config/model-examples/models.8gb.ini --dry-run
 ```
 
 During a run, `loaf` reports the major steps and keeps Docker and Ollama's
-progress visible. Service startup reports elapsed time every 10 seconds while
-it waits for readiness. Transfers report bytes and throughput. Add `-v` to a
+progress visible. While service startup waits for readiness, Compose's
+terminal display shows each service's elapsed time. In logs and other output
+that is not a terminal, `loaf` reports the elapsed time every 10 seconds. Transfers report bytes and throughput. Add `-v` to a
 dry run to see the planned Compose commands.
 
 Use `loaf offline --attach` or `loaf -a status` to follow logs. The flag is
@@ -293,12 +440,12 @@ loaf --version v1-2-3 backup models
 loaf --version v1-2-3 offline
 ```
 
-This uses Compose project `v1-2-3-local-inference`, image tags such as
-`local/ollama-offline:v1-2-3-local-inference`, and volumes such as
-`v1-2-3-local-inference-ollama`. Set `[launcher]` `version` in
-`config.ini` to select it by default. The unversioned project is
-`local-inference`. Each serving deployment needs its own host port if you
-run them together. Set `[webui]` `port` in each checkout as needed.
+This uses Compose project `loaf-v1-2-3`, image tags such as
+`loaf/ollama-offline:v1-2-3`, and volumes such as `loaf-v1-2-3-ollama`.
+Set `[launcher]` `version` in `config.ini` to select it by default. The
+unversioned project is `loaf`, with images tagged `latest`, so `latest`
+is not available as a version. Each serving deployment needs its own host
+port if you run them together. Set `[webui]` `port` in each checkout as needed.
 [Versioned transfers](transfer.md#versioned-transfers)
 
 ## Clean generated files

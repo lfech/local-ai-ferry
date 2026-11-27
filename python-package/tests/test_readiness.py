@@ -42,10 +42,10 @@ class ReadinessTests(unittest.TestCase):
                     readiness.check_volume(None, "image", "ollama", models=True)
 
     def test_status_checks_both_profiles_and_recognizes_the_deployments_port(self):
-        models = "v2-local-inference-ollama"
-        webui = "v2-local-inference-open-webui"
-        terminal = "local/open-terminal:v2-local-inference"
-        downloader, backend, frontend = transfer.image_names("v2-local-inference")
+        models = "loaf-v2-ollama"
+        webui = "loaf-v2-open-webui"
+        terminal = "loaf/open-terminal:v2"
+        downloader, backend, frontend = transfer.image_names("loaf-v2")
         port = {"host_ip": "127.0.0.1", "published": "3100", "protocol": "tcp", "target": 8080}
         services = {
             "ollama-online": {"image": downloader},
@@ -65,7 +65,7 @@ class ReadinessTests(unittest.TestCase):
         calls = []
 
         def output(compose, command):
-            self.assertEqual(compose.project_name, "v2-local-inference")
+            self.assertEqual(compose.project_name, "loaf-v2")
             calls.append(command)
             if command[1] == "version":
                 return engine_version
@@ -108,7 +108,7 @@ class ReadinessTests(unittest.TestCase):
             options = ["status", "--project-dir", str(ROOT), "--config-dir", config_dir, "--version", "v2"]
             self.assertEqual(cli.main(options), 0)
             self.assertEqual(execute.call_args.args[0].arguments, ("ps", "--all"))
-            self.assertIn("Deployment  v2-local-inference", status.getvalue())
+            self.assertIn("Deployment  loaf-v2", status.getvalue())
             self.assertIn("Containers across all profiles", status.getvalue())
             self.assertIn("Preflight passed.", status.getvalue())
             self.assertIn("WARN  Docker Engine — 26.1.5", status.getvalue())

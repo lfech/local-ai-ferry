@@ -11,7 +11,7 @@ import urllib.request
 from uuid import uuid4
 
 from loaf import cli, transfer
-from tests.docker_support import CPU_TESTS, GPU_TESTS, command, compose_command, compose_config
+from tests.docker_support import CPU_TESTS, DEFAULT_IMAGES, GPU_TESTS, command, compose_command, compose_config
 from tests.webui_chat import WebUIChat
 
 
@@ -99,7 +99,7 @@ class ModelWorkflowTests(unittest.TestCase):
             "docker", "run", "--rm", "--pull", "never", "--network", "none", "--read-only",
             "--mount", f"type=volume,source={self.seed_volume},target=/seed,volume-nocopy,readonly",
             "--mount", f"type=volume,source={volume},target=/target,volume-nocopy",
-            "--entrypoint", "/bin/cp", transfer.IMAGES[2], "-a", "--reflink=auto", "/seed/.", "/target",
+            "--entrypoint", "/bin/cp", DEFAULT_IMAGES[2], "-a", "--reflink=auto", "/seed/.", "/target",
         ])
         return compose
 
@@ -119,7 +119,7 @@ class ModelWorkflowTests(unittest.TestCase):
         return command([
             "docker", "run", "--rm", "--pull", "never", "--network", "none",
             "--mount", mount + (",readonly" if readonly else ""),
-            "--entrypoint", "python", transfer.IMAGES[2], "-c", dedent(script), *args,
+            "--entrypoint", "python", DEFAULT_IMAGES[2], "-c", dedent(script), *args,
         ], timeout=90)
 
     def webui_request(self, compose, profile, api, data=None):
@@ -270,7 +270,7 @@ class ModelWorkflowTests(unittest.TestCase):
         webui = self.container_id(compose, "online", "open-webui-online")
         project = compose.project_name
         helper = transfer.image_names(project)[0]
-        command(["docker", "image", "tag", transfer.IMAGES[0], helper])
+        command(["docker", "image", "tag", DEFAULT_IMAGES[0], helper])
         self.addCleanup(command, ["docker", "image", "rm", helper])
         archive = compose.project_dir / "models.tar.gz"
 

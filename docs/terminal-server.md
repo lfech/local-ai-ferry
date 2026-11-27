@@ -62,13 +62,28 @@ or **Local images** with `--cpu`.
 The container list shows the provisioner's current health.
 Keep the file outside Git. Full backups can include the saved connection record
 in WebUI's own volume. To rotate the key, stop the deployment, replace the key
-file, start the deployment, and update the WebUI connection.
+file, start the deployment, and update the stored WebUI connection.
 
-In the Open WebUI admin **Settings → Integrations → Open Terminal**, add a
-direct connection to `http://terminal-server:8000`. Choose **Bearer** authentication,
-enter the same key, and restrict access to the intended users or groups.
-Verify and save the connection. Users select it in the chat terminal menu.
-The URL is reachable from Open WebUI on the internal Compose network.
+Open WebUI starts with the connection already set up. With the terminal
+server enabled, loaf mounts the bearer key in the WebUI container, and its
+start script passes the connection to Open WebUI's `TERMINAL_SERVER_CONNECTIONS`
+setting: **Terminal** at `http://terminal-server:8000` with **Bearer**
+authentication and the key. The key does not appear in the container's
+configuration. Open WebUI stores the connection when it has no terminal
+connections yet, which is the case when WebUI first starts with the terminal
+server enabled. Users select it in the chat terminal menu.
+[Open WebUI environment configuration](https://docs.openwebui.com/reference/env-configuration)
+
+`webui_access` decides who may use the connection: `admins`, the default, or
+`users` for every account. To allow selected groups instead, keep `admins`
+and add the groups to the connection in the Open WebUI admin
+**Settings → Integrations → Open Terminal**.
+
+Afterwards Open WebUI keeps its stored connection, including changes made in
+its admin settings, and ignores the preset. After a key rotation, or for a
+WebUI that first started without the terminal server, add or update the
+connection there: a direct connection to `http://terminal-server:8000` with
+**Bearer** authentication and the key. Verify and save it.
 [Connection setup](https://docs.openwebui.com/features/open-terminal/setup/connecting/)
 
 ## Upgrade an existing terminal deployment
@@ -80,7 +95,10 @@ saved connection in Open WebUI. Direct Compose uses
 
 Releases before v1.0.0 do not migrate terminal data. This release ignores the
 per-account volumes, per-chat volumes and chat package images of earlier
-releases. Copy the files you need from them, then remove them. List them with:
+releases. Copy the files you need from them, then remove them. Move the user
+volume of release 0.4.0 with backup and restore as described in
+[Upgrade from the local-inference names](launcher.md#upgrade-from-the-local-inference-names).
+List the older resources with:
 
 ```bash
 docker volume ls --filter label=loaf.tool-server.workspace
@@ -94,6 +112,17 @@ In **Workspace → Models**, enable **Terminal** for the model and set
 **Function Calling** to **Default** or **Native**. Select **Open Terminal**
 in the chat, or choose it as the model's **Default terminal**.
 [Open WebUI model settings](https://docs.openwebui.com/features/workspace/models/)
+
+Open WebUI describes the terminal's tools to the model. The bundled terminal
+server adds these instructions to the description of `run_command`:
+
+```text
+Terminal: call run_command to run shell commands yourself; never tell the user to run them. You are root in this chat's own Debian container. Install packages with apt update, then apt install PACKAGE. /home/chat is deleted with the chat; keep lasting files in /home/user. Answer from the command output.
+```
+
+With `network = isolated` and no `apt_repository_dir`, no package source is
+reachable. The apt sentence then reads `No package source is reachable; use
+the installed tools.`
 
 If a follow-up after a terminal tool result fails with a role-order error,
 enable the optional filter for that model.
@@ -151,7 +180,8 @@ All settings below belong to `[terminal_server]` in `config/config.ini`.
 | `secret_file` | `config/terminal-server.key` | Source for the Compose bearer secret. |
 | `apt_source_file` | blank | Use this APT source for terminal image builds and for `apt` in chat containers. [Package mirror](#package-mirror-for-image-builds) |
 | `apt_repository_dir` | blank | Host directory for a `file:` repository, mounted read-only in chat containers. [Install packages in a chat](#install-packages-in-a-chat) |
-| `network` | `isolated` | `isolated` lets chat containers reach only the provisioner. `outbound` also lets them reach every address the Docker host reaches. [Network access](#network-access) |
+| `network` | `isolated` | `isolated` lets chat containers reach only the provisioner. `connected` also lets them reach every address the Docker host reaches. [Network access](#network-access) |
+| `webui_access` | `admins` | Accounts that may use the connection that Open WebUI starts with: `admins`, or `users` for every account. [Enable and connect](#enable-and-connect) |
 | `cpus` | `2` | CPU limit per container. |
 | `memory_mib` | `2048` | Memory limit per container. |
 | `max_workspaces` | `4` | Limit on running containers, one per chat or account draft. |
@@ -185,8 +215,9 @@ own internal bridge. The bridge uses IPv4 with no default route, and IPv6 is
 disabled. `apt` can then install only from a local repository.
 [Install packages in a chat](#install-packages-in-a-chat)
 
-With `network = outbound`, each container also joins a shared bridge with
-outbound access, on which containers cannot reach each other. They reach
+With `network = connected`, each container also joins the shared bridge
+`loaf-terminal-connected` with outbound access, on which containers cannot
+reach each other. They reach
 every address the Docker host reaches: an APT mirror, the internet, other
 hosts on its network and the host's published ports, including Open WebUI.
 Use it only where that access is acceptable. Changing the setting replaces
@@ -232,9 +263,10 @@ image. Loaf mounts the file read-only at
 `/etc/apt/sources.list.d/loaf-terminal.sources` in the provisioner and its
 chat containers. A `.list` file gets the corresponding `.list` destination.
 The file is visible to terminal users. Keep it free of mirror credentials.
-An image built without `apt_source_file` keeps its inherited sources as well.
-`apt-get update` then reports the unreachable ones and continues with the
-configured source.
+In chat containers, the file replaces the image's own APT sources, as it
+does in a build, so `apt-get update` reads only the configured source. To
+keep Debian's mirrors next to a local repository with `network = connected`,
+list both in the file.
 
 Edit the source on the host. In-place writes are visible through the mount.
 Run `loaf offline` again after saving through an editor that replaces the
@@ -246,12 +278,21 @@ their `/home/chat` folders and installed packages.
 ## Install packages in a chat
 
 Commands run as root, so `apt`, `apt-get` and `sudo apt-get` work as usual in
-a chat's terminal and in model commands:
+a chat's terminal and in model commands. A new chat container has no package
+lists yet, so update them once before the first install:
 
 ```text
-apt-get update
-apt-get install -y PACKAGE
+apt update
+apt install PACKAGE
 ```
+
+Model commands run without a terminal. The terminal image therefore sets
+`APT::Get::Assume-Yes` and `Dpkg::Use-Pty "0"`: `apt install` proceeds
+without `-y` and writes plain dpkg output without progress bars. This
+applies to the interactive terminal as well. The terminal image needs a
+rebuild with `loaf build` for these settings. The model's `run_command`
+description names the update step.
+[Model instructions](#use-the-terminal-from-a-model)
 
 The packages stay in the chat's container while the chat exists, also while
 the container is stopped. Other chats and new chats start from the shared
@@ -260,7 +301,7 @@ after a restore. Changing `apt_source_file`, `apt_repository_dir` or
 `network` replaces existing chat containers on the next start, without their
 packages.
 
-The container must reach a package source. With `network = outbound`, it
+The container must reach a package source. With `network = connected`, it
 uses the image's APT sources or a configured `apt_source_file` over the
 Docker host's network. With `network = isolated`, set `apt_repository_dir` to
 a repository stored on the Docker host and use a source URI rooted at
@@ -324,17 +365,20 @@ serving. Use the matching image tag for a versioned deployment. If you also
 need to transfer the bearer key separately, copy it to `secret_file`.
 
 ```bash
-docker image save -o open-terminal.tar local/open-terminal:latest
+docker image save -o open-terminal.tar loaf/open-terminal:latest
 docker image load -i open-terminal.tar
 ```
 
 To move the user volume separately, stop the provisioner and preserve its
 name, ownership labels, and data. Restore the matching Open WebUI data so the
 account IDs still match the folders, which are named by a hash of the
-account ID. Find the user volume by Compose project.
+account ID. The user volume is `loaf-terminal-users`, or
+`loaf-VERSION-terminal-users` in a versioned deployment. The chat containers
+and their networks are named `loaf-terminal-KEY`. `loaf docker ps` lists them.
+[Docker resources](launcher.md#list-and-remove-docker-resources)
 
 ```bash
-docker volume ls --filter label=loaf.terminal.users --filter label=loaf.tool-server.project=local-inference
+docker volume inspect --format '{{json .Labels}}' loaf-terminal-users
 ```
 
 `loaf stop` stops the provisioner, which stops the chat containers and keeps
@@ -347,7 +391,7 @@ volume and the stopped chat containers remain available for re-enabling.
 
 ## Acceptance checks
 
-Build `local/open-webui:latest` and `local/open-terminal:latest` while
+Build `loaf/open-webui:latest` and `loaf/open-terminal:latest` while
 connected. Run the checks on native Debian and on Debian in WSL2. Repeat
 on each host after disconnecting its internet access once the images and
 test dependencies are available locally.

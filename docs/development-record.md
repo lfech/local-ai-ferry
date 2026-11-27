@@ -7,6 +7,145 @@ Git milestones use commit timestamps. Working-tree milestones use the
 associated verification time where it was recorded.
 Earlier entries use the current names for commands, paths and artifacts.
 
+## 2026-11-27 17:41 CET — Open WebUI starts with the terminal connection
+
+The author asked for Open WebUI to start with the correct terminal server
+settings, in a way Open WebUI supports.
+[Enable and connect](terminal-server.md#enable-and-connect)
+
+- **Supported setting.** Open WebUI v0.13.4 seeds `terminal_server.connections`
+  from `TERMINAL_SERVER_CONNECTIONS` on every start, for databases without
+  that key, and never overwrites a stored value. Its main branch reads
+  `MACHINE_CONNECTIONS` with the old name as a fallback.
+- **Key handling.** `compose.terminal-webui.yml`, which loaf adds while the
+  terminal server is enabled, mounts the bearer key secret in both WebUI
+  services. The WebUI image's new `start-webui.py` builds the connection from
+  it and runs Open WebUI's own `bash start.sh`. The key stays out of the
+  container configuration. Without the secret, or with
+  `TERMINAL_SERVER_CONNECTIONS` already set, nothing changes.
+- **Access.** `[terminal_server] webui_access` is `admins` by default, which
+  matches Open WebUI's admin-only treatment of a connection without grants.
+  `users` adds Open WebUI's read grant for every account.
+- **Limits.** Open WebUI stores an empty list on its first start, so a WebUI
+  that first ran without the terminal server keeps needing the connection
+  added in its admin settings. A key rotation still needs a manual update.
+  Direct Compose use gets no preset.
+
+## 2026-11-27 17:27 CET — Bash completion for local and system setups
+
+The author asked for Bash completion that is easy to set up and to remove,
+for both the local setup and the Debian package's system setup.
+[Bash completion](launcher.md#bash-completion)
+
+- **Script.** The new `completion` module generates the script from the
+  command tables: commands, the `integration`, `docker` and `completion`
+  subcommands, archive and resource types, guide names and each command's
+  options. Option values complete as directories or files, and both
+  `--name value` and `--name=value` are skipped. Completion runs in Bash
+  alone, without starting `loaf`.
+- **Local setup.** `loaf completion install` writes the script for the
+  current user to bash-completion's per-user directory, honoring
+  `XDG_DATA_HOME` and `BASH_COMPLETION_USER_DIR`. bash-completion loads it on
+  first use, so `~/.bashrc` stays unchanged. `loaf completion remove`
+  deletes it. Both refuse a file whose first line does not mark it as
+  loaf's. `loaf completion print` writes the script to standard output.
+- **System setup.** The Debian package installs the script as
+  `/usr/share/bash-completion/completions/loaf`, so dpkg adds and removes it.
+  With the package, `install` reports the system script and writes nothing.
+
+## 2026-11-27 17:17 CET — Compose progress without duplicated lines
+
+- The author saw `[+] Running 6/6` repeat during `loaf online`. Every 10
+  seconds, the readiness wait printed an elapsed-time line into Compose's
+  terminal display. Compose redraws that display by moving the cursor up,
+  so each extra line duplicated it. On a terminal, the wait now prints
+  nothing, because Compose shows each service's elapsed time itself. Logs
+  and other non-terminal output keep the 10-second line.
+  [Launcher options](launcher.md#options)
+
+## 2026-11-27 17:05 CET — Terminal review and natural apt in chat containers
+
+The author asked for a review of the terminal server against the selected
+design and for `apt` that works as naturally as possible.
+[Install packages in a chat](terminal-server.md#install-packages-in-a-chat)
+
+- **Review.** The code matches the requirements. A chat's container and
+  bridge are removed by the next cleanup pass after WebUI deletes the chat,
+  and a temporary chat's container after `idle_seconds` and at shutdown.
+  `/home/user` is the account's subpath of the one user volume.
+  `/home/chat` has no mount and lives in the container's writable layer. The
+  provisioner lists both folders first in Open WebUI's Working Directory
+  menu, and a chat starts in `/home/chat`.
+- **Runtime APT source.** With `apt_source_file` set, chat containers hide the
+  image's own sources behind an empty file, as an image build with the
+  setting does. Before, an image built without the setting kept
+  `deb.debian.org`. In isolated mode, every `apt-get update` then warned
+  three times about unreachable sources. The hidden paths are part of the
+  container revision, so a change replaces the containers.
+- **APT defaults in the image.** `APT::Get::Assume-Yes` and `Dpkg::Use-Pty "0"`
+  let `apt install PACKAGE` proceed in model commands, which run without a
+  terminal and aborted at the confirmation, and keep dpkg progress out of
+  the output.
+- **Model instructions.** The author asked for short, agent-style guidance
+  that names `run_command`. The provisioner appends it to the description of
+  Open Terminal's `run_command`, the operation behind `/execute`: run commands
+  instead of describing them, root in the chat's Debian container, `apt
+  update` before `apt install`, the lifetimes of `/home/chat` and
+  `/home/user`, and answers based on the output. Without outbound access or
+  a local repository, the apt sentence says that no package source is
+  reachable.
+- **Network setting.** As the author's task in the development backlog
+  asked, `[terminal_server] network = outbound` is now `network = connected`.
+  The shared bridge is `NAMESPACE-terminal-connected` with the label
+  `loaf.terminal.connected`. A configuration that still says `outbound` fails
+  validation with `expected isolated or connected`. The working
+  `config/config.ini` uses `connected`.
+
+## 2026-11-27 16:50 CET — loaf Docker names, loaf docker ps and rm, labeled volumes
+
+The author decided that every Docker resource name starts with `loaf`, that
+`loaf docker` works on the selected deployment, and that loaf suppresses the
+Compose warning about volumes it did not create.
+[Docker resources](launcher.md#list-and-remove-docker-resources)
+
+- **Names.** The deployment namespace is the Compose project `loaf`, or
+  `loaf-VERSION`, replacing `local-inference` and `VERSION-local-inference`.
+  Images are `loaf/NAME`, tagged `latest` or the version, instead of
+  `local/NAME`. The volumes are `NAMESPACE-ollama` and `NAMESPACE-open-webui`;
+  the default deployment used `ollama` and `open-webui`. The provisioner names
+  its resources `NAMESPACE-terminal-KEY`, `NAMESPACE-terminal-users` and
+  `NAMESPACE-terminal-outbound` with the labels `loaf.terminal.project` and
+  `loaf.terminal.workspace`. These replace `loaf-tools-HASH-` and
+  `loaf.tool-server.*`. Compose receives `LOAF_VERSION` in place of
+  `LOAF_NAMESPACE`, and `latest` is refused as a version.
+- **Backups.** Versioned backup folders are `YYYYMMDD-HHMM_VERSION_local-ai-ferry`.
+  The default folder name is unchanged. The archive format stays 3, so a
+  0.4.0 backup restores its volume types into the new volumes. Its images
+  keep the old tags; restore refuses them and names the tags.
+- **Upgrade.** Docker cannot rename volumes or images. The launcher guide
+  describes the move with the old release's backup, the new restore, image
+  tags for offline hosts and the removal of the old resources.
+  [Upgrade](launcher.md#upgrade-from-the-local-inference-names)
+- **`loaf docker ps` and `loaf docker rm`.** The new `resources` module finds
+  Compose containers and networks by project label, the provisioner's
+  resources by label and name prefix, and volumes and images by exact name.
+  `ps` prints aligned tables. `rm` takes `all`, `containers`, `images`,
+  `volumes` or `networks`. It lists the resources and asks for confirmation;
+  without a terminal it requires `--yes`. Under the project lock, it refuses
+  networks, volumes and images while containers remain. It then stops
+  running Compose services, lists each type again and removes containers,
+  networks, volumes and images in that order. `--dry-run` needs no Docker.
+  The manual page now lists the `docker` and `integration` subcommands.
+- **Compose volume warning.** Backup of `webui` and restore of `models` and
+  `webui` create missing volumes with `com.docker.compose.project` and
+  `com.docker.compose.volume`. Compose 2.26.1 and the current main branch
+  warn only when the project label is absent or names another project, and
+  neither recreates a volume because of labels.
+- **Old names removed.** The retired-variable test checks `LOAF_NAMESPACE`
+  instead of `OWO_*`. Tests no longer create a `tool-server.key` or check for a
+  `tool-server` alias. The verification record no longer mentions `owo`. The
+  README storage table places `/home/chat` in the chat's container.
+
 ## 2026-11-27 13:37 CET — One terminal container per chat with root, apt and a shared user volume
 
 The author's decisions D1 to D5 replace the terminal design.

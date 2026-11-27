@@ -144,7 +144,10 @@ Saved WebUI connection settings can override environment defaults.
 Run `loaf status` with the terminal server enabled. Check its image under
 **Local images and GPU** (or **Local images** with `--cpu`), its bearer key under **Configuration**, and its
 runtime health in the container list. In Open WebUI, verify the direct connection to
-`http://terminal-server:8000` and check the user's access grant. If the
+`http://terminal-server:8000` and check the user's access grant. Open WebUI
+starts with this connection only if it had none stored; a WebUI that first
+ran without the terminal server needs it added in its admin settings.
+[Enable and connect](terminal-server.md#enable-and-connect) If the
 terminal works in the Files tab but the model answers with instructions,
 check the model's Terminal capability, function calling mode and selected
 terminal. [Terminal setup](terminal-server.md#enable-and-connect) ·
@@ -164,15 +167,18 @@ Commands run as root, so `apt-get install` works in the chat's container.
 When `apt-get update` cannot reach any source, the container has no route to
 a mirror: with `[terminal_server] network = isolated`, set `apt_source_file`
 and `apt_repository_dir` for a repository on the Docker host. With
-`network = outbound`, check that the Docker host reaches the mirror. Then run
+`network = connected`, check that the Docker host reaches the mirror. Then run
 `loaf offline` or `loaf online`. Packages installed in a chat stay in its
 container only; a new chat starts without them.
 [Install packages in a chat](terminal-server.md#install-packages-in-a-chat)
 
+A new chat container has no package lists, so `Unable to locate package`
+right after the chat starts means that `apt update` has not run yet.
+
 When APT reports that a repository `is not signed`, mark a local
 unsigned repository as trusted in the source file, for example
 `deb [trusted=yes] file:/run/loaf-apt/repository ./`, or reference its key
-with `signed-by=`. `Unable to locate package` means that the configured
+with `signed-by=`. After an update, `Unable to locate package` means that the configured
 source does not provide that name for the image's Debian release and
 architecture.
 
@@ -190,6 +196,32 @@ read access in a terminal. Move the file into the project, for example under
 `config/`, or update Docker Compose to 5.7.0 or newer.
 [Package mirror](terminal-server.md#package-mirror-for-image-builds) ·
 [Compose build inputs](https://github.com/docker/compose/commit/43a5d5a253)
+
+## Models or accounts missing after an upgrade
+
+Releases up to 0.4.0 named the default deployment `local-inference`, with
+the volumes `ollama` and `open-webui`. The new names start with `loaf`, so
+the upgraded deployment starts with empty volumes while the old data stays
+in place. `loaf docker ps` shows the new resources and `docker volume ls`
+the old ones. Move the data with backup and restore.
+[Upgrade from the local-inference names](launcher.md#upgrade-from-the-local-inference-names)
+
+## Volume already exists but was not created by Docker Compose
+
+Compose prints `volume "NAME" already exists but was not created by Docker
+Compose` when a volume lacks Compose's project label. It still uses the
+volume and its data. Backup and restore create missing `loaf-ollama` and
+`loaf-open-webui` volumes with Compose's labels, so the warning appears
+only for volumes created by other means, such as an older loaf release or a
+manual `docker run`. Docker cannot add labels to an existing volume. To
+silence the warning for good, back up the volume, remove it and restore it.
+
+```bash
+loaf backup webui
+loaf docker rm containers
+docker volume rm loaf-open-webui
+loaf restore webui
+```
 
 ## Launcher busy or interrupted
 

@@ -9,13 +9,20 @@ from typing import Iterator
 
 
 @contextmanager
-def wait_status(message: str) -> Iterator[None]:
-    """Report elapsed time during a service readiness wait."""
+def wait_status(message: str, interval: float = 10) -> Iterator[None]:
+    """Report elapsed time during a service readiness wait in logs and other non-terminal output.
+
+    On a terminal, Compose redraws its progress display, which shows each service's elapsed time.
+    A line printed in between would shift that display and duplicate its lines.
+    """
+    if sys.stderr.isatty():
+        yield
+        return
     finished = Event()
     started = monotonic()
 
     def report() -> None:
-        while not finished.wait(10):
+        while not finished.wait(interval):
             print(f"{message} ({monotonic() - started:.0f}s elapsed).", file=sys.stderr, flush=True)
 
     reporter = Thread(target=report, daemon=True)

@@ -17,11 +17,12 @@ import subprocess
 import sys
 import tarfile
 from tempfile import TemporaryDirectory
+from time import sleep
 import unittest
 from unittest.mock import patch
 
 from loaf import assets, cli, config, setup, transfer
-from loaf.progress import Progress
+from loaf.progress import Progress, wait_status
 from tests import DATA, ROOT
 
 
@@ -125,7 +126,7 @@ class TransferTests(unittest.TestCase):
         self.docker_calls = []
         self.received = []
         self.failing = set()
-        self.images = image_payload(transfer.IMAGES)
+        self.images = image_payload(transfer.image_names(config.DEPLOYMENT))
         self.terminal_image = None
         self.models = tar_payload("models", None, **{"models/blobs": None})
         self.webui = tar_payload("webui", None, **{"webui/webui.db": b"accounts and chats"})
@@ -137,8 +138,8 @@ class TransferTests(unittest.TestCase):
 
     def add_terminal_volume(self):
         self.settings.write_text("[terminal_server]\nenabled = true\n", encoding="utf-8")
-        name = transfer.terminal_volume("")
-        self.volumes[name] = {"Name": name, "Labels": transfer.terminal_volume_labels(""), "Driver": "local",
+        name = transfer.terminal_volume(config.DEPLOYMENT)
+        self.volumes[name] = {"Name": name, "Labels": transfer.terminal_volume_labels(config.DEPLOYMENT), "Driver": "local",
                               "Options": None}
 
     def docker(self, command, **kwargs):
@@ -157,10 +158,13 @@ class TransferTests(unittest.TestCase):
             output = "\n".join(name for name in self.volumes if value in name).encode()
         elif command[1:3] == ["volume", "inspect"]:
             output = json.dumps([self.volumes[name] for name in command[3:] if name in self.volumes]).encode()
+            # Like Docker, fail when a named volume is missing.
+            if not set(command[3:]) <= set(self.volumes):
+                return subprocess.CompletedProcess(command, 1, stdout=output)
         elif command[1:3] == ["volume", "create"]:
             labels = dict(command[index + 1].split("=", 1) for index, part in enumerate(command) if part == "--label")
-            driver = command[command.index("--driver") + 1]
-            self.volumes[command[-1]] = {"Name": command[-1], "Labels": labels, "Driver": driver, "Options": None}
+            driver = command[command.index("--driver") + 1] if "--driver" in command else "local"
+            self.volumes.setdefault(command[-1], {"Name": command[-1], "Labels": labels, "Driver": driver, "Options": None})
         return subprocess.CompletedProcess(command, 0, stdout=output)
 
     def docker_stream(self, command, **kwargs):
@@ -252,7 +256,7 @@ class TransferTests(unittest.TestCase):
             for member in item["members"]:
                 self.assertEqual((member["size"], member["sha256"]),
                                  (len(members[member["path"]]), sha256(members[member["path"]]).hexdigest()))
-        self.assertEqual(manifest["items"][3]["images"], list(transfer.IMAGES))
+        self.assertEqual(manifest["items"][3]["images"], list(transfer.image_names(config.DEPLOYMENT)))
         self.assertEqual((members["images.tar"], members["models.tar"], members["webui.tar"]),
                          (self.images, self.models, self.webui))
         with tarfile.open(fileobj=io.BytesIO(members["source.tar"])) as source:
@@ -341,7 +345,7 @@ class TransferTests(unittest.TestCase):
                          [transfer.TERMINAL_VOLUME, transfer.TERMINAL_KEY])
         members = read_members(self.archive)
         self.assertEqual(members[transfer.TERMINAL_KEY], KEY)
-        users = transfer.terminal_volume("")
+        users = transfer.terminal_volume(config.DEPLOYMENT)
         saved = [call for call in self.docker_calls if "tar" in call and transfer.RESTORE_VOLUMES not in call]
         self.assertIn(f"type=volume,source={users},target=/transfer/users,volume-nocopy,readonly", saved[-1])
 
@@ -349,8 +353,11 @@ class TransferTests(unittest.TestCase):
         self.docker_calls.clear()
         self.assertEqual(self.invoke("restore", "--archive", str(self.bundle), custom=False, project=self.destination),
                          0, self.progress.getvalue())
-        self.assertEqual({name: volume["Labels"] for name, volume in self.volumes.items()},
-                         {users: transfer.terminal_volume_labels("")})
+        # Restore creates the WebUI volume with Compose's labels, so Compose adopts it without a warning.
+        self.assertEqual({name: volume["Labels"] for name, volume in self.volumes.items()}, {
+            "loaf-open-webui": {"com.docker.compose.project": "loaf", "com.docker.compose.volume": "open-webui"},
+            users: transfer.terminal_volume_labels(config.DEPLOYMENT),
+        })
         self.assertEqual([label for label, _ in self.received], ["restore webui", "restore users"])
         key = self.destination / config.TERMINAL_SECRET
         self.assertEqual(key.read_bytes(), KEY)
@@ -380,15 +387,15 @@ class TransferTests(unittest.TestCase):
         self.volumes.clear()
         self.assertEqual(self.invoke("restore", "--archive", str(self.bundle), custom=False, project=self.destination),
                          0, self.progress.getvalue())
-        self.assertEqual(self.volumes, {})
+        self.assertEqual(list(self.volumes), ["loaf-open-webui"])
         self.assertEqual((self.destination / config.TERMINAL_SECRET).read_bytes(), KEY)
 
     def test_versioned_backups_restore_only_with_the_matching_version(self):
-        namespace = "v2-local-inference"
+        namespace = "loaf-v2"
         self.images = image_payload(transfer.image_names(namespace))
         self.assertEqual(self.invoke("backup", "config", "images", "--version", "v2"), 0, self.progress.getvalue())
         bundle, = self.backup_dir.iterdir()
-        self.assertEqual(bundle.name, f"20261120-1500_{namespace}_{transfer.BUNDLE_NAME}")
+        self.assertEqual(bundle.name, f"20261120-1500_v2_{transfer.BUNDLE_NAME}")
         self.assertEqual(self.manifest(next(bundle.glob("*.tar.gz")))["deployment"], "v2")
         self.assertEqual(self.invoke("restore", "--version", "v3", project=self.destination), 1)
         self.assertIn(f"No backup found in {self.backup_dir}. It holds backups of other deployment versions. "
@@ -666,7 +673,7 @@ class TransferTests(unittest.TestCase):
         self.docker_calls.clear()
         self.assertEqual(self.invoke("backup", "--verify", "--archive", str(self.bundle), custom=False), 0)
         output = self.output.getvalue()
-        for line in ("Archive format 3", "config", "installers", "images", "local/open-webui:latest  linux/amd64"):
+        for line in ("Archive format 3", "config", "installers", "images", "loaf/open-webui:latest  linux/amd64"):
             self.assertIn(line, output)
         self.assertEqual(self.invoke("restore", "--dry-run", "--archive", str(self.bundle), custom=False,
                                      project=self.destination), 0)
@@ -768,16 +775,16 @@ class ModelTransferTests(unittest.TestCase):
         with TemporaryDirectory() as folder:
             project = Path(folder)
             with patch.object(transfer.subprocess, "check_output", side_effect=[
-                b"[]", b"v2-local-inference/ollama-connected\n",
+                b"[]", b"loaf-v2/ollama-connected\n",
             ]):
-                command = transfer.model_volume_command(project, "v2-local-inference")
-            self.assertIn("type=volume,source=v2-local-inference-ollama,target=/ollama,volume-nocopy,readonly", command)
+                command = transfer.model_volume_command(project, "loaf-v2")
+            self.assertIn("type=volume,source=loaf-v2-ollama,target=/ollama,volume-nocopy,readonly", command)
             self.assertIn(transfer.SNAPSHOT_MODELS, command)
-            for consumer in (b"v2-local-inference/ollama-online", b"foreign/ollama-connected", b"/"):
+            for consumer in (b"loaf-v2/ollama-online", b"foreign/ollama-connected", b"/"):
                 with self.subTest(consumer=consumer), patch.object(
                     transfer.subprocess, "check_output", side_effect=[b"[]", consumer],
                 ), self.assertRaisesRegex(transfer.TransferError, "in use"):
-                    transfer.model_volume_command(project, "v2-local-inference")
+                    transfer.model_volume_command(project, "loaf-v2")
             # A restore can create the volume, so it only checks the consumers.
             with patch.object(transfer.subprocess, "check_output", side_effect=[b""]):
                 command = transfer.model_volume_command(project, "", restore=True, delete=True)
@@ -1033,10 +1040,9 @@ class ArchiveValidationTests(unittest.TestCase):
                     transfer.open_archive(archive)
 
     def test_terminal_volume_name_and_labels_follow_the_deployment(self):
-        project = sha256(b"v2-local-inference").hexdigest()[:16]
-        self.assertEqual(transfer.terminal_volume("v2-local-inference"), f"loaf-tools-{project}-users")
-        self.assertEqual(transfer.terminal_volume_labels(""),
-                         {"loaf.tool-server.project": "local-inference", "loaf.terminal.users": "true"})
+        self.assertEqual(transfer.terminal_volume("loaf-v2"), "loaf-v2-terminal-users")
+        self.assertEqual(transfer.terminal_volume_labels("loaf"),
+                         {"loaf.terminal.project": "loaf", "loaf.terminal.users": "true"})
 
     def model_members(self, manifest_value, blob=b"weights", *, size=None, digest=None):
         digest = digest or f"sha256:{sha256(blob).hexdigest()}"
@@ -1088,6 +1094,15 @@ class ArchiveValidationTests(unittest.TestCase):
 
 
 class ProgressTests(unittest.TestCase):
+    def test_readiness_wait_reports_elapsed_time_only_outside_a_terminal(self):
+        for terminal, expected in ((False, True), (True, False)):
+            with self.subTest(terminal=terminal), redirect_stderr(io.StringIO()) as errors, \
+                    patch.object(sys.stderr, "isatty", return_value=terminal, create=True):
+                with wait_status("Waiting for services", interval=0.01):
+                    sleep(0.1)
+            # Compose redraws its terminal display; an extra line there would duplicate it.
+            self.assertEqual("Waiting for services (0s elapsed)." in errors.getvalue(), expected, errors.getvalue())
+
     def test_image_export_reports_wait_and_throughput_before_the_pipe_closes(self):
         # The child waits for a status refresh, then for a small write to be
         # measured before it closes stdout. A full-buffer read would deadlock.

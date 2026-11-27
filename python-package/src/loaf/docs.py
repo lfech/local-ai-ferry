@@ -174,6 +174,11 @@ def manual_page() -> str:
         lines += [".TP", f"\\fB{roff(name)}\\fR", roff(details.summary)]
         if details.options:
             lines += [".RS", *option_items(details.options), ".RE"]
+        for subcommand, sub in cli.SUBCOMMAND_HELP.get(name, {}).items():
+            lines += [".RS", ".TP", f"\\fB{roff(f'{name} {subcommand}')}\\fR", roff(sub.summary)]
+            if sub.options:
+                lines += [".RS", *option_items(sub.options), ".RE"]
+            lines += [".RE"]
     lines += [".SH GLOBAL OPTIONS", *option_items(cli.GLOBAL_OPTIONS)]
     lines += [
         ".SH FILES",

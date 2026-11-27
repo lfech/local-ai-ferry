@@ -35,6 +35,7 @@ class DebianPackageTests(unittest.TestCase):
         self.assertIn("Depends: python3 (>= 3.10), docker-ce-cli | docker-cli | docker.io,", control)
         files = command(["dpkg-deb", "--contents", str(self.package)])
         for path in ("./usr/bin/loaf", "./etc/loaf/config.ini", "./usr/share/man/man1/loaf.1.gz",
+                     "./usr/share/bash-completion/completions/loaf",
                      "./usr/lib/systemd/system/loaf.service", "./usr/share/doc/loaf/copyright",
                      "./usr/lib/python3/dist-packages/loaf/data/debian-package",
                      "./usr/lib/python3/dist-packages/loaf/data/docs/installation.md"):

@@ -46,7 +46,7 @@ Restore verifies every member before it changes anything and reports any
 requested type missing from the archive. A backup that includes `webui` or
 `terminal` stops the project services. A backup of `models` alone stops only
 the downloader. Restoring Docker types without `images` requires the matching
-local `local/ollama-online` helper image.
+local `loaf/ollama-online` helper image.
 
 ## Transfer models between existing deployments
 
@@ -122,7 +122,7 @@ any account used the terminal, and `terminal/terminal-server.key`.
   "deployment": "",
   "items": [
     {"type": "config", "members": [{"path": "config.tar", "size": 20480, "sha256": "…"}]},
-    {"type": "images", "images": ["local/ollama-online:latest", "…"],
+    {"type": "images", "images": ["loaf/ollama-online:latest", "…"],
      "members": [{"path": "images.tar", "size": 7516192768, "sha256": "…"}]}
   ]
 }
@@ -206,7 +206,7 @@ loaf --version v1-2-3 backup
 loaf --version v1-2-3 restore --backup-dir /media/transfer
 ```
 
-The folder name is `YYYYMMDD-HHMM_v1-2-3-local-inference_local-ai-ferry`.
+The folder name is `YYYYMMDD-HHMM_v1-2-3_local-ai-ferry`.
 Restore selects the newest backup for the requested version when searching a
 backup directory. Inside a specific folder, it uses the saved version. It
 checks the saved image tags before loading images or extracting volumes. Only
@@ -314,7 +314,9 @@ archive against `SHA256SUMS`. It checks volume paths and archive links before
 extracting volumes, and refuses volumes in use. Restore applies the selected
 types in this order: `source`, `config`, `installers`, `images`, `models`,
 `webui`, `terminal`. Restoring `config` keeps the backup's deployment
-version. Restoring `terminal` creates the user volume with its ownership
+version. Restoring `models` or `webui` creates a missing volume with the
+labels that Compose gives its own volumes, so Compose later uses it without a
+warning. Restoring `terminal` creates the user volume with its ownership
 labels and writes the bearer key with owner-only permissions. It refuses a different existing key. Restored
 settings and installers are owner-only as well.
 

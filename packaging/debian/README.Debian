@@ -21,6 +21,8 @@ Start the offline deployment at boot after building or restoring its images:
   sudo systemctl enable --now loaf.service
 
 Read the guides with 'loaf docs' and the manual page with 'man loaf'.
+Bash completion for loaf is in /usr/share/bash-completion/completions/loaf and
+loads in new shells with the bash-completion package.
 Docker Engine 26 or newer and Compose 2.26.1 or newer are required. Debian 12
 needs Docker's apt repository for both. The default CUDA 13 Ollama build needs
 NVIDIA driver 580 or newer, which NVIDIA's repository provides. The CUDA 12

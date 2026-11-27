@@ -4,13 +4,15 @@ import json
 import os
 import subprocess
 
-from loaf import cli
+from loaf import cli, config, transfer
 from tests import DATA, ROOT
 
 
 DOCKER_TESTS = os.environ.get("RUN_DOCKER_TESTS") == "1"
 CPU_TESTS = DOCKER_TESTS and os.environ.get("RUN_CPU_TESTS") == "1"
 GPU_TESTS = DOCKER_TESTS and not CPU_TESTS and os.environ.get("RUN_GPU_TESTS") == "1"
+# The downloader, serving and WebUI images of the default deployment.
+DEFAULT_IMAGES = transfer.image_names(config.DEPLOYMENT)
 
 
 def command(args, *, input=None, timeout=180, decode_errors="strict", env=None, cwd=None):
@@ -42,11 +44,11 @@ def compose_command(compose, step, *, env=None, **options):
     return command(compose.command(step), env=env, cwd=compose.project_dir, **options)
 
 
-def compose_config(namespace="", *, profiles=cli.PROFILES, cpu=False):
+def compose_config(namespace=config.DEPLOYMENT, *, profiles=cli.PROFILES, cpu=False, settings=None):
     files = (DATA / "compose.yml",)
     if cpu:
         files += (DATA / "compose.cpu.yml",)
-    compose = cli.Compose(ROOT, files=files, namespace=namespace)
+    compose = cli.Compose(ROOT, files=files, namespace=namespace, settings=settings)
     step = cli.Step(profiles, ("config", "--format", "json"))
     # Render the packaged configuration without the caller's profiles or .env.
     env = dict(os.environ, **compose.variables(step))

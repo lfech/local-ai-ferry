@@ -95,20 +95,22 @@ or override them for a run with the flags below. Transfer tests require Git.
 | Group | Coverage |
 | --- | --- |
 | Launcher and package | Top-level and command help, rejected option combinations, model-list parsing, Compose command order, foreground log following, default container removal and its opt-out, default and verbose output, deployment links, failure handling, concurrency, shell quoting, the installed entry points and test output. |
+| Bash completion | Runs the generated script in Bash for commands, subcommands, types, guide names, options per command, skipped option values in both `--name value` and `--name=value` form, and directory and file values. Checks that bash-completion finds the per-user file, that install and remove leave foreign files alone, `BASH_COMPLETION_USER_DIR`, and the Debian package case. The Debian package checks complete a word with the system script and confirm that purging removes it. |
+| Docker resources | Uses a simulated Docker daemon. Checks that `loaf docker ps` lists only the selected deployment's containers, images, volumes and networks in aligned tables, including the terminal server's chat containers and networks. Checks `--version`, the confirmation prompt and `--yes`, the refusal of networks, volumes and images while containers remain, the graceful stop and removal order, a network that disappears after the listing, and that a dry run calls no Docker. Also checks the Compose labels on volumes that loaf creates. |
 | Cleanup | Checks both scopes, dry-run, lock contention, symlink boundaries, and preservation of Git work, credentials and backup archives. |
 | Host setup | Checks APT-managed and pyenv interpreters, wheel reuse and refresh, virtualenv recovery, setup diagnostics, and the NVIDIA toolkit cache. Also checks that Docker setup is opt-in and uses only the prepared APT source when the cache is present. |
 | Configuration | Checks packaged defaults and their Compose and Dockerfile fallbacks, local overrides, model file selection, INI validation, and resolved Compose settings. |
 | Host integrations | Checks the generated systemd unit and Continue YAML against project paths, deployment version, WebUI settings and model selection. Checks that the Tether command prints installation steps and the official downloads link. |
-| Transfer | Uses real project files and archives with simulated Docker calls. Checks that `loaf.json` comes first and lists every member's size and hash, the restore of every type into a new project, type and alias selection, the terminal round trip with the user volume's labels and the key, versioned and cross-version restores, setup and restore inside a backup folder that becomes the project, source restores over existing files with rollback, and the rejection of changed, older, newer and unsafe archives before any change. Also checks Modelfile replay and v1 and v2 model archives. The Docker suite merges and mirrors models into another deployment version through the CLI. |
+| Transfer | Uses real project files and archives with simulated Docker calls. Checks that `loaf.json` comes first and lists every member's size and hash, the restore of every type into a new project, type and alias selection, the terminal round trip with the user volume's labels and the key, the Compose labels on restored volumes, versioned and cross-version restores, setup and restore inside a backup folder that becomes the project, source restores over existing files with rollback, and the rejection of changed, older, newer and unsafe archives before any change. Also checks Modelfile replay and v1 and v2 model archives. The Docker suite merges and mirrors models into another deployment version through the CLI. |
 | Readiness | Checks Docker and Compose version reporting, Open Terminal image and key reporting, GPU and volume probes, recognition of the deployment's WebUI port, and relative Ollama v2 manifest links. |
 | Open WebUI tool history | Checks the optional compatibility filter for interrupted Ollama tool turns, including provider selection, preserved tool results, and repeated requests. |
 | Documentation | Checks local links, heading anchors and guide navigation. Parses Bash examples. Checks that the command reference covers every command and global flag. |
 | Deployment | Checks settings layers and `system_config`, system mode and the Debian default, the collision warning, shared locks in setgid directories, `docker-project` links from earlier releases, `loaf version`, and the bundled guides, their exported links and the manual page. |
 | Debian package | With Docker, builds the wheel and `.deb`, checks control fields, conffiles and files, then installs, runs and purges it on Debian 12 and 13. The manual page passes `groff` with warnings enabled. [Package checks](../python-package/tests/debian_package_checks.sh) |
 | Release tagging | Uses temporary Git repositories to check version selection, annotated tags, previews, and tag-only pushes and retries. Requires Python 3.11 or newer. |
-| Docker | Checks resolved Compose profiles, CPU and GPU device settings, image settings, and that each Dockerfile and build secret stays inside its build context. Tests each export and startup shell scenario, verifies container removal and the stop opt-out, and runs a two-volume archive round trip. |
+| Docker | Checks resolved Compose profiles, CPU and GPU device settings, image settings, and that each Dockerfile and build secret stays inside its build context. Tests each export and startup shell scenario, verifies container removal and the stop opt-out, and runs a two-volume archive round trip. `loaf docker rm all` removes exactly the resources of a disposable deployment and keeps the shared image. |
 | CPU and GPU model workflows | Check downloaded model exports, offline Ministral inference, startup failure and recovery, explicit Modelfile replay, and model archive mirroring with the connected services running. |
-| Terminal server | Checks credential validation, HTTP and WebSocket proxying to the chat's container, the root container policy with only the account's folder of the user volume, network access settings, resuming stopped containers and replacing them after a configuration change, startup reconciliation and shutdown, file browsing and chat deletion, `apt` as root, development tools through Open WebUI, and backup and restore of the image, user volume and key. Transfer tests also cover automatic image inclusion and `--no-terminal-server`. Docker-backed workflows are opt-in. |
+| Terminal server | Checks the WebUI connection preset from the key with `webui_access`, the key secret for both WebUI services and the Compose override that adds it, credential validation, HTTP and WebSocket proxying to the chat's container, the root container policy with only the account's folder of the user volume, network access settings, a runtime APT source that replaces the image's sources, `apt install` without `-y` or a terminal, resuming stopped containers and replacing them after a configuration change, startup reconciliation and shutdown, file browsing and chat deletion, `apt` as root, development tools through Open WebUI, and backup and restore of the image, user volume and key. Transfer tests also cover automatic image inclusion and `--no-terminal-server`. Docker-backed workflows are opt-in. |
 | Model catalog | Checks that the example/default model specifiers resolve to Ollama-compatible manifests. |
 
 ## Debian smoke checks
@@ -210,7 +212,7 @@ RUN_TERMINAL_SERVER_TESTS=1 RUN_CATALOG_TESTS=1 ./loaf test --cpu -v
 
 The optional [terminal server Docker checks](terminal-server.md#acceptance-checks) use
 `RUN_TERMINAL_SERVER_TESTS=1`, Docker Engine 26+, and locally built
-`local/open-webui:latest` and `local/open-terminal:latest` images from the current
+`loaf/open-webui:latest` and `loaf/open-terminal:latest` images from the current
 checkout. Rebuild the terminal image after changes to the provisioner. The
 serving case runs the scripts baked into the image and fails with a
 rebuild hint when they differ from the checkout.
@@ -261,7 +263,7 @@ for test in /usr/bin/python3:ProvisionerTests /usr/local/bin/python:RunnerTests;
         --user "$(id -u):$(id -g)" -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 \
         -e PYTHONPATH=/src/python-package/src:/src/python-package -w /src/python-package \
         --mount "type=bind,source=$PWD,target=/src,readonly" \
-        --entrypoint "${test%%:*}" local/open-terminal:latest \
+        --entrypoint "${test%%:*}" loaf/open-terminal:latest \
         -m unittest -v "tests.test_terminal_server.${test#*:}"
 done
 ```

@@ -27,3 +27,10 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      # Chat containers hide the image's own APT sources behind this empty one.
+      - type: bind
+        source: ${LOAF_TERMINAL_RUNTIME_DIR:?}/no-apt-source.list
+        target: /run/loaf-terminal/no-apt-source.list
+        read_only: true
+        bind:
+          create_host_path: false

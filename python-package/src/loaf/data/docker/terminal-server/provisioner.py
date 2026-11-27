@@ -24,29 +24,29 @@ from yarl import URL
 
 LOG = logging.getLogger(__name__)
 # Ownership is persisted in Docker labels.
-PROJECT = "loaf.tool-server.project"
-OWNER = "loaf.tool-server.workspace"
+PROJECT = "loaf.terminal.project"
+OWNER = "loaf.terminal.workspace"
 CHAT_ID = "loaf.terminal.chat-id"
 CHAT_OWNER = "loaf.terminal.chat-owner"
 # The configuration a chat container was created with: runtime mounts, local repository and network access.
 REVISION = "loaf.terminal.revision"
 USERS = "loaf.terminal.users"
-OUTBOUND = "loaf.terminal.outbound"
+CONNECTED = "loaf.terminal.connected"
 HELPER = "loaf.terminal.helper"
-NETWORK_MODES = ("isolated", "outbound")
+NETWORK_MODES = ("isolated", "connected")
 APT_REPOSITORY = "/run/loaf-apt/repository"
 # Commands run as root so that apt, dpkg and sudo work. These are the capabilities they need.
 ROOT_CAPABILITIES = ("CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "KILL", "SETGID", "SETUID", "SETFCAP", "AUDIT_WRITE")
-TOOL_NOTE = ("\n\nCommands run as root in this chat's own container, so apt and apt-get work. /home/chat belongs to "
-             "this chat and is removed with it. /home/user keeps the account's files for all of its chats.")
 GATEWAY = "com.docker.network.bridge.gateway_mode_ipv4"
 INHIBIT_IPV4 = "com.docker.network.bridge.inhibit_ipv4"
 BRIDGE_NAME = "com.docker.network.bridge.name"
-# Chat containers on the shared outbound network cannot reach each other.
+# Chat containers on the shared connected network cannot reach each other.
 INTER_CONTAINER = "com.docker.network.bridge.enable_icc"
 KEY_FILE = Path("/run/secrets/terminal-server-key")
 CHAT_DB = Path("/var/lib/loaf-webui/webui.db")
 RUNTIME_RUNNER = "/run/loaf-terminal/runner.py"
+# An empty source that hides each inherited APT source when the runtime source replaces them.
+NO_APT_SOURCE = "/run/loaf-terminal/no-apt-source.list"
 WORKSPACE_ROOT = "/home"
 WORKSPACE_HOME = "/home/user"
 CHAT_HOME = "/home/chat"
@@ -162,12 +162,12 @@ class Policy:
             raise ValueError("Terminal server volume options must be an object of strings.")
         network = env.get("LOAF_TERMINAL_NETWORK") or "isolated"
         if network not in NETWORK_MODES:
-            raise ValueError("The terminal server network must be isolated or outbound.")
+            raise ValueError("The terminal server network must be isolated or connected.")
         return cls(project, *numbers, env["LOAF_TERMINAL_VOLUME_DRIVER"], options, network, bridge_options)
 
     def asset_name(self, key):
-        project = hashlib.sha256(self.project.encode()).hexdigest()[:16]
-        return f"loaf-tools-{project}-{key}"
+        """Containers, networks and the user volume start with the deployment's Compose project."""
+        return f"{self.project}-terminal-{key}"
 
     def labels(self, key):
         return {PROJECT: self.project, OWNER: key}
@@ -181,12 +181,12 @@ class Policy:
         return {PROJECT: self.project, USERS: "true"}
 
     @property
-    def outbound_network(self):
-        return self.asset_name("outbound")
+    def connected_network(self):
+        return self.asset_name("connected")
 
     @property
-    def outbound_labels(self):
-        return {PROJECT: self.project, OUTBOUND: "true"}
+    def connected_labels(self):
+        return {PROJECT: self.project, CONNECTED: "true"}
 
     def container_labels(self, key, owner_key, session, revision):
         labels = {**self.labels(key), REVISION: revision}
@@ -248,6 +248,8 @@ class Workspaces:
         self.chats = chats
         self.runtime_mounts = runtime_mounts
         self.repository = repository
+        # Isolated containers reach only the mounted local repository.
+        self.package_source = policy.network == "connected" or repository is not None
         self.revision = hashlib.sha256(json.dumps([runtime_revision, repository, policy.network]).encode()).hexdigest()
         # Running containers by workspace key. Each occupies one of the policy's slots.
         self.active = {}
@@ -274,8 +276,8 @@ class Workspaces:
 
     async def initialize(self):
         await self.ensure_users_volume()
-        if self.policy.network == "outbound":
-            await self.ensure_outbound_network()
+        if self.policy.network == "connected":
+            await self.ensure_connected_network()
         helpers = json.dumps({"label": [f"{HELPER}={self.policy.project}"]})
         for record in await self.docker.call("GET", "/containers/json", params={"all": "true", "filters": helpers}):
             await self.docker.call("DELETE", f"/containers/{record['Id']}", params={"force": "true"}, missing=True)
@@ -304,8 +306,8 @@ class Workspaces:
                 or (volume["Options"] or {}) != self.policy.volume_options):
             raise RuntimeError("Terminal user volume ownership or storage policy mismatch")
 
-    async def ensure_outbound_network(self):
-        name, labels = self.policy.outbound_network, self.policy.outbound_labels
+    async def ensure_connected_network(self):
+        name, labels = self.policy.connected_network, self.policy.connected_labels
         network = await self.docker.call("GET", f"/networks/{name}", missing=True)
         if network is None:
             await self.docker.call("POST", "/networks/create", body={
@@ -314,7 +316,7 @@ class Workspaces:
             })
         elif (network["Labels"] != labels or network["Driver"] != "bridge" or network["Internal"]
               or (network["Options"] or {}).get(INTER_CONTAINER) != "false"):
-            raise RuntimeError("Terminal outbound network ownership or isolation mismatch")
+            raise RuntimeError("Terminal connected network ownership or isolation mismatch")
 
     async def ensure_user_folder(self, owner_key):
         if owner_key in self.user_folders:
@@ -372,7 +374,7 @@ class Workspaces:
         return name
 
     def expected_networks(self, network):
-        return {network, self.policy.outbound_network} if self.policy.network == "outbound" else {network}
+        return {network, self.policy.connected_network} if self.policy.network == "connected" else {network}
 
     def workspace(self, key, container):
         network = self.policy.asset_name(key)
@@ -420,8 +422,8 @@ class Workspaces:
                 body=self.container_spec(network, labels, secrets.token_urlsafe(32), owner_key, session),
             )
             container = created["Id"]
-            if self.policy.network == "outbound":
-                await self.docker.call("POST", f"/networks/{self.policy.outbound_network}/connect",
+            if self.policy.network == "connected":
+                await self.docker.call("POST", f"/networks/{self.policy.connected_network}/connect",
                                        body={"Container": container})
             await self.docker.call("POST", f"/containers/{container}/start")
             return self.workspace(key, await self.docker.call("GET", f"/containers/{container}/json"))
@@ -659,12 +661,21 @@ def permitted_path(path):
     return parts[0] != "api" or path == "/api/terminals" or path.startswith("/api/terminals/")
 
 
-def tool_schema(paths):
+def tool_note(package_source):
+    """Instructions for the model, appended to the run_command tool that Open WebUI describes to it."""
+    install = ("Install packages with apt update, then apt install PACKAGE." if package_source
+               else "No package source is reachable; use the installed tools.")
+    return ("\n\nTerminal: call run_command to run shell commands yourself; never tell the user to run them. "
+            f"You are root in this chat's own Debian container. {install} "
+            "/home/chat is deleted with the chat; keep lasting files in /home/user. Answer from the command output.")
+
+
+def tool_schema(paths, note):
     """Publish Open Terminal's tools at its own paths, which the chat's container serves."""
     tools = {path: operations for path, operations in paths.items() if permitted_path(path)}
     run = tools.get("/execute", {}).get("post")
     if isinstance(run, dict):
-        run["description"] = run.get("description", "") + TOOL_NOTE
+        run["description"] = run.get("description", "") + note
     return tools
 
 
@@ -775,7 +786,7 @@ def application(workspaces, secret, metadata, control_network=None):
     config = metadata["config"]
     config["features"]["agents"] = False
     schema = metadata["schema"]
-    schema["paths"] = tool_schema(schema["paths"])
+    schema["paths"] = tool_schema(schema["paths"], tool_note(workspaces.package_source))
 
     async def dispatch(request):
         if control_network is not None and (
@@ -831,16 +842,23 @@ def application(workspaces, secret, metadata, control_network=None):
     return app
 
 
+def inherited_apt_sources(runtime_source, etc=Path("/etc/apt")):
+    """The image's own APT sources. The chat containers run this image, too."""
+    candidates = [etc / "sources.list", *sorted((etc / "sources.list.d").glob("*.list")),
+                  *sorted((etc / "sources.list.d").glob("*.sources"))]
+    return [str(path) for path in candidates if path.is_file() and str(path) != runtime_source]
+
+
 def workspace_runtime_mounts(container, source_format):
     if source_format not in ("list", "sources"):
         raise ValueError("Use a .list or .sources file for the runtime APT source.")
-    targets = (f"/etc/apt/sources.list.d/loaf-terminal.{source_format}", RUNTIME_RUNNER)
+    apt_source = f"/etc/apt/sources.list.d/loaf-terminal.{source_format}"
     actual = {mount["Destination"]: mount for mount in container["Mounts"]}
-    mounts = []
+    sources = {}
     revision = hashlib.sha256()
-    for target in targets:
+    for target in (apt_source, RUNTIME_RUNNER, NO_APT_SOURCE):
         mount = actual.get(target, {})
-        source = mount.get("Source", "")
+        source = sources[target] = mount.get("Source", "")
         if mount.get("Type") != "bind" or mount.get("RW") is not False or not Path(source).is_absolute():
             raise ValueError(f"Expected a read-only runtime bind mount at {target}.")
         revision.update(os.fsencode(source) + b"\0" + os.fsencode(target) + b"\0")
@@ -849,7 +867,12 @@ def workspace_runtime_mounts(container, source_format):
             for block in iter(lambda: payload.read(65536), b""):
                 content.update(block)
         revision.update(content.digest())
-        mounts.append({"Type": "bind", "Source": source, "Target": target, "ReadOnly": True})
+    # The runtime source replaces the image's own sources, as an image build with it does.
+    hidden = inherited_apt_sources(apt_source)
+    revision.update(json.dumps(hidden).encode())
+    mounts = [{"Type": "bind", "Source": sources[target], "Target": target, "ReadOnly": True}
+              for target in (apt_source, RUNTIME_RUNNER)]
+    mounts += [{"Type": "bind", "Source": sources[NO_APT_SOURCE], "Target": target, "ReadOnly": True} for target in hidden]
     return tuple(mounts), revision.hexdigest()
 
 

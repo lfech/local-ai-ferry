@@ -4,6 +4,135 @@
 
 Older entries use the current command and project names in examples.
 
+## 2026-11-27 17:41:03 +0100 — Open WebUI terminal connection preset
+
+- Environment: Debian 13 in WSL2, Docker Engine 26.1.5, Compose 2.26.1-4, the
+  local `loaf/open-webui:latest` with Open WebUI v0.13.4, Python 3.13.5 in a
+  scratch virtualenv with the checkout installed editable.
+- Open WebUI's seeding, access and tool-server code was read in its v0.13.4
+  sources: `config.py`, `models/config.py`, `utils/access_control`,
+  `routers/configs.py`, `routers/terminals.py`, `utils/terminals.py` and
+  `env.py`.
+- A disposable image built from `loaf/open-webui:latest` added the start
+  script and entrypoint. It ran without a network on a temporary volume with
+  a mounted key and `LOAF_TERMINAL_WEBUI_ACCESS=users`. After signup, the admin
+  API returned the `loaf-terminal` connection with the bearer key, `server_type`
+  `terminal` and the read grant for every account. The admin terminal list
+  showed it, and `docker inspect` did not contain the key. A second start on
+  the same volume with `admins` kept the stored connection.
+- With `RUN_DOCKER_TESTS=1`, the **13 Compose contract tests** passed,
+  including both WebUI services with the key secret. The Docker-free suite
+  passed **306 tests with 49 skips**.
+- Not run: access for a non-admin account, a full `loaf build` of the WebUI
+  image and `BuiltImageTests` with its new entrypoint.
+
+## 2026-11-27 17:27:28 +0100 — Bash completion
+
+- Environment: Debian 13 in WSL2, Bash 5.2, bash-completion 2.16.0, Python
+  3.13.5 in a scratch virtualenv with the checkout installed editable.
+- `tests.test_completion` passed **9 tests**. They ran the generated script
+  in Bash and checked install and removal in a temporary data directory.
+  bash-completion 2.16 loaded the per-user script through
+  `__load_completion`. The Docker-free suite passed **303 tests with 48
+  skips**.
+- With `RUN_DOCKER_TESTS=1`, the Debian package contents case passed. The
+  built `loaf_0.4.0_all.deb` contained
+  `/usr/share/bash-completion/completions/loaf`, and the extracted script
+  completed `loaf docker rm` to the five resource types.
+  `loaf docs loaf.1 | groff -man -Tutf8 -ww -z` printed no warnings.
+- Not run: the install-and-purge case in Debian 12 and 13 containers, which
+  would pull the Debian images. Its new completion checks are therefore
+  untested.
+
+## 2026-11-27 17:17:47 +0100 — Readiness wait on a terminal
+
+- Observed by the author during `loaf online` on a terminal: Compose's
+  progress block repeated after the first elapsed-time line.
+- A new case in `ProgressTests` checks that the readiness wait prints the
+  elapsed time without a terminal and nothing on one. The Docker-free suite
+  in the checkout passed **294 tests with 48 skips**. A live `loaf online` on
+  a terminal has not been repeated since the change.
+
+## 2026-11-27 17:05:00 +0100 — Terminal review and apt in chat containers
+
+- Environment: as in the entry below. The terminal checks used the local
+  terminal image, built from commit 5c2b836 at 16:35. A disposable
+  `loaf/open-terminal:loaf-test` added the changed provisioner and runner and
+  the APT settings. `loaf/open-webui:latest` was tagged from the local
+  WebUI image for the run.
+- The provisioner unit tests passed **12 tests** inside the terminal image,
+  and the runner test **1 test**. Both ran offline with the copy mounted
+  read-only. After the change to the model instructions, the image was gone,
+  so the **13 provisioner tests** ran in the scratch virtualenv with the
+  pinned `aiohttp` 3.11.16 and `yarl` 1.19.0 and passed. With those
+  packages, the Docker-free suite passed **293 tests with 48 skips**; the
+  local proxy tests ran as well.
+- With `RUN_TERMINAL_SERVER_TESTS=1`, all **4 Open Terminal Docker tests**
+  passed in 171 seconds: local APT as root, the runtime source, the backup
+  round trip and the online and offline serving cases. The serving cases
+  covered the working-directory menu and the removal of a deleted chat's
+  container.
+- Probes in containers with the chat container's capabilities and mounts:
+  - Isolated, with a local repository and the image's `debian.sources`
+    still active: `apt update` exited 0 with three `Failed to fetch`
+    warnings for `deb.debian.org`. With `debian.sources` hidden, only the
+    repository was read.
+  - `apt install` before an update reported `Unable to locate package`.
+    Without `-y` and without a terminal, it aborted at `Continue? [Y/n]`.
+    With `APT::Get::Assume-Yes`, it installed.
+  - A dependency, a post-install script that creates a system user, `sudo`,
+    a local `.deb`, `dpkg -i`, purge, `apt-cache search` and `apt show`
+    worked.
+  - Outbound: `apt-get update`, `jq` and `tree`, `redis-server` with its
+    service user and a build against `libssl-dev` worked. `policy-rc.d`
+    prevented the service from starting.
+- At 17:01:57, about when the run finished, all containers of the running
+  `local-inference` deployment were stopped with signal 15 and removed.
+  Docker then pruned containers, networks, all unused images and the build
+  cache at 17:02:07–17:02:11, which left no images. The tests do not prune,
+  and they use only their own `loaf-test-*` projects and tags. The
+  `ollama`, `open-webui` and terminal user volumes remained.
+- After the patch was applied to the checkout and `network = outbound` became
+  `connected`, the Docker-free suite passed **293 tests with 48 skips** in the
+  checkout, from a scratch virtualenv with an editable install, because the
+  checkout's `.venv` points at root's interpreter. `loaf --dry-run online`
+  accepted the working configuration and planned for deployment `loaf`. A
+  configuration with `network = outbound` failed with `expected isolated or
+  connected`.
+- Not run: the full image build with `loaf build`, Docker Engine 28 or
+  newer, native Debian, and the documented direct volume copy for upgrades,
+  which needs the new images.
+
+## 2026-11-27 16:50:40 +0100 — loaf Docker names and loaf docker commands
+
+- Environment: Debian 13 in WSL2 (kernel 6.18.58.1), Docker Engine 26.1.5,
+  Compose 2.26.1-4, Python 3.13.5 in a scratch virtualenv with an editable
+  install. The checkout and its `.venv` were owned by root at the time, so
+  the runs used a copy of the checkout at commit 5c2b836 plus the changes.
+- Before the changes, the Docker-free suite passed 280 tests with 58 skips.
+  After them, it passed **291 tests with 59 skips**. The skips were the
+  opt-in Docker, GPU, Open Terminal Docker and catalog cases.
+  [Test commands](verification.md#verification-coverage)
+- With `RUN_DOCKER_TESTS=1`, `ComposeContractTests` and
+  `DockerTests.test_docker_rm_removes_exactly_the_deployments_resources`
+  passed **13 tests**. The case needed `loaf/ollama-online:latest`, which was
+  tagged from the existing `local/ollama-online:latest` for the run and
+  removed afterwards.
+- Manual run against a disposable deployment `loaf-claude-check` with a
+  running and a created Compose container, a chat container, both network
+  and volume kinds and an extra image tag: `loaf docker ps` listed exactly
+  these 8 resources. `rm volumes` refused while containers remained, and
+  `rm all` without a terminal refused without `--yes`. `rm all --yes -v`
+  stopped the running service, removed the 8 resources in order and kept the
+  image's other tag. A running deployment under the old names was untouched.
+- `loaf docs loaf.1 | groff -man -Tutf8 -ww -z` printed no warnings.
+- The Compose warning conditions were checked in the Compose source:
+  `ensureVolume` in v2.26.1 and `warnUnmanagedVolumes` on the main branch
+  test only `com.docker.compose.project`.
+- Not run: GPU and CPU model workflows, the other Docker transfer and stop
+  cases, Open Terminal Docker cases, Debian package checks and the model
+  catalog.
+
 ## 2026-11-27 13:37:43 +0100 — Terminal container per chat with Docker acceptance runs
 
 - Environment: Debian 13 in WSL2, Docker Engine 26.1.5, Compose 2.26.1,
@@ -580,7 +709,8 @@ Enabled test options were `RUN_TERMINAL_SERVER_TESTS=1`.
 ## 2026-11-24 00:43 CET — Open Terminal workspace labels
 
 - Reproduced both workspace failures on Debian 13.8 in WSL2. The fixtures
-  filtered by `loaf.*` and could not find the chat volumes labeled `owo.*`.
+  filtered by `loaf.*` and could not find the chat volumes, which still
+  carried the labels of an earlier naming scheme.
 - All four Open Terminal Docker cases passed on Engine 26.1.5 and Compose
   2.26.1-4 with a disposable image containing the updated provisioner. The
   connected and offline cases checked both accounts' volumes before and after

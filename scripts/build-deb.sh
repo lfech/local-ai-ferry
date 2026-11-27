@@ -12,7 +12,7 @@ trap 'rm -rf -- "$stage"' EXIT
 root="$stage/root"
 site="$root/usr/lib/python3/dist-packages"
 mkdir -p "$site" "$root/DEBIAN" "$root/usr/bin" "$root/etc/loaf" "$root/usr/share/doc/loaf" \
-    "$root/usr/share/man/man1" "$root/usr/lib/systemd/system"
+    "$root/usr/share/man/man1" "$root/usr/share/bash-completion/completions" "$root/usr/lib/systemd/system"
 
 # Install the wheel as a Debian system package and generate the system files from it.
 "$host_python" -I - "$wheel" "$site" "$root" <<'PY'
@@ -34,12 +34,14 @@ for license in sorted((info / "licenses").iterdir()):
 (site / "loaf/data/debian-package").write_text("Installed by the loaf Debian package.\n", encoding="utf-8")
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(site))
-from loaf import docs, setup
+from loaf import completion, docs, setup
 
 secret = {("terminal_server", "secret_file"): "/etc/loaf/terminal-server.key"}
 (root / "etc/loaf/config.ini").write_text(setup.config_template(setup.SYSTEM_CONFIG_HEADER, secret), encoding="utf-8")
 with gzip.GzipFile(root / "usr/share/man/man1/loaf.1.gz", "wb", 9, mtime=0) as manual:
     manual.write(docs.manual_page().encode("utf-8"))
+# bash-completion loads it on first use; dpkg removes it with the package.
+(root / "usr/share/bash-completion/completions/loaf").write_text(completion.script(system=True), encoding="utf-8")
 metadata = (info / "METADATA").read_text(encoding="utf-8")
 fields = dict(line.split(": ", 1) for line in metadata.split("\n\n", 1)[0].splitlines() if ": " in line)
 homepage = next(entry.split(", ", 1)[1] for entry in metadata.splitlines()

@@ -26,11 +26,18 @@ grep -q '^\.SH COMMANDS$' /tmp/loaf.1 || fail "manual page content"
 groff -man -Tutf8 -ww -z /tmp/loaf.1 2>/tmp/manual-warnings
 [ ! -s /tmp/manual-warnings ] || { cat /tmp/manual-warnings >&2; fail "manual page warnings"; }
 [ -n "$(find /usr/lib/python3/dist-packages/loaf -name '*.pyc' -print -quit)" ] || fail "py3compile did not run"
+completions=/usr/share/bash-completion/completions/loaf
+head -1 "$completions" | grep -q 'removed with the Debian package' || fail "system Bash completion"
+bash -c '. "$1"; compopt() { :; }; COMP_WORDS=(loaf dock); COMP_CWORD=1; _loaf; [ "${COMPREPLY[*]}" = docker ]' \
+    bash "$completions" || fail "Bash completion words"
+loaf completion install | grep -q 'Debian package provides Bash completion' || fail "completion install in system mode"
+[ ! -e "$HOME/.local/share/bash-completion/completions/loaf" ] || fail "user completion written beside the package"
 python3 -c 'import sys; sys.exit(sys.version_info < (3, 10))' || fail "Python version"
 
 touch /var/lib/loaf/backup/kept
 dpkg --purge loaf >/dev/null
 [ ! -e /usr/bin/loaf ] || fail "launcher remains after purge"
+[ ! -e /usr/share/bash-completion/completions/loaf ] || fail "Bash completion remains after purge"
 [ ! -e /usr/lib/python3/dist-packages/loaf ] || fail "package files or bytecode remain after purge"
 [ ! -e /etc/loaf ] || fail "/etc/loaf remains after purge"
 [ -e /var/lib/loaf/backup/kept ] || fail "purge removed a backup"

@@ -215,15 +215,15 @@ class ConfigTests(unittest.TestCase):
         with patch("loaf.cli.subprocess.run") as run, redirect_stdout(io.StringIO()) as output:
             self.assertEqual(cli.main(args), 0)
         plan = output.getvalue()
-        for value in ("v2-local-inference", "hf.co/example/configured", "420"):
+        for value in ("(loaf-v2)", "hf.co/example/configured", "420"):
             self.assertIn(value, plan)
         self.assertNotIn("hf.co/example/default", plan)
         with patch("loaf.cli.subprocess.run") as override_run, redirect_stdout(io.StringIO()) as output:
             self.assertEqual(cli.main([*args, "--version=", "--models-file", str(override), "--wait-timeout", "50"]), 0)
         plan = output.getvalue()
-        for value in ("local-inference", "hf.co/example/override", "wait up to 50s"):
+        for value in ("(loaf)", "hf.co/example/override", "wait up to 50s"):
             self.assertIn(value, plan)
-        self.assertNotIn("v2-local-inference", plan)
+        self.assertNotIn("loaf-v2", plan)
         self.assertNotIn("hf.co/example/configured", plan)
         self.assertNotIn("hf.co/example/default", plan)
         self.assertFalse((self.project / ".run.lock").exists())

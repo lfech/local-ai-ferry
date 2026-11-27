@@ -49,8 +49,10 @@ stays inside its context, which Compose always allows Buildx to read.
 | `loaf offline` | Switches to Ollama on an internal network and WebUI with offline settings. |
 | `loaf backup` / `loaf restore` | Create or recover a backup folder with selectable archive types: source, config, installers, images, models, webui and terminal. The aliases `project` and `volumes` group them. |
 | `loaf version` / `loaf docs` | Shows the release, installation and default deployment, or prints the bundled guides and manual page. |
+| `loaf completion install` / `remove` / `print` | Manages per-user Bash completion generated from the command tables. The Debian package installs the same script system-wide. [Bash completion](../launcher.md#bash-completion) |
 | `loaf status` | Checks deployment readiness and lists the project's containers. [Readiness checks](../launcher.md#check-readiness-with-status) |
 | `loaf stop` | Stops services and removes their Compose containers by default. Use `-n` or `--no-remove-containers` to keep stopped service containers and their logs. Images and volumes persist. [Shutdown options](../launcher.md#stop-and-remove-containers) |
+| `loaf docker ps` / `loaf docker rm` | Lists the selected deployment's containers, images, volumes and networks, or removes the selected types: `all`, `containers`, `images`, `volumes` or `networks`. Removal asks for confirmation unless `--yes` is given, stops the services first and needs a deployment without containers before it removes networks, volumes or images. [Docker resources](../launcher.md#list-and-remove-docker-resources) |
 | `loaf integration <name>` | Prints a systemd unit, Continue configuration or Tether installation instructions. [Host integrations](../installation.md#host-integrations) |
 | `loaf test [-v]` | Runs the selected project's unittest suite. [Verification guide](../verification.md) |
 
@@ -90,14 +92,22 @@ shared volumes to the next profile. Startup uses local images with
 `--no-build --pull never`. Each Compose service has `scale: 1`.
 [Compose definition](../../python-package/src/loaf/data/compose.yml)
 
-The default Compose project is `local-inference`, with local images tagged
-`latest` and named volumes `ollama` and `open-webui`. A versioned project
-scopes container and network names through Compose and uses matching image
-tags and explicit volume names. The transfer commands use the same namespace
-when naming archives and checking restored images.
-[Versioned deployments](../launcher.md#run-a-versioned-deployment)
+Every Docker resource name starts with the deployment namespace, which is
+also the Compose project: `loaf` by default and `loaf-VERSION` for a
+versioned deployment. Compose prefixes container and network names with it,
+and the volumes are `NAMESPACE-ollama` and `NAMESPACE-open-webui`. The
+images are `loaf/ollama-online`, `loaf/ollama-offline`, `loaf/open-webui` and
+`loaf/open-terminal`, tagged `latest` or the version. The terminal
+provisioner names its chat containers, bridges and user volume
+`NAMESPACE-terminal-…` and labels them `loaf.terminal.*`. The transfer
+commands use the version when naming backup folders and checking restored
+images. Volumes that loaf creates carry Compose's labels, so Compose uses
+them without a warning.
+[Versioned deployments](../launcher.md#run-a-versioned-deployment) ·
+[Docker resources](../launcher.md#list-and-remove-docker-resources)
 
-All three Ollama services mount the `ollama` volume at `/ollama`. Its
+All three Ollama services mount the Compose volume `ollama`, named
+`loaf-ollama` by default, at `/ollama`. Its
 `models/` directory holds manifests and blobs, including vision projectors
 where supplied. Ollama registrations can use `manifests/` or `manifests-v2/`,
 where tags can link to content-addressed manifest blobs.
@@ -141,7 +151,11 @@ networks. [Networking and offline operation](../configuration.md#networking-and-
 When `[terminal_server] enabled = true`, the launcher requires WebUI
 authentication and validates the configured bearer key before serving.
 Open WebUI reaches the provisioner at `http://terminal-server:8000` over
-the internal `terminal-control` network.
+the internal `terminal-control` network. A Compose override mounts the bearer
+key in both WebUI services, and the WebUI image's start script presets this
+connection through Open WebUI's `TERMINAL_SERVER_CONNECTIONS`. Open WebUI
+stores it while it has no terminal connections, for administrators or, with
+`[terminal_server] webui_access = users`, for every account.
 WebUI supplies the authenticated account and, when available, the chat
 session. The provisioner authenticates the connection with the terminal bearer
 key and routes file requests, model commands and terminal streams to the
@@ -159,12 +173,12 @@ limits and an unpublished API on its own internal bridge. Docker Engine 26 and
 27 use `inhibit_ipv4` to keep an IPv4 address off the host bridge. Docker
 Engine 28 and newer use the `isolated` gateway mode. `[terminal_server]
 network` decides further access: `isolated` keeps containers on their bridge
-alone, and `outbound` also attaches them to a shared bridge with outbound
+alone, and `connected` also attaches them to a shared bridge with outbound
 access and inter-container traffic disabled.
 [Workspace isolation and limits](../terminal-server.md#workspace-policy)
 
 A configured `apt_source_file` replaces inherited sources during an image
-build. At startup, a Compose override mounts the source file and the
+build, and in chat containers at runtime. At startup, a Compose override mounts the source file and the
 launcher's bundled provisioner and runner scripts read-only. The provisioner
 mounts the source file in every chat container, and an `apt_repository_dir`
 read-only at `/run/loaf-apt/repository`. A container records the runtime

@@ -690,8 +690,8 @@ class TestRepositoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="loaf repository ") as folder:
             project = Path(folder)
             with patch.object(setup.subprocess, "run", side_effect=docker), redirect_stdout(StringIO()) as output:
-                self.assertEqual(setup.create_test_repository(project, "local/open-terminal:latest"), ["jq", "tree"])
-                self.assertEqual(setup.create_test_repository(project, "local/open-terminal:latest"), ["jq", "tree"])
+                self.assertEqual(setup.create_test_repository(project, "loaf/open-terminal:latest"), ["jq", "tree"])
+                self.assertEqual(setup.create_test_repository(project, "loaf/open-terminal:latest"), ["jq", "tree"])
             repository = project / setup.TEST_REPOSITORY_DIR
             self.assertEqual(sorted(path.name for path in repository.iterdir()),
                              ["Packages.gz", "jq_1.7_amd64.deb", setup.TEST_REPOSITORY_LIST])
@@ -702,13 +702,13 @@ class TestRepositoryTests(unittest.TestCase):
             self.assertFalse(list(project.glob(".loaf-repository-*")))
 
             with patch.object(setup.subprocess, "run", side_effect=docker), self.assertRaisesRegex(
-                setup.SetupError, "terminal image local/missing:latest is missing",
+                setup.SetupError, "terminal image loaf/missing:latest is missing",
             ):
-                setup.create_test_repository(project, "local/missing:latest")
+                setup.create_test_repository(project, "loaf/missing:latest")
             (repository / setup.TEST_REPOSITORY_LIST).unlink()
             calls.clear()
             with patch.object(setup.subprocess, "run", side_effect=docker), self.assertRaisesRegex(
                 setup.SetupError, "is not a loaf test repository",
             ):
-                setup.create_test_repository(project, "local/open-terminal:latest")
+                setup.create_test_repository(project, "loaf/open-terminal:latest")
             self.assertEqual(calls, [])

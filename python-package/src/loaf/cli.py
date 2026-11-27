@@ -20,7 +20,7 @@ import tarfile
 from typing import Iterator, Sequence
 import zlib
 
-from . import assets, cleanup, config, docs, integrations, readiness, setup, transfer
+from . import assets, cleanup, completion, config, docs, integrations, readiness, resources, setup, transfer
 from .locks import AlreadyRunningError, PROJECT_LOCK, project_lock
 from .progress import wait_status
 
@@ -266,7 +266,7 @@ class Compose:
         *,
         files: Sequence[Path] | None = None,
         project_name: str | None = None,
-        namespace: str = "",
+        namespace: str = config.DEPLOYMENT,
         settings: config.Settings | None = None,
         verbose: bool = False,
     ) -> None:
@@ -276,7 +276,7 @@ class Compose:
         # production keeps stable resource names regardless of the caller's cwd.
         self.files = tuple(p.resolve() for p in (files or (assets.compose_path(self.project_dir),)))
         self.namespace = namespace
-        self.project_name = project_name or namespace or "local-inference"
+        self.project_name = project_name or namespace
         self.settings = settings or config.Settings()
         self.verbose = verbose
 
@@ -286,6 +286,9 @@ class Compose:
             "--project-name", self.project_name,
         ]
         files = self.files
+        if self.settings.terminal_server_enabled:
+            # Open WebUI receives the bearer key to preset its terminal connection.
+            files += (assets.DATA_DIR / "compose.terminal-webui.yml",)
         if self.uses_terminal_runtime_source(step):
             files += (assets.DATA_DIR / "compose.terminal-apt.yml",)
         for path in files:
@@ -297,7 +300,7 @@ class Compose:
         return command + list(step.arguments)
 
     def variables(self, step: Step | None = None) -> dict[str, str]:
-        variables = {"LOAF_NAMESPACE": self.namespace, **self.settings.compose_variables()}
+        variables = {"LOAF_VERSION": config.namespace_version(self.namespace), **self.settings.compose_variables()}
         compose_dir = self.files[0].parent
         if compose_dir != self.project_dir:
             # Keep the working project's .env while resolving the relocated build contexts.
@@ -453,6 +456,7 @@ COMMAND_HELP = {
         "Run 'loaf docs NAME' to read a guide. 'loaf docs loaf.1' prints the manual page:\n"
         "loaf docs loaf.1 | man -l -",
     ),
+    "completion": CommandHelp("Install, remove or print Bash completion for loaf."),
     "build": CommandHelp("Build the local deployment images.", COMPOSE_OPTIONS),
     "upgrade": CommandHelp("Pull updated base images and rebuild local images.", COMPOSE_OPTIONS),
     "download": CommandHelp("Pull the selected Ollama models.", (*START_OPTIONS, "--models-file")),
@@ -462,6 +466,7 @@ COMMAND_HELP = {
     "stop": CommandHelp(
         "Stop deployment services and remove their containers.", (*COMPOSE_OPTIONS, "--remove-containers", "-n"),
     ),
+    "docker": CommandHelp("List or remove the deployment's containers, images, volumes and networks."),
     "backup": CommandHelp(
         "Save the deployment in a portable backup folder.",
         (*TRANSFER_OPTIONS, "--verify", "--no-terminal-server", "--export", "--models-file", "--wait-timeout",
@@ -489,6 +494,26 @@ INTEGRATION_HELP = {
     "continue": CommandHelp("Print Continue YAML for the selected models.", ("--config-dir", "--models-file")),
     "tether": CommandHelp("Print Open WebUI Tether installation instructions."),
 }
+DOCKER_HELP = {
+    "ps": CommandHelp("List the deployment's containers, images, volumes and networks.", ("--config-dir", "--version")),
+    "rm": CommandHelp(
+        "Remove the deployment's Docker resources of the selected types.",
+        ("--config-dir", "--version", "--dry-run", "--yes"),
+        "Types are all, containers, images, volumes and networks. rm lists the resources\n"
+        "and asks before it removes them. Volumes hold the models, the Open WebUI accounts\n"
+        "and chats and the terminal user folders: save them first with loaf backup.\n"
+        "Networks, volumes and images can go once the deployment has no containers.",
+    ),
+}
+COMPLETION_HELP = {
+    "install": CommandHelp(
+        "Install Bash completion for the current user.", (),
+        "bash-completion loads it in new shells. The Debian package installs it system-wide instead.",
+    ),
+    "remove": CommandHelp("Remove the Bash completion that install created."),
+    "print": CommandHelp("Print the Bash completion script."),
+}
+SUBCOMMAND_HELP = {"integration": INTEGRATION_HELP, "docker": DOCKER_HELP, "completion": COMPLETION_HELP}
 CLI_USAGE = "%(prog)s [GLOBAL OPTIONS] COMMAND [OPTIONS]"
 
 
@@ -526,6 +551,7 @@ def add_options(parser, selected: tuple[str, ...] | None = None) -> None:
         help="Download a few Debian command-line tools into a local test APT repository and list them.")
     add("--badges", action="store_true", help="Record test results and update badges for the groups that ran.")
     add("--full", action="store_true", help="Also remove generated installation files.")
+    add("-y", "--yes", action="store_true", help="Remove without asking for confirmation.")
     add("--wait-timeout", type=int, metavar="SECONDS", help="Override the service readiness wait from config.ini.")
     add("-a", "--attach", action="store_true", help="Follow live Compose logs after the workflow.")
 
@@ -536,20 +562,24 @@ def help_listing(heading: str, commands: dict[str, CommandHelp]) -> str:
     return "\n".join((heading, *rows))
 
 
-def show_help(command: str | None, integration: str | None) -> None:
-    prog = " ".join(part for part in ("loaf", command, integration) if part)
+def show_help(command: str | None, subcommand: str | None) -> None:
+    prog = " ".join(part for part in ("loaf", command, subcommand) if part)
     usage = "%(prog)s [OPTIONS]"
     options = ()
     if command is None:
         usage = CLI_USAGE
         description = f"{__doc__}\n\n{help_listing('Commands', COMMAND_HELP)}"
         notes = "Run 'loaf COMMAND --help' for command options.\nSee docs/cli-help.md for the full reference."
-    elif command == "integration" and integration is None:
+    elif command == "integration" and subcommand is None:
         usage = "%(prog)s INTEGRATION [OPTIONS]"
         description = f"{COMMAND_HELP[command].summary}\n\n{help_listing('Integrations', INTEGRATION_HELP)}"
         notes = "Run 'loaf integration INTEGRATION --help' for integration options."
+    elif command in SUBCOMMAND_HELP and subcommand is None:
+        usage = "%(prog)s COMMAND [OPTIONS]"
+        description = f"{COMMAND_HELP[command].summary}\n\n{help_listing('Commands', SUBCOMMAND_HELP[command])}"
+        notes = f"Run 'loaf {command} COMMAND --help' for command options."
     else:
-        details = COMMAND_HELP[command] if integration is None else INTEGRATION_HELP[integration]
+        details = COMMAND_HELP[command] if subcommand is None else SUBCOMMAND_HELP[command][subcommand]
         description, options, notes = details.summary, details.options, details.notes
         if command in TRANSFER_MODES:
             usage = "%(prog)s [OPTIONS] [TYPE ...]"
@@ -559,6 +589,8 @@ def show_help(command: str | None, integration: str | None) -> None:
             usage = "%(prog)s [OPTIONS] TARGET ..."
         elif command == "docs":
             usage = "%(prog)s [NAME]"
+        elif subcommand == "rm":
+            usage = "%(prog)s [OPTIONS] TYPE ..."
     parser = argparse.ArgumentParser(
         prog=prog, usage=usage, description=description, epilog=notes, add_help=False,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -663,7 +695,7 @@ def warn_shared_deployment(layers: Sequence[Path], version: str, config_dir: Pat
     if shared is not None:
         print(
             f"Warning: this project and the system deployment in {shared} use the same Docker namespace "
-            f"{config.namespace(version) or 'local-inference'}. Set [launcher] version in "
+            f"{config.namespace(version)}. Set [launcher] version in "
             f"{config_dir / config.CONFIG_NAME} for a separate deployment, or set system_config = to skip "
             "the system settings.", file=sys.stderr, flush=True,
         )
@@ -690,6 +722,54 @@ def build_debian_package(project: Path, script: Path, *, verbose: bool) -> int:
 PACKAGE_BUILDERS = {"binary": build_executable, "debian": build_debian_package}
 
 
+def docker_resources(command: str, types: Sequence[str], namespace: str, lock_path: Path, *, dry_run: bool, yes: bool,
+                     verbose: bool, with_containers: str) -> int:
+    """List the deployment's Docker resources, or remove the selected types after confirmation."""
+    if command == "ps":
+        print(resources.report(namespace, resources.inventory(namespace)))
+        return 0
+    if dry_run:
+        print(f"Plan for deployment {namespace}")
+        for step in resources.plan(namespace, types):
+            print(f"  {step}")
+        return 0
+    # The lock keeps loaf from starting services while they are removed.
+    with project_lock(lock_path):
+        if "containers" not in types and (remaining := resources.containers(namespace)):
+            print(f"Error: Deployment {namespace} still has {resources.quantity(len(remaining), 'container')}, "
+                  f"which can use its networks, volumes and images. Remove the containers as well:\n"
+                  f"  {with_containers}", file=sys.stderr)
+            return 1
+        found = resources.inventory(namespace, types)
+        print(resources.report(namespace, found), flush=True)
+        total = sum(map(len, found.values()))
+        if not total:
+            print("\nNothing to remove.")
+            return 0
+        if not yes:
+            if not sys.stdin.isatty():
+                print("Error: Confirm the removal in a terminal, or add --yes.", file=sys.stderr)
+                return 1
+            try:
+                answer = input(f"\nRemove {resources.quantity(total, 'resource')}? [y/N] ")
+            except EOFError:
+                answer = ""
+            if answer.strip().lower() not in ("y", "yes"):
+                print("Nothing removed.")
+                return 1
+        removed = resources.remove(namespace, types, verbose=verbose)
+    print(f"Removed {resources.quantity(removed, 'Docker resource')} of deployment {namespace}.")
+    return 0
+
+
+def command_failure(exc: subprocess.CalledProcessError) -> int:
+    program = exc.cmd if isinstance(exc.cmd, str) else exc.cmd[0]
+    print(f"{program} failed (exit {exc.returncode}).", file=sys.stderr)
+    # Negative signal statuses and shell-reserved exit values become a stable
+    # generic failure; ordinary Docker failures retain their useful exit code.
+    return exc.returncode if 0 < exc.returncode < 126 else 1
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="loaf", usage=CLI_USAGE, add_help=False)
     parser.add_argument("mode", nargs="?", choices=COMMAND_HELP)
@@ -697,6 +777,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     add_options(parser)
     args = parser.parse_intermixed_args(argv)
     integration = None
+    docker_command = None
+    docker_types = ()
+    completion_command = None
     targets = ()
     components = tuple(args.arguments) if args.mode in TRANSFER_MODES and args.arguments else None
     setup_tests = args.mode in INSTALL_MODES and args.arguments == ["tests"]
@@ -705,6 +788,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         if len(args.arguments) != 1 or args.arguments[0] not in INTEGRATION_HELP:
             parser.error("invalid choice for integration. Use systemd, continue or tether.")
         integration = args.arguments[0]
+    elif args.mode == "docker" and args.arguments:
+        docker_command, *docker_types = args.arguments
+        if docker_command not in DOCKER_HELP:
+            parser.error("invalid docker command. Use ps or rm.")
+        if docker_command == "ps" and docker_types:
+            parser.error("docker ps takes no arguments. See 'loaf docker ps --help'.")
+        if not set(docker_types) <= set(resources.SELECTABLE):
+            parser.error("invalid resource type. Use all, containers, images, volumes or networks.")
+        if len(set(docker_types)) != len(docker_types):
+            parser.error("Specify each resource type once.")
+        docker_types = tuple(kind for kind in resources.KINDS if "all" in docker_types or kind in docker_types)
+    elif args.mode == "completion" and args.arguments:
+        if len(args.arguments) != 1 or args.arguments[0] not in COMPLETION_HELP:
+            parser.error("invalid completion command. Use install, remove or print.")
+        completion_command = args.arguments[0]
     elif args.mode == "package" and args.arguments:
         targets = tuple(args.arguments)
         if not set(targets) <= set(PACKAGE_SCRIPTS):
@@ -718,7 +816,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser.error(f"{args.mode} accepts only the tests argument. See 'loaf {args.mode} --help'.")
         parser.error(f"Unexpected arguments for {args.mode}. See 'loaf {args.mode} --help'.")
     if args.help:
-        show_help(args.mode, integration)
+        show_help(args.mode, integration or docker_command or completion_command)
     if args.mode is None:
         folder = (args.project_dir or Path.cwd()).resolve()
         if not args.system and transfer.is_bundle(folder):
@@ -729,6 +827,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("integration requires a name: systemd, continue or tether.")
     if args.mode == "package" and not targets:
         parser.error("package requires a target: binary, debian or both.")
+    if args.mode == "docker" and docker_command is None:
+        parser.error("docker requires a command: ps or rm.")
+    if args.mode == "completion" and completion_command is None:
+        parser.error("completion requires a command: install, remove or print.")
+    if docker_command == "rm" and not docker_types:
+        parser.error("docker rm requires one or more types: all, containers, images, volumes or networks.")
+    if docker_command == "ps" and args.dry_run:
+        parser.error("docker ps changes nothing. Omit --dry-run.")
+    if args.yes and docker_command != "rm":
+        parser.error("--yes is only supported by docker rm.")
     continue_integration = integration == "continue"
     named = ()
     if components:
@@ -787,9 +895,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.config_dir, args.version, args.models_file, args.backup_dir, args.archive,
         args.export_models, args.import_models, args.wait_timeout,
     ))
-    if args.mode in ("version", "docs"):
+    if args.mode in ("version", "docs", "completion"):
         if unexpected or args.dry_run or args.project_dir is not None:
             parser.error(f"Unexpected option for {args.mode}. See 'loaf {args.mode} --help'.")
+        if args.mode == "completion":
+            try:
+                print(completion.script() if completion_command == "print"
+                      else completion.install() if completion_command == "install" else completion.remove())
+            except OSError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                return 1
+            return 0
         if args.mode == "version":
             print(version_report(), end="")
             return 0
@@ -963,6 +1079,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--models-file is supported by download, backup --export and integration continue.")
     if args.wait_timeout is not None and workflow_mode not in SERVICES:
         parser.error("--wait-timeout is only supported by commands that start services.")
+    if args.mode == "docker":
+        override = args.config_dir.resolve() if args.config_dir is not None else None
+        with_containers = next_command(project_dir, override, args.version, "docker", "rm", "containers", *docker_types,
+                                       system=system_mode)
+        try:
+            return docker_resources(docker_command, docker_types, namespace, project_dir / PROJECT_LOCK,
+                                    dry_run=args.dry_run, yes=args.yes, verbose=args.verbose,
+                                    with_containers=with_containers)
+        except subprocess.CalledProcessError as exc:
+            return command_failure(exc)
+        except (OSError, ValueError, AlreadyRunningError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        except KeyboardInterrupt:
+            print("Interrupted.", file=sys.stderr)
+            return 130
     if args.mode == "test":
         if args.dry_run or args.version is not None:
             parser.error("test supports --project-dir, --config-dir, -v, --cpu and --badges. See 'loaf test --help'.")
@@ -1262,11 +1394,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.attach:
             follow_logs(compose, workflow_mode, dry_run=args.dry_run)
     except subprocess.CalledProcessError as exc:
-        program = exc.cmd if isinstance(exc.cmd, str) else exc.cmd[0]
-        print(f"{program} failed (exit {exc.returncode}).", file=sys.stderr)
-        # Negative signal statuses and shell-reserved exit values become a stable
-        # generic failure; ordinary Docker failures retain their useful exit code.
-        return exc.returncode if 0 < exc.returncode < 126 else 1
+        return command_failure(exc)
     except (OSError, config.ConfigError, AlreadyRunningError, setup.SetupError, transfer.TransferError,
             tarfile.TarError, EOFError, zlib.error) as exc:
         print(f"Error: {exc}", file=sys.stderr)

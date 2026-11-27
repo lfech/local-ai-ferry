@@ -1,0 +1,11 @@
+# compose.terminal-webui.yml - loaf adds this file while the terminal server is enabled.
+# Open WebUI's start script presets its terminal connection from the bearer key secret.
+services:
+  open-webui:
+    secrets: [terminal-server-key]
+    environment:
+      LOAF_TERMINAL_WEBUI_ACCESS: ${LOAF_TERMINAL_WEBUI_ACCESS:-admins}
+  open-webui-online:
+    secrets: [terminal-server-key]
+    environment:
+      LOAF_TERMINAL_WEBUI_ACCESS: ${LOAF_TERMINAL_WEBUI_ACCESS:-admins}

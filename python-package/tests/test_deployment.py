@@ -122,7 +122,7 @@ class SettingsLayerTests(unittest.TestCase):
         ):
             self.assertEqual(cli.main(["--project-dir", str(self.project), "status"]), 0)
             self.assertIn(f"packaged defaults, {self.system / 'config.ini'}", output.getvalue())
-            self.assertIn("same Docker namespace local-inference", errors.getvalue())
+            self.assertIn("same Docker namespace loaf.", errors.getvalue())
             errors.truncate(0)
             self.assertEqual(cli.main(["--project-dir", str(self.project), "--version", "v2", "status"]), 0)
             self.assertNotIn("Warning", errors.getvalue())

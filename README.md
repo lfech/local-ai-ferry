@@ -188,12 +188,12 @@ explains context precedence and sampling.
 
 ## Data, stopping and transfer
 
-| Volume | Contents |
+| Storage | Contents |
 | --- | --- |
-| `ollama`, mounted at `/ollama` | `models/`: weights, projectors and manifests; `config/`: exported Modelfiles |
-| `open-webui`, mounted at `/app/backend/data` | Accounts, chats, settings and caches |
-| Terminal user volume, the account's folder at `/home/user` | Persistent files and settings shared by the account's chats. [Workspace storage](docs/terminal-server.md#offline-transfer-and-shutdown) |
-| Saved chat terminal volume at `/home/chat` | Files private to a chat until it is deleted. [Files tab](docs/terminal-server.md#use-the-terminal-from-a-model) |
+| `loaf-ollama` volume, mounted at `/ollama` | `models/`: weights, projectors and manifests; `config/`: exported Modelfiles |
+| `loaf-open-webui` volume, mounted at `/app/backend/data` | Accounts, chats, settings and caches |
+| `loaf-terminal-users` volume, the account's folder at `/home/user` | Persistent files and settings shared by the account's chats. [Workspace storage](docs/terminal-server.md#offline-transfer-and-shutdown) |
+| `/home/chat` in the chat's terminal container | Files and installed packages of one chat, removed with the chat. [Files tab](docs/terminal-server.md#use-the-terminal-from-a-model) |
 
 Backend startup imports all saved `.model` files. Models and exports persist
 after you remove an entry from the selection file.
@@ -204,6 +204,10 @@ Stop the deployment and remove its service containers with `loaf stop`. Use
 ```bash
 loaf stop
 ```
+
+`loaf docker ps` lists the deployment's containers, images, volumes and
+networks. `loaf docker rm` removes the selected types after confirmation.
+[Docker resources](docs/launcher.md#list-and-remove-docker-resources)
 
 To move computers, run `loaf backup` and transfer the resulting
 `backup/YYYYMMDD-HHMM_local-ai-ferry/` folder. On the destination, enter

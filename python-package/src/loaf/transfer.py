@@ -51,10 +51,15 @@ MEMBER_NAMES = frozenset({*(f"{kind}.tar" for kind in TYPES), TERMINAL_VOLUME, T
 CHECKOUT_RESERVED_PATHS = {CHECKSUMS, "backup", "dist", "docker-project", LAUNCHER, ".run.lock"}
 CONFIG_SUFFIXES = {".ini", ".model", ".list", ".sources"}
 TERMINAL_KEY_STAGING = ".loaf-terminal-key-"
-IMAGES = ("local/ollama-online:latest", "local/ollama-offline:latest", "local/open-webui:latest")
+# The core image repositories; the deployment version or latest tags them.
+IMAGES = ("loaf/ollama-online", "loaf/ollama-offline", "loaf/open-webui")
+TERMINAL_IMAGE = "loaf/open-terminal"
+# Compose volume keys and their archive types. The namespace prefixes each volume name.
 VOLUMES = {"ollama": "ollama", "open-webui": "webui"}
+COMPOSE_PROJECT_LABEL = "com.docker.compose.project"
+COMPOSE_VOLUME_LABEL = "com.docker.compose.volume"
 # Match the ownership labels set by the terminal provisioner.
-WORKSPACE_PROJECT_LABEL = "loaf.tool-server.project"
+WORKSPACE_PROJECT_LABEL = "loaf.terminal.project"
 # The provisioner's user volume holds every account's /home/user folder.
 TERMINAL_USERS_LABEL = "loaf.terminal.users"
 COPY_BUFFER = 1024 * 1024
@@ -112,20 +117,24 @@ class TransferError(ValueError):
 
 
 def image_names(namespace: str, *, include_terminal: bool = False) -> tuple[str, ...]:
-    images = IMAGES + ("local/open-terminal:latest",) if include_terminal else IMAGES
-    if not namespace:
-        return images
-    return tuple(f"{image.rsplit(':', 1)[0]}:{namespace}" for image in images)
+    tag = config.namespace_version(namespace) or "latest"
+    return tuple(f"{image}:{tag}" for image in (*IMAGES, *((TERMINAL_IMAGE,) if include_terminal else ())))
 
 
 def volume_names(namespace: str) -> dict[str, str]:
-    if not namespace:
-        return VOLUMES
-    return {f"{namespace}-{name}": target for name, target in VOLUMES.items()}
+    return {f"{namespace}-{key}": kind for key, kind in VOLUMES.items()}
 
 
-def deployment_project(namespace: str) -> str:
-    return namespace or "local-inference"
+def ensure_compose_volume(project: Path, namespace: str, key: str) -> None:
+    """Create a missing deployment volume with the labels Compose gives its own volumes.
+
+    A volume that a transfer container created implicitly lacks them, and Compose then warns that it already exists.
+    """
+    name = f"{namespace}-{key}"
+    if subprocess.run(["docker", "volume", "inspect", name], cwd=project,
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+        subprocess.check_output(["docker", "volume", "create", "--label", f"{COMPOSE_PROJECT_LABEL}={namespace}",
+                                 "--label", f"{COMPOSE_VOLUME_LABEL}={key}", name], cwd=project)
 
 
 def expand_types(names, *, terminal_available: bool = True) -> tuple[str, ...]:
@@ -149,8 +158,10 @@ def default_backup_types(project: Path, *, terminal: bool) -> tuple[str, ...]:
     return tuple(kind for kind in TYPES if (kind != "source" or checkout) and (kind != "terminal" or terminal))
 
 
-def backup_path(directory: Path, *, namespace: str = "") -> Path:
-    name = "_".join(part for part in (f"{datetime.now():%Y%m%d-%H%M}", namespace, BUNDLE_NAME) if part)
+def backup_path(directory: Path, *, namespace: str = config.DEPLOYMENT) -> Path:
+    """A new backup folder: YYYYMMDD-HHMM_local-ai-ferry, with the deployment version before the suffix."""
+    name = "_".join(part for part in (f"{datetime.now():%Y%m%d-%H%M}", config.namespace_version(namespace),
+                                      BUNDLE_NAME) if part)
     target = directory / name
     sequence = 2
     while target.exists() or target.is_symlink():
@@ -159,8 +170,9 @@ def backup_path(directory: Path, *, namespace: str = "") -> Path:
     return target
 
 
-def latest_backup(directory: Path, *, namespace: str = "") -> Path | None:
-    prefix = re.escape(f"{namespace}_" if namespace else "")
+def latest_backup(directory: Path, *, namespace: str = config.DEPLOYMENT) -> Path | None:
+    version = config.namespace_version(namespace)
+    prefix = re.escape(f"{version}_" if version else "")
     folders = re.compile(r"([0-9]{8}-[0-9]{4})_" + prefix + re.escape(BUNDLE_NAME) + r"(?:-([0-9]+))?")
     backups = []
     for path in directory.iterdir() if directory.is_dir() else ():
@@ -682,7 +694,8 @@ def require_helper_image(project: Path, namespace: str) -> None:
         raise TransferError(f"Restoring volumes without images requires the local helper image {image}.") from exc
 
 
-def volume_command(*, restore: bool = False, namespace: str = "", volumes: dict[str, str] | None = None) -> list[str]:
+def volume_command(*, restore: bool = False, namespace: str = config.DEPLOYMENT,
+                   volumes: dict[str, str] | None = None) -> list[str]:
     """Stream named volumes as one tar whose top-level directories name the volumes."""
     volumes = volume_names(namespace) if volumes is None else volumes
     command = ["docker", "run", "--rm", "--pull", "never", "--network", "none", "--read-only"]
@@ -806,7 +819,7 @@ def check_backup_modelfiles(project: Path, models: Path, staging: Path, namespac
         return problems
 
     current = staging / "modelfiles.tar"
-    volume = f"{namespace}-ollama" if namespace else "ollama"
+    volume = f"{namespace}-ollama"
     command = [
         "docker", "run", "--rm", "--pull", "never", "--network", "none", "--read-only",
         "--tmpfs", "/tmp", "--mount", f"type=volume,source={volume},target=/ollama,volume-nocopy,readonly",
@@ -861,8 +874,9 @@ def image_platforms(path: Path, namespace: str) -> dict[str, set[str]]:
     platforms = saved_image_tags(path)
     core = set(image_names(namespace))
     if platforms.keys() not in (core, set(image_names(namespace, include_terminal=True))):
-        selection = namespace or "the default namespace"
-        raise TransferError(f"Backup image tags do not match {selection}. Select the matching --version.")
+        raise TransferError(
+            f"Backup image tags {', '.join(sorted(platforms))} do not match deployment {namespace}. Select the "
+            "matching --version, or restore the images with the loaf release that created the backup.")
     return platforms
 
 
@@ -1014,15 +1028,14 @@ def validate_model_archive(path: Path) -> None:
 
 
 def model_volume_command(project: Path, namespace: str, *, restore: bool = False, delete: bool = False) -> list[str]:
-    volume = f"{namespace}-ollama" if namespace else "ollama"
+    volume = f"{namespace}-ollama"
     if not restore:
         subprocess.check_output(["docker", "volume", "inspect", volume], cwd=project)
     consumers = subprocess.check_output([
         "docker", "ps", "--filter", f"volume={volume}", "--format",
         '{{.Label "com.docker.compose.project"}}/{{.Label "com.docker.compose.service"}}',
     ], cwd=project).decode().splitlines()
-    deployment = deployment_project(namespace)
-    serving = {f"{deployment}/ollama-{profile}" for profile in ("connected", "offline")}
+    serving = {f"{namespace}/ollama-{profile}" for profile in ("connected", "offline")}
     if len(consumers) > 1 or any(consumer not in serving for consumer in consumers):
         raise TransferError(f"The {volume} volume is in use by another container. Stop it before transferring models.")
     mount = f"type=volume,source={volume},target=/ollama,volume-nocopy"
@@ -1044,8 +1057,8 @@ def model_volume_command(project: Path, namespace: str, *, restore: bool = False
 # --- Terminal user volume: every account's /home/user folder ---
 
 def workspace_prefix(namespace: str) -> str:
-    project = sha256(deployment_project(namespace).encode()).hexdigest()[:16]
-    return f"loaf-tools-{project}-"
+    """The provisioner names its containers, networks and user volume with this prefix."""
+    return f"{namespace}-terminal-"
 
 
 def terminal_volume(namespace: str) -> str:
@@ -1054,7 +1067,7 @@ def terminal_volume(namespace: str) -> str:
 
 
 def terminal_volume_labels(namespace: str) -> dict[str, str]:
-    return {WORKSPACE_PROJECT_LABEL: deployment_project(namespace), TERMINAL_USERS_LABEL: "true"}
+    return {WORKSPACE_PROJECT_LABEL: namespace, TERMINAL_USERS_LABEL: "true"}
 
 
 def terminal_volume_exists(project: Path, namespace: str) -> bool:
@@ -1140,7 +1153,7 @@ def backup(
     prepare_services: Callable[[], None],
     *,
     types: tuple[str, ...],
-    namespace: str = "",
+    namespace: str = config.DEPLOYMENT,
     version: str = "",
     compression_level: int = config.DEFAULT_COMPRESSION_LEVEL,
     terminal_key: Path | None = None,
@@ -1197,6 +1210,8 @@ def backup(
         if "webui" in types:
             webui = next(name for name, role in volume_names(namespace).items() if role == "webui")
             require_inactive_volume(project, webui)
+            # A deployment that never started WebUI saves an empty volume.
+            ensure_compose_volume(project, namespace, "open-webui")
             docker_archive(project, volume_command(namespace=namespace, volumes={webui: "webui"}),
                            staging / "webui.tar", "Save webui.tar")
             add("webui", "webui.tar")
@@ -1255,7 +1270,7 @@ def backup_bundle(project: Path, destination: Path, prepare_services: Callable[[
 def describe(archive: Archive) -> list[str]:
     lines = [f"Archive format {archive.manifest['version']}, created {archive.manifest.get('created', 'unknown')} "
              f"by loaf {archive.manifest.get('loaf', 'unknown')} for "
-             f"{config.namespace(archive.deployment) or 'the default deployment'}."]
+             f"deployment {config.namespace(archive.deployment)}."]
     for item in archive.manifest["items"]:
         size = sum(member["size"] for member in item["members"])
         lines.append(f"  {item['type']:<10} {size:>15,} bytes")
@@ -1294,7 +1309,8 @@ def setup_from_archive(archive: Archive, project: Path, *, installers: bool) -> 
     return None
 
 
-def restore(project: Path, archive: Archive, types: tuple[str, ...] | None = None, *, namespace: str = "",
+def restore(project: Path, archive: Archive, types: tuple[str, ...] | None = None, *,
+            namespace: str = config.DEPLOYMENT,
             settings: config.Settings | None = None, configuration: tuple[tuple[Path, ...], Path, str] | None = None,
             delete: bool = False, system: bool = False) -> RestoredBackup:
     """Verify the whole archive, then restore the selected types in order.
@@ -1363,8 +1379,10 @@ def restore(project: Path, archive: Archive, types: tuple[str, ...] | None = Non
         if "images" in requested:
             docker_archive(project, ["docker", "image", "load"], staging / "images.tar", "Load images.tar", send=True)
         if model_command is not None:
+            ensure_compose_volume(project, namespace, "ollama")
             docker_archive(project, model_command, staging / "models.tar", "Restore models.tar", send=True)
         if "webui" in requested:
+            ensure_compose_volume(project, namespace, "open-webui")
             docker_archive(project, volume_command(restore=True, namespace=namespace, volumes={webui: "webui"}),
                            staging / "webui.tar", "Restore webui.tar", send=True)
         if terminal is not None:
