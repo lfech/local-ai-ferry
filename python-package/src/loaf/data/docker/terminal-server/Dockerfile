@@ -16,17 +16,17 @@ RUN --mount=type=secret,id=terminal-apt-source set -eu; \
     fi; \
     apt-get -o APT::Update::Error-Mode=any update; \
     apt-get install -y --no-install-recommends \
-        bash build-essential cmake ninja-build python3-aiohttp python3-pytest python3-sphinx; \
+        bash build-essential cmake ninja-build python3-aiohttp python3-pytest python3-sphinx sudo; \
     rm -rf /var/lib/apt/lists/*
 
-COPY provisioner.py runner.py apt-guard.sh /opt/loaf-terminal/
-RUN install -m 0755 /opt/loaf-terminal/apt-guard.sh /usr/local/bin/apt \
-    && install -m 0755 /opt/loaf-terminal/apt-guard.sh /usr/local/bin/apt-get
+COPY provisioner.py runner.py /opt/loaf-terminal/
+# Chat containers run commands as root with apt available; sudo keeps the non-interactive frontend.
+RUN printf 'Defaults env_keep += "DEBIAN_FRONTEND"\n' > /etc/sudoers.d/loaf-terminal \
+    && chmod 0440 /etc/sudoers.d/loaf-terminal
 ENV OPEN_TERMINAL_MULTI_USER=false \
     OPEN_TERMINAL_ENABLE_BROWSER=false \
     OPEN_TERMINAL_ENABLE_DESKTOP=false \
     OPEN_TERMINAL_ENABLE_NOTEBOOKS=false \
     OPEN_TERMINAL_LOG_DIR=/tmp/open-terminal
 RUN mkdir -p /home/user /home/chat \
-    && chown 1000:1000 /home/user /home/chat \
     && HOME=/tmp OPEN_TERMINAL_API_KEY=metadata-only python -c 'import asyncio,json; from open_terminal.main import app,get_config; json.dump({"config":asyncio.run(get_config()),"schema":app.openapi()},open("/opt/loaf-terminal/metadata.json","w"))'

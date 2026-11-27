@@ -7,6 +7,54 @@ Git milestones use commit timestamps. Working-tree milestones use the
 associated verification time where it was recorded.
 Earlier entries use the current names for commands, paths and artifacts.
 
+## 2026-11-27 13:37 CET — One terminal container per chat with root, apt and a shared user volume
+
+The author's decisions D1 to D5 replace the terminal design.
+[Selected design](terminal-server.md#selected-design)
+
+- **Containers.** Each chat gets one container, and each account one for
+  drafts. The account's requests and the model's tools reach the same
+  container, and the provisioner publishes Open Terminal's tools at their
+  own paths. Removed: the agent runner, the `/agent/` schema, the
+  interception of APT commands, the package tools, the per-chat package
+  images and the image's `apt` guard.
+- **D1, storage.** One volume per deployment holds every account's
+  `/home/user` folder. A container mounts only its account's folder as a
+  volume subpath. Docker refuses a missing subpath, so a short-lived
+  container creates it on the account's first use. `/home/chat` lives in the
+  container with its installed packages. `HOME` stays `/home/user`, and a
+  chat starts in `/home/chat`.
+- **Container lifecycle.**
+  - An idle container stops and gives up its bridge; the next request
+    reconnects and starts it again.
+  - A deleted chat loses its container.
+  - Temporary chats lose theirs when idle and at provisioner start and
+    shutdown.
+  - A container records its runtime mounts, local repository and network
+    setting, and a change replaces it.
+- **D2, root.** Commands run as root with the capabilities that `apt`,
+  `dpkg` and `sudo` need, `no-new-privileges` and a writable root
+  filesystem. The image adds `sudo` and keeps `DEBIAN_FRONTEND` through it.
+  The author plans a command allowlist and a non-root user later.
+- **D3, network.** `[terminal_server] network` selects the access:
+  - `isolated`, the default, keeps a container on its internal bridge;
+  - `outbound` adds a shared bridge with outbound access and
+    inter-container traffic disabled.
+
+  A local `apt_repository_dir` is mounted read-only in every container.
+- **D4, backup.** The `chats` type becomes `terminal`: the user volume and
+  the bearer key, without chat folders or packages. The archive format is 3,
+  and `backup_version_min` accepts only 3.
+- **D5, no migration.** Earlier account volumes, chat volumes and chat
+  images are ignored; the upgrade note lists them.
+- **Fixes found while testing with Docker:**
+  - The `local` log driver refuses `max-file=1` with compression, which
+    broke the folder helper.
+  - The provisioner now logs a Docker error's request and status.
+- **Open.** `outbound` gives chat containers every address the Docker host
+  reaches, including its published ports. A proxy limited to the mirror
+  hosts was proposed but not built.
+
 ## 2026-11-27 12:48 CET — System restores share settings with the group; the key keeps its own rule
 
 - Resolves the open point of the previous entry. In the system deployment,
@@ -137,7 +185,7 @@ Earlier entries use the current names for commands, paths and artifacts.
   random from 13 Debian command-line tools, with the dependencies that the
   terminal image lacks into `apt-test-repository/`. It writes a trusted
   `file:` source and prints the tools and settings.
-  [Chat packages](terminal-server.md#install-packages-for-a-chat)
+  [Chat packages](terminal-server.md#install-packages-in-a-chat)
 - Decided against a fully transparent `apt` in the terminal shell: the
   runner cannot reach the provisioner by design, and an image change
   restarts the runner during the user's command. The guard stays.
@@ -167,7 +215,7 @@ Earlier entries use the current names for commands, paths and artifacts.
   provisioner handles instead of the runner. Every change rebuilds the chat
   image from the shared image. Only packages installed for the chat can be
   removed. The image's `apt` and `apt-get` refuse changes in the shell and
-  explain this route. [Chat packages](terminal-server.md#install-packages-for-a-chat)
+  explain this route. [Chat packages](terminal-server.md#install-packages-in-a-chat)
 - Probable cause of the reported failure with a local repository: the
   working `config/config.ini` leaves `apt_source_file` blank, which disables
   package changes. The guide now shows `[trusted=yes]` for an unsigned
@@ -327,7 +375,7 @@ Earlier entries use the current names for commands, paths and artifacts.
   serving, and model store layouts. [Architecture](instructions/architecture.md)
 - Clarified Open Terminal package installation, which files survive runner
   replacement, and what transfers with a deployment backup.
-  [Chat packages](terminal-server.md#install-packages-for-a-chat) ·
+  [Chat packages](terminal-server.md#install-packages-in-a-chat) ·
   [Backup contents](transfer.md#archive-contents)
 - Corrected archive verification and restore behavior, and documented the
   loopback publishing limitation on older Docker Engine releases.
@@ -345,7 +393,7 @@ Earlier entries use the current names for commands, paths and artifacts.
   and a network-disabled installer.
 - Saved chat images survive terminal restarts and are removed when the
   chat is deleted. Temporary chat images follow workspace cleanup.
-  [Chat packages](terminal-server.md#install-packages-for-a-chat)
+  [Chat packages](terminal-server.md#install-packages-in-a-chat)
 
 ## 2026-11-25 15:52 CET — Edit terminal APT sources at runtime
 

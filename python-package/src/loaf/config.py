@@ -15,7 +15,8 @@ SYSTEM_CONFIG_DIR = Path("/etc/loaf")
 DEFAULT_WAIT_TIMEOUT = 300
 DEFAULT_COMPRESSION_LEVEL = 4
 # The archive format this release writes; [transfer] backup_version_min can raise the oldest accepted one.
-ARCHIVE_VERSION = 2
+# Format 3 stores the terminal type as one user volume. Releases before v1.0.0 read only their own format.
+ARCHIVE_VERSION = 3
 OPEN_TERMINAL_IMAGE = "ghcr.io/open-webui/open-terminal:0.17.20-slim"
 TERMINAL_SECRET = Path("config/terminal-server.key")
 TERMINAL_KEY_PATTERN = re.compile(rb"[!-~]{32,512}(?:\r?\n)?")
@@ -55,6 +56,8 @@ class Settings:
     terminal_server_secret_file: Path = TERMINAL_SECRET
     terminal_server_apt_source_file: Path | None = None
     terminal_server_apt_repository_dir: Path | None = None
+    # isolated: chat containers reach only the provisioner; outbound: also every address the host reaches.
+    terminal_server_network: str = "isolated"
     terminal_server_cpus: int = 2
     terminal_server_memory_mib: int = 2048
     terminal_server_max_workspaces: int = 4
@@ -89,6 +92,7 @@ class Settings:
             "LOAF_TERMINAL_COMMAND_SECONDS": str(self.terminal_server_command_seconds),
             "LOAF_TERMINAL_VOLUME_DRIVER": self.terminal_server_volume_driver,
             "LOAF_TERMINAL_VOLUME_OPTIONS": self.terminal_server_volume_options,
+            "LOAF_TERMINAL_NETWORK": self.terminal_server_network,
         }
 
     def webui_url(self) -> str:
@@ -139,9 +143,9 @@ def compression_value(value: str) -> int:
 
 def archive_version_value(value: str) -> int:
     number = int(value)
-    # Format 2 is the first one with a typed manifest; this release reads nothing newer than it writes.
-    if not 2 <= number <= ARCHIVE_VERSION:
-        raise ValueError(f"expected an archive format from 2 to {ARCHIVE_VERSION}")
+    # Format 3 changed the terminal type; this release reads nothing older or newer than it writes.
+    if number != ARCHIVE_VERSION:
+        raise ValueError(f"expected archive format {ARCHIVE_VERSION}")
     return number
 
 
@@ -191,6 +195,12 @@ def volume_options_value(value: str) -> str:
     return json.dumps(options)
 
 
+def terminal_network_value(value: str) -> str:
+    if value not in ("isolated", "outbound"):
+        raise ValueError("expected isolated or outbound")
+    return value
+
+
 def apt_source_file_value(value: str) -> Path | None:
     path = optional_path_value(value)
     if path is not None and path.suffix not in (".list", ".sources"):
@@ -222,6 +232,7 @@ SECTIONS = {
         "secret_file": path_value,
         "apt_source_file": apt_source_file_value,
         "apt_repository_dir": optional_path_value,
+        "network": terminal_network_value,
         "cpus": positive_int,
         "memory_mib": positive_int,
         "max_workspaces": positive_int,

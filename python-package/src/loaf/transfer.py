@@ -39,16 +39,15 @@ CHECKSUMS = "SHA256SUMS"
 LAUNCHER = "loaf"
 EXECUTABLE_HEADER = b"#!/bin/bash\n# loaf standalone backup launcher v1\n"
 # Archive types in backup and restore order. Each type has one destination.
-TYPES = ("source", "config", "installers", "images", "models", "webui", "chats")
-ALIASES = {"project": ("config", "installers"), "volumes": ("models", "webui", "chats")}
+TYPES = ("source", "config", "installers", "images", "models", "webui", "terminal")
+ALIASES = {"project": ("config", "installers"), "volumes": ("models", "webui", "terminal")}
 # Types without namespaced Docker resources or settings can restore into another deployment version.
 PORTABLE_TYPES = ("source", "installers", "models")
 # Types whose capture requires stopped services. Models use a consistent snapshot instead.
-SERVICE_TYPES = ("webui", "chats")
-CHAT_VOLUMES = "chats/volumes.tar"
-CHAT_IMAGES = "chats/images.tar"
-CHAT_KEY = "chats/terminal-server.key"
-MEMBER_NAMES = frozenset({*(f"{kind}.tar" for kind in TYPES), CHAT_VOLUMES, CHAT_IMAGES, CHAT_KEY})
+SERVICE_TYPES = ("webui", "terminal")
+TERMINAL_VOLUME = "terminal/users.tar"
+TERMINAL_KEY = "terminal/terminal-server.key"
+MEMBER_NAMES = frozenset({*(f"{kind}.tar" for kind in TYPES), TERMINAL_VOLUME, TERMINAL_KEY})
 CHECKOUT_RESERVED_PATHS = {CHECKSUMS, "backup", "dist", "docker-project", LAUNCHER, ".run.lock"}
 CONFIG_SUFFIXES = {".ini", ".model", ".list", ".sources"}
 TERMINAL_KEY_STAGING = ".loaf-terminal-key-"
@@ -56,15 +55,8 @@ IMAGES = ("local/ollama-online:latest", "local/ollama-offline:latest", "local/op
 VOLUMES = {"ollama": "ollama", "open-webui": "webui"}
 # Match the ownership labels set by the terminal provisioner.
 WORKSPACE_PROJECT_LABEL = "loaf.tool-server.project"
-WORKSPACE_OWNER_LABEL = "loaf.tool-server.workspace"
-CHAT_PROJECT_LABEL = "loaf.terminal.chat-project"
-CHAT_ID_LABEL = "loaf.terminal.chat-id"
-CHAT_OWNER_LABEL = "loaf.terminal.chat-owner"
-CHAT_IMAGE_PROJECT_LABEL = "loaf.terminal.apt-project"
-CHAT_IMAGE_TEMPORARY_LABEL = "loaf.terminal.apt-temporary"
-CHAT_IMAGE_REPOSITORY = "local/loaf-terminal-chat"
-# Temporary chats keep their folders only while the provisioner runs.
-UNSAVED_CHAT_PREFIXES = ("temporary:", "local:", "channel:")
+# The provisioner's user volume holds every account's /home/user folder.
+TERMINAL_USERS_LABEL = "loaf.terminal.users"
 COPY_BUFFER = 1024 * 1024
 MANIFEST_LIST_TYPE = "application/vnd.ollama.manifest.list.v2+json"
 
@@ -136,25 +128,25 @@ def deployment_project(namespace: str) -> str:
     return namespace or "local-inference"
 
 
-def expand_types(names, *, chats_available: bool = True) -> tuple[str, ...]:
-    """Resolve archive types and aliases. Chats need the WebUI data that owns their accounts and chats."""
+def expand_types(names, *, terminal_available: bool = True) -> tuple[str, ...]:
+    """Resolve archive types and aliases. The terminal type needs the WebUI data that owns its accounts."""
     selected = set()
     for name in names:
         if name in ALIASES:
-            selected.update(kind for kind in ALIASES[name] if kind != "chats" or chats_available)
+            selected.update(kind for kind in ALIASES[name] if kind != "terminal" or terminal_available)
         elif name in TYPES:
             selected.add(name)
         else:
             raise TransferError(f"Unknown archive type {name}. Use {', '.join(TYPES)}, project or volumes.")
-    if "chats" in selected:
+    if "terminal" in selected:
         selected.add("webui")
     return tuple(kind for kind in TYPES if kind in selected)
 
 
-def default_backup_types(project: Path, *, chats: bool) -> tuple[str, ...]:
-    """Back up every available type. The source exists only in a checkout; chats are opt-in."""
+def default_backup_types(project: Path, *, terminal: bool) -> tuple[str, ...]:
+    """Back up every available type. The source exists only in a checkout; the terminal type is opt-in."""
     checkout = checkout_paths(project) is not None
-    return tuple(kind for kind in TYPES if (kind != "source" or checkout) and (kind != "chats" or chats))
+    return tuple(kind for kind in TYPES if (kind != "source" or checkout) and (kind != "terminal" or terminal))
 
 
 def backup_path(directory: Path, *, namespace: str = "") -> Path:
@@ -308,8 +300,8 @@ def validate_manifest(data, minimum: int, name: str) -> dict:
                     or not isinstance(member.get("sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", member["sha256"])):
                 raise invalid(f"unexpected member {path!r}.")
             paths.add(path)
-    if "chats" in kinds and "webui" not in kinds:
-        raise invalid("chats without the WebUI data they belong to.")
+    if "terminal" in kinds and "webui" not in kinds:
+        raise invalid("terminal without the WebUI data that owns its accounts.")
     return data
 
 
@@ -1049,95 +1041,31 @@ def model_volume_command(project: Path, namespace: str, *, restore: bool = False
     return command
 
 
-# --- Terminal workspaces: account folders, chat folders and chat images ---
+# --- Terminal user volume: every account's /home/user folder ---
 
 def workspace_prefix(namespace: str) -> str:
     project = sha256(deployment_project(namespace).encode()).hexdigest()[:16]
     return f"loaf-tools-{project}-"
 
 
-def validate_workspace_names(names, namespace: str) -> tuple[str, ...]:
-    prefix = workspace_prefix(namespace)
-    if (not isinstance(names, list)
-            or any(not isinstance(name, str) or not re.fullmatch(prefix + r"[0-9a-f]{64}", name) for name in names)
-            or len(set(names)) != len(names)):
-        raise TransferError("Invalid terminal workspace volume names for the selected deployment.")
-    return tuple(sorted(names))
+def terminal_volume(namespace: str) -> str:
+    """The provisioner's user volume. Each chat container mounts only its account's folder of it."""
+    return f"{workspace_prefix(namespace)}users"
 
 
-def workspace_labels(namespace: str, name: str) -> dict[str, str]:
-    return {
-        WORKSPACE_PROJECT_LABEL: deployment_project(namespace),
-        WORKSPACE_OWNER_LABEL: name.removeprefix(workspace_prefix(namespace)),
-    }
+def terminal_volume_labels(namespace: str) -> dict[str, str]:
+    return {WORKSPACE_PROJECT_LABEL: deployment_project(namespace), TERMINAL_USERS_LABEL: "true"}
 
 
-def chat_key(chat: dict) -> str:
-    return sha256(f"{chat['owner']}/{chat['id']}".encode()).hexdigest()
-
-
-def chat_volume(namespace: str, chat: dict) -> str:
-    return f"{workspace_prefix(namespace)}{chat_key(chat)}-chat"
-
-
-def chat_image(namespace: str, chat: dict) -> str:
-    return f"{CHAT_IMAGE_REPOSITORY}:{workspace_prefix(namespace)}{chat_key(chat)}"
-
-
-def chat_labels(namespace: str, chat: dict) -> dict[str, str]:
-    return {CHAT_PROJECT_LABEL: deployment_project(namespace), CHAT_ID_LABEL: chat["id"], CHAT_OWNER_LABEL: chat["owner"]}
-
-
-def validate_chats(chats) -> list[dict]:
-    if not isinstance(chats, list) or any(
-        not isinstance(chat, dict) or set(chat) != {"id", "owner"} or not isinstance(chat["id"], str)
-        or not re.fullmatch(r"[!-~]{1,128}", chat["id"]) or chat["id"].startswith(UNSAVED_CHAT_PREFIXES)
-        or not isinstance(chat["owner"], str) or not re.fullmatch(r"[0-9a-f]{64}", chat["owner"])
-        for chat in chats
-    ) or len({chat_key(chat) for chat in chats}) != len(chats):
-        raise TransferError("Invalid terminal chat list in the backup.")
-    return chats
-
-
-def list_terminal_workspaces(project: Path, namespace: str) -> tuple[str, ...]:
-    label = f"{WORKSPACE_PROJECT_LABEL}={deployment_project(namespace)}"
-    names = subprocess.check_output(["docker", "volume", "ls", "--quiet", "--filter", f"label={label}"], cwd=project)
-    workspaces = validate_workspace_names(names.decode().split(), namespace)
-    if workspaces:
-        volumes = json.loads(subprocess.check_output(["docker", "volume", "inspect", *workspaces], cwd=project))
-        if {volume["Name"]: volume["Labels"] for volume in volumes} != {
-            name: workspace_labels(namespace, name) for name in workspaces
-        }:
-            raise TransferError("Terminal workspace volumes do not match the deployment's ownership labels.")
-    return workspaces
-
-
-def list_saved_chats(project: Path, namespace: str) -> list[dict]:
-    """List the saved chats' folders. Temporary chats stay behind."""
-    label = f"{CHAT_PROJECT_LABEL}={deployment_project(namespace)}"
-    names = subprocess.check_output(["docker", "volume", "ls", "--quiet", "--filter", f"label={label}"], cwd=project)
-    if not names.split():
-        return []
-    chats = []
-    for volume in json.loads(subprocess.check_output(["docker", "volume", "inspect", *names.decode().split()], cwd=project)):
-        labels = volume["Labels"] or {}
-        chat = {"id": labels.get(CHAT_ID_LABEL, ""), "owner": labels.get(CHAT_OWNER_LABEL, "")}
-        if chat["id"].startswith(UNSAVED_CHAT_PREFIXES):
-            continue
-        validate_chats([chat])
-        if volume["Name"] != chat_volume(namespace, chat) or labels != chat_labels(namespace, chat):
-            raise TransferError("Terminal chat volumes do not match the deployment's ownership labels.")
-        chats.append(chat)
-    return sorted(chats, key=chat_key)
-
-
-def list_chat_images(project: Path, namespace: str, chats: list[dict]) -> list[str]:
-    output = subprocess.check_output([
-        "docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}",
-        "--filter", f"label={CHAT_IMAGE_PROJECT_LABEL}={deployment_project(namespace)}",
-        "--filter", f"label={CHAT_IMAGE_TEMPORARY_LABEL}=false",
-    ], cwd=project).decode().split()
-    return sorted(tag for tag in (chat_image(namespace, chat) for chat in chats) if tag in output)
+def terminal_volume_exists(project: Path, namespace: str) -> bool:
+    name = terminal_volume(namespace)
+    listed = subprocess.check_output(["docker", "volume", "ls", "--quiet", "--filter", f"name={name}"], cwd=project)
+    if name not in listed.decode().split():
+        return False
+    volume, = json.loads(subprocess.check_output(["docker", "volume", "inspect", name], cwd=project))
+    if (volume["Labels"] or {}) != terminal_volume_labels(namespace):
+        raise TransferError(f"The terminal user volume {name} does not match the deployment's ownership labels.")
+    return True
 
 
 def create_labeled_volume(project: Path, name: str, labels: dict[str, str], driver: str, options: dict[str, str]) -> None:
@@ -1150,12 +1078,6 @@ def create_labeled_volume(project: Path, name: str, labels: dict[str, str], driv
     volume, = json.loads(subprocess.check_output(["docker", "volume", "inspect", name], cwd=project))
     if volume["Labels"] != labels or volume["Driver"] != driver or (volume["Options"] or {}) != options:
         raise TransferError(f"Terminal volume {name} does not match the deployment's ownership or storage settings.")
-
-
-def create_workspace_volumes(project: Path, namespace: str, workspaces: tuple[str, ...],
-                             driver: str, options: dict[str, str]) -> None:
-    for name in workspaces:
-        create_labeled_volume(project, name, workspace_labels(namespace, name), driver, options)
 
 
 def matching_terminal_key(path: Path, key: bytes) -> bool:
@@ -1194,33 +1116,20 @@ def restore_terminal_key(path: Path, key: bytes, *, group: str | None = None):
 
 
 @dataclass(frozen=True)
-class Chats:
+class Terminal:
     key: bytes
-    accounts: tuple[str, ...]
-    chats: list[dict]
-    images: tuple[str, ...]
-
-    def volumes(self, namespace: str) -> dict[str, dict[str, str]]:
-        volumes = {name: workspace_labels(namespace, name) for name in self.accounts}
-        volumes.update({chat_volume(namespace, chat): chat_labels(namespace, chat) for chat in self.chats})
-        return volumes
+    # Whether the backup holds the user volume; a deployment without terminal use has none yet.
+    users: bool
 
 
-def read_chats(item: dict, staging: Path, namespace: str) -> Chats:
-    key = (staging / CHAT_KEY).read_bytes()
+def read_terminal(item: dict, staging: Path) -> Terminal:
+    key = (staging / TERMINAL_KEY).read_bytes()
     if not config.TERMINAL_KEY_PATTERN.fullmatch(key):
         raise TransferError("Invalid terminal server key in the backup.")
-    chats = validate_chats(item.get("chats"))
-    images = item.get("images")
-    if not isinstance(images, list) or not set(images) <= {chat_image(namespace, chat) for chat in chats}:
-        raise TransferError("Invalid terminal chat images in the backup. Select the matching --version.")
-    result = Chats(key, validate_workspace_names(item.get("accounts"), namespace), chats, tuple(sorted(images)))
-    validate_volume_payload(staging / CHAT_VOLUMES, set(result.volumes(namespace)))
-    if images and set(saved_image_tags(staging / CHAT_IMAGES)) != set(images):
-        raise TransferError("The chat images in the backup do not match its chat list.")
-    if (CHAT_IMAGES in {member["path"] for member in item["members"]}) != bool(images):
-        raise TransferError("The chat images in the backup do not match its chat list.")
-    return result
+    users = TERMINAL_VOLUME in {member["path"] for member in item["members"]}
+    if users:
+        validate_volume_payload(staging / TERMINAL_VOLUME, {"users"})
+    return Terminal(key, users)
 
 
 # --- Backup ---
@@ -1243,10 +1152,10 @@ def backup(
         raise TransferError("Choose a backup directory outside .git.")
     if not types or set(types) - set(TYPES):
         raise TransferError(f"Select archive types from {', '.join(TYPES)}.")
-    if "chats" in types and "webui" not in types:
-        raise TransferError("Chats need the WebUI data that owns their accounts and chats. Add webui.")
+    if "terminal" in types and "webui" not in types:
+        raise TransferError("The terminal type needs the WebUI data that owns its accounts. Add webui.")
     terminal_key = terminal_key or project / config.TERMINAL_SECRET
-    key = config.read_terminal_secret(terminal_key) if "chats" in types else None
+    key = config.read_terminal_secret(terminal_key) if "terminal" in types else None
     destination.parent.mkdir(parents=True, exist_ok=True)
     items = []
     with TemporaryDirectory(prefix=".loaf-backup-", dir=destination.parent) as folder:
@@ -1291,26 +1200,17 @@ def backup(
             docker_archive(project, volume_command(namespace=namespace, volumes={webui: "webui"}),
                            staging / "webui.tar", "Save webui.tar")
             add("webui", "webui.tar")
-        if "chats" in types:
-            accounts = list_terminal_workspaces(project, namespace)
-            chats = list_saved_chats(project, namespace)
-            images = list_chat_images(project, namespace, chats)
-            volumes = [*accounts, *(chat_volume(namespace, chat) for chat in chats)]
-            for volume in volumes:
-                require_inactive_volume(project, volume)
-            (staging / "chats").mkdir()
-            if volumes:
-                docker_archive(project, volume_command(namespace=namespace, volumes={name: name for name in volumes}),
-                               staging / CHAT_VOLUMES, f"Save {CHAT_VOLUMES}")
-            else:
-                # tar refuses to create an empty archive.
-                tarfile.open(staging / CHAT_VOLUMES, "w").close()
-            members = [CHAT_VOLUMES]
-            if images:
-                docker_archive(project, ["docker", "image", "save", *images], staging / CHAT_IMAGES, f"Save {CHAT_IMAGES}")
-                members.append(CHAT_IMAGES)
-            (staging / CHAT_KEY).write_bytes(key)
-            add("chats", *members, CHAT_KEY, accounts=list(accounts), chats=chats, images=images)
+        if "terminal" in types:
+            (staging / "terminal").mkdir()
+            members = []
+            if terminal_volume_exists(project, namespace):
+                users = terminal_volume(namespace)
+                require_inactive_volume(project, users)
+                docker_archive(project, volume_command(namespace=namespace, volumes={users: "users"}),
+                               staging / TERMINAL_VOLUME, f"Save {TERMINAL_VOLUME}")
+                members.append(TERMINAL_VOLUME)
+            (staging / TERMINAL_KEY).write_bytes(key)
+            add("terminal", *members, TERMINAL_KEY)
 
         manifest = {
             "format": ARCHIVE_FORMAT, "version": ARCHIVE_VERSION, "created": datetime.now().astimezone().isoformat(),
@@ -1381,11 +1281,11 @@ def setup_from_archive(archive: Archive, project: Path, *, installers: bool) -> 
         raise TransferError("The backup has no installers type containing cached host installers.")
     with TemporaryDirectory(prefix=".loaf-restore-", dir=project) as folder:
         staging = Path(folder)
-        unpack(archive, staging, {CHAT_KEY, *(("installers.tar",) if installers else ())})
+        unpack(archive, staging, {TERMINAL_KEY, *(("installers.tar",) if installers else ())})
         if installers:
             stage_files(staging / "installers.tar", staging / "files", INSTALL_CACHE.as_posix())
             publish_project_files(project_file_targets(staging / "files", project))
-        key = staging / CHAT_KEY
+        key = staging / TERMINAL_KEY
         if key.is_file():
             data = key.read_bytes()
             if not config.TERMINAL_KEY_PATTERN.fullmatch(data):
@@ -1423,7 +1323,7 @@ def restore(project: Path, archive: Archive, types: tuple[str, ...] | None = Non
             validate_model_archive(staging / "models.tar")
         if "webui" in requested:
             validate_volume_payload(staging / "webui.tar", {"webui"})
-        chats = read_chats(items["chats"], staging, namespace) if "chats" in requested else None
+        terminal = read_terminal(items["terminal"], staging) if "terminal" in requested else None
         checkout = staging / "checkout"
         if "source" in requested:
             stage_checkout(staging / "source.tar", checkout)
@@ -1445,16 +1345,16 @@ def restore(project: Path, archive: Archive, types: tuple[str, ...] | None = Non
         # The key keeps its own content and mode; a restored settings file never replaces it.
         if any(path == terminal_key for _, path in config_targets + installer_targets):
             raise TransferError("The backup uses the terminal key path for a configuration file.")
-        if chats is not None:
-            matching_terminal_key(terminal_key, chats.key)
-        if {"models", "webui", "chats"} & set(requested) and "images" not in requested:
+        if terminal is not None:
+            matching_terminal_key(terminal_key, terminal.key)
+        if {"models", "webui", "terminal"} & set(requested) and "images" not in requested:
             require_helper_image(project, namespace)
         webui = next(name for name, role in volume_names(namespace).items() if role == "webui")
         if "webui" in requested:
             require_inactive_volume(project, webui)
-        chat_volumes = chats.volumes(namespace) if chats is not None else {}
-        for volume in chat_volumes:
-            require_inactive_volume(project, volume)
+        users = terminal_volume(namespace)
+        if terminal is not None and terminal.users:
+            require_inactive_volume(project, users)
         model_command = model_volume_command(project, namespace, restore=True, delete=delete) if "models" in requested else None
 
         publish_checkout(checkout_entries, staging / "replaced")
@@ -1467,17 +1367,14 @@ def restore(project: Path, archive: Archive, types: tuple[str, ...] | None = Non
         if "webui" in requested:
             docker_archive(project, volume_command(restore=True, namespace=namespace, volumes={webui: "webui"}),
                            staging / "webui.tar", "Restore webui.tar", send=True)
-        if chats is not None:
-            driver, options = settings.terminal_server_volume_driver, json.loads(settings.terminal_server_volume_options)
-            for volume, labels in chat_volumes.items():
-                create_labeled_volume(project, volume, labels, driver, options)
-            if chats.images:
-                docker_archive(project, ["docker", "image", "load"], staging / CHAT_IMAGES, f"Load {CHAT_IMAGES}",
-                               send=True)
-            with restore_terminal_key(terminal_key, chats.key, group=SYSTEM_GROUP if system else None):
-                if chat_volumes:
-                    docker_archive(project, volume_command(restore=True, namespace=namespace,
-                                                           volumes={name: name for name in chat_volumes}),
-                                   staging / CHAT_VOLUMES, f"Restore {CHAT_VOLUMES}", send=True)
+        if terminal is not None:
+            if terminal.users:
+                create_labeled_volume(project, users, terminal_volume_labels(namespace),
+                                      settings.terminal_server_volume_driver,
+                                      json.loads(settings.terminal_server_volume_options))
+            with restore_terminal_key(terminal_key, terminal.key, group=SYSTEM_GROUP if system else None):
+                if terminal.users:
+                    docker_archive(project, volume_command(restore=True, namespace=namespace, volumes={users: "users"}),
+                                   staging / TERMINAL_VOLUME, f"Restore {TERMINAL_VOLUME}", send=True)
             print(f"Terminal server key available at {terminal_key}.")
         return RestoredBackup(requested, restored_settings)

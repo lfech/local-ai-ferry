@@ -2,4 +2,3 @@
 !Dockerfile
 !provisioner.py
 !runner.py
-!apt-guard.sh

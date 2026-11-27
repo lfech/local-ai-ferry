@@ -84,22 +84,24 @@ Relative `backup_dir` paths start at the project directory. Relative CLI paths
 start at the current directory. [Model selection syntax](launcher.md#select-models)
 
 `[transfer] backup_version_min` names the oldest archive format that restore
-accepts. This release writes and reads format 2, the first with typed
-contents, so 2 is the only valid value. Archives from earlier releases need
-the launcher in their backup folder. [Archive contents](transfer.md#archive-contents)
+accepts. This release writes and reads format 3, so 3 is the only valid
+value. Archives from earlier releases need the launcher in their backup
+folder. [Archive contents](transfer.md#archive-contents)
 
 Use `[terminal_server]` for the optional Open Terminal service. Its
 `secret_file` path is relative to the project directory. Set
-`include_in_backup = true` to include the `chats` type in backups without
-type names. It holds the account and chat folders, the chats' package images
-and the bearer key. Backup includes the matching local terminal image when
+`include_in_backup = true` to include the `terminal` type in backups
+without type names. It holds the user volume with every account's folder and
+the bearer key. Backup includes the matching local terminal image when
 available. Use `loaf backup --no-terminal-server` to skip that image.
 Set `[images] terminal_server_image` to override its
 base image. Set `[terminal_server] apt_source_file` for the terminal image
-build and per-chat package installation. Set `apt_repository_dir` for a
-repository stored on the Docker host.
+build and for `apt` in chat containers. Set `apt_repository_dir` for a
+repository stored on the Docker host. `network = outbound` lets chat
+containers reach every address the Docker host reaches; the default
+`isolated` keeps them on their own bridge.
 [Terminal server setup](terminal-server.md#enable-and-connect) · [Package mirror](terminal-server.md#package-mirror-for-image-builds)
-[Chat packages](terminal-server.md#install-packages-for-a-chat)
+[Install packages in a chat](terminal-server.md#install-packages-in-a-chat) · [Network access](terminal-server.md#network-access)
 
 ### Select an Ollama build recipe
 

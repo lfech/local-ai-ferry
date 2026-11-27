@@ -61,8 +61,6 @@ def write_archive(path, members):
 KEY = b"archived-terminal-credential-0123456789\n"
 OWNER = "a" * 64
 ACCOUNT = transfer.workspace_prefix("") + OWNER
-SAVED_CHAT = {"id": "chat-1", "owner": OWNER}
-TEMPORARY_CHAT = {"id": "temporary:chat-2", "owner": OWNER}
 
 
 @unittest.skipUnless(shutil.which("git"), "Git is required for checkout backup.")
@@ -133,20 +131,15 @@ class TransferTests(unittest.TestCase):
         self.webui = tar_payload("webui", None, **{"webui/webui.db": b"accounts and chats"})
         self.definitions = b""
         self.volumes = {}
-        self.chat_images = []
 
     def git(self, *arguments):
         return subprocess.check_output(["git", *arguments], cwd=self.project)
 
-    def add_terminal_workspaces(self):
+    def add_terminal_volume(self):
         self.settings.write_text("[terminal_server]\nenabled = true\n", encoding="utf-8")
-        for name, labels in (
-            (ACCOUNT, transfer.workspace_labels("", ACCOUNT)),
-            (transfer.chat_volume("", SAVED_CHAT), transfer.chat_labels("", SAVED_CHAT)),
-            (transfer.chat_volume("", TEMPORARY_CHAT), transfer.chat_labels("", TEMPORARY_CHAT)),
-        ):
-            self.volumes[name] = {"Name": name, "Labels": labels, "Driver": "local", "Options": None}
-        self.chat_images = [transfer.chat_image("", SAVED_CHAT)]
+        name = transfer.terminal_volume("")
+        self.volumes[name] = {"Name": name, "Labels": transfer.terminal_volume_labels(""), "Driver": "local",
+                              "Options": None}
 
     def docker(self, command, **kwargs):
         if command[0] != "docker":
@@ -158,12 +151,10 @@ class TransferTests(unittest.TestCase):
         if command[1:3] == ["image", "ls"]:
             if self.terminal_image and command[-1] == f"reference={self.terminal_image}":
                 output = b"terminal-image-id\n"
-            elif any(part.startswith(f"label={transfer.CHAT_IMAGE_PROJECT_LABEL}=") for part in command):
-                output = "\n".join(self.chat_images).encode()
         elif command[1:3] == ["volume", "ls"]:
-            label, value = command[-1].removeprefix("label=").split("=", 1)
-            output = "\n".join(name for name, volume in self.volumes.items()
-                               if volume["Labels"].get(label) == value).encode()
+            # Docker matches a name filter anywhere in the name.
+            value = command[-1].removeprefix("name=")
+            output = "\n".join(name for name in self.volumes if value in name).encode()
         elif command[1:3] == ["volume", "inspect"]:
             output = json.dumps([self.volumes[name] for name in command[3:] if name in self.volumes]).encode()
         elif command[1:3] == ["volume", "create"]:
@@ -179,8 +170,7 @@ class TransferTests(unittest.TestCase):
         targets = [part.split("target=/transfer/", 1)[1].split(",")[0] for part in command if "target=/transfer/" in part]
         payload = b""
         if command[1:3] == ["image", "save"]:
-            label = "save chat images" if any(transfer.CHAT_IMAGE_REPOSITORY in part for part in command) else "save images"
-            payload = image_payload(command[3:]) if label == "save chat images" else self.images
+            label, payload = "save images", self.images
         elif command[1:3] == ["image", "load"]:
             label = "load"
         elif transfer.SNAPSHOT_MODELS in command:
@@ -309,11 +299,12 @@ class TransferTests(unittest.TestCase):
         self.assertFalse(list(self.destination.glob(".loaf-restore-*")))
         self.assertIn("Restored source, config, installers, images, models, webui", self.output.getvalue())
 
-    def test_types_and_aliases_select_members_and_chats_add_webui(self):
+    def test_types_and_aliases_select_members_and_terminal_adds_webui(self):
         for arguments, members, docker in (
             (("project",), ["config.tar", "installers.tar"], False),
             (("volumes",), ["models.tar", "webui.tar"], True),
-            (("chats",), ["webui.tar", "chats/volumes.tar", "chats/terminal-server.key"], True),
+            # Without a user volume yet, only the key is saved.
+            (("terminal",), ["webui.tar", "terminal/terminal-server.key"], True),
             (("config", "images"), ["config.tar", "images.tar"], True),
         ):
             with self.subTest(arguments=arguments):
@@ -322,10 +313,10 @@ class TransferTests(unittest.TestCase):
                 self.assertEqual(self.invoke("backup", *arguments), 0, self.progress.getvalue())
                 self.assertEqual(list(read_members(self.archive)), [transfer.MANIFEST, *members])
                 self.assertEqual(any(call[:2] != ["docker", "compose"] for call in self.docker_calls), docker)
-        self.add_terminal_workspaces()
+        self.add_terminal_volume()
         shutil.rmtree(self.backup_dir)
         self.assertEqual(self.invoke("backup", "volumes"), 0, self.progress.getvalue())
-        self.assertEqual([item["type"] for item in self.manifest()["items"]], ["models", "webui", "chats"])
+        self.assertEqual([item["type"] for item in self.manifest()["items"]], ["models", "webui", "terminal"])
 
         for arguments in (("unknown",), ("config", "config"), ("--verify", "config")):
             with self.subTest(arguments=arguments), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
@@ -340,31 +331,27 @@ class TransferTests(unittest.TestCase):
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             self.invoke("restore", "config", "--import", "--archive", str(self.bundle), custom=False)
 
-    def test_chats_round_trip_restores_folders_images_and_key(self):
-        self.add_terminal_workspaces()
-        self.assertEqual(self.invoke("backup", "chats"), 0, self.progress.getvalue())
+    def test_terminal_round_trip_restores_the_user_volume_and_key(self):
+        self.add_terminal_volume()
+        self.assertEqual(self.invoke("backup", "terminal"), 0, self.progress.getvalue())
         manifest = self.manifest()
-        chats = manifest["items"][1]
-        self.assertEqual([item["type"] for item in manifest["items"]], ["webui", "chats"])
-        self.assertEqual((chats["accounts"], chats["chats"], chats["images"]), ([ACCOUNT], [SAVED_CHAT], self.chat_images))
-        self.assertEqual([member["path"] for member in chats["members"]],
-                         [transfer.CHAT_VOLUMES, transfer.CHAT_IMAGES, transfer.CHAT_KEY])
+        terminal = manifest["items"][1]
+        self.assertEqual([item["type"] for item in manifest["items"]], ["webui", "terminal"])
+        self.assertEqual([member["path"] for member in terminal["members"]],
+                         [transfer.TERMINAL_VOLUME, transfer.TERMINAL_KEY])
         members = read_members(self.archive)
-        self.assertEqual(members[transfer.CHAT_KEY], KEY)
+        self.assertEqual(members[transfer.TERMINAL_KEY], KEY)
+        users = transfer.terminal_volume("")
         saved = [call for call in self.docker_calls if "tar" in call and transfer.RESTORE_VOLUMES not in call]
-        self.assertIn(f"type=volume,source={ACCOUNT},target=/transfer/{ACCOUNT},volume-nocopy,readonly", saved[-1])
-        self.assertFalse(any(transfer.chat_volume("", TEMPORARY_CHAT) in part for call in saved for part in call))
+        self.assertIn(f"type=volume,source={users},target=/transfer/users,volume-nocopy,readonly", saved[-1])
 
         self.volumes.clear()
         self.docker_calls.clear()
         self.assertEqual(self.invoke("restore", "--archive", str(self.bundle), custom=False, project=self.destination),
                          0, self.progress.getvalue())
-        chat = transfer.chat_volume("", SAVED_CHAT)
-        self.assertEqual({name: volume["Labels"] for name, volume in self.volumes.items()}, {
-            ACCOUNT: transfer.workspace_labels("", ACCOUNT), chat: transfer.chat_labels("", SAVED_CHAT),
-        })
-        self.assertEqual([label for label, _ in self.received], ["restore webui", "load", f"restore {ACCOUNT},{chat}"])
-        self.assertEqual(self.received_payloads()[1][1], members[transfer.CHAT_IMAGES])
+        self.assertEqual({name: volume["Labels"] for name, volume in self.volumes.items()},
+                         {users: transfer.terminal_volume_labels("")})
+        self.assertEqual([label for label, _ in self.received], ["restore webui", "restore users"])
         key = self.destination / config.TERMINAL_SECRET
         self.assertEqual(key.read_bytes(), KEY)
         self.assertEqual(stat.S_IMODE(key.stat().st_mode), 0o600)
@@ -374,17 +361,27 @@ class TransferTests(unittest.TestCase):
         key.write_bytes(b"another-terminal-credential-0123456789\n")
         self.volumes.clear()
         self.received.clear()
-        self.assertEqual(self.invoke("restore", "chats", "--archive", str(self.bundle), custom=False,
+        self.assertEqual(self.invoke("restore", "terminal", "--archive", str(self.bundle), custom=False,
                                      project=self.destination), 1)
         self.assertIn("differs from the backup", self.progress.getvalue())
         self.assertEqual((self.volumes, self.received), ({}, []))
 
-        # Restoring a failed chat volume leaves no new key behind.
+        # A failed user volume restore leaves no new key behind.
         key.unlink()
-        self.failing = {f"restore {ACCOUNT},{chat}"}
-        self.assertEqual(self.invoke("restore", "chats", "--archive", str(self.bundle), custom=False,
+        self.failing = {"restore users"}
+        self.assertEqual(self.invoke("restore", "terminal", "--archive", str(self.bundle), custom=False,
                                      project=self.root / "third project"), 23)
         self.assertFalse((self.root / "third project" / config.TERMINAL_SECRET).exists())
+
+    def test_terminal_backup_without_a_user_volume_saves_only_the_key(self):
+        self.settings.write_text("[terminal_server]\nenabled = true\n", encoding="utf-8")
+        self.assertEqual(self.invoke("backup", "terminal"), 0, self.progress.getvalue())
+        self.assertEqual([member["path"] for member in self.manifest()["items"][1]["members"]], [transfer.TERMINAL_KEY])
+        self.volumes.clear()
+        self.assertEqual(self.invoke("restore", "--archive", str(self.bundle), custom=False, project=self.destination),
+                         0, self.progress.getvalue())
+        self.assertEqual(self.volumes, {})
+        self.assertEqual((self.destination / config.TERMINAL_SECRET).read_bytes(), KEY)
 
     def test_versioned_backups_restore_only_with_the_matching_version(self):
         namespace = "v2-local-inference"
@@ -433,24 +430,24 @@ class TransferTests(unittest.TestCase):
         loose = self.root / "loose.tar.gz"
         for name, data, message in (
             ("old format", [("project.tar", b""), ("sha256.json", b"{}")], "does not begin with loaf.json"),
-            ("newer format", [(transfer.MANIFEST, json.dumps({**manifest, "version": 3}).encode())],
-             "uses archive format 3"),
+            ("newer format", [(transfer.MANIFEST, json.dumps({**manifest, "version": 4}).encode())],
+             "uses archive format 4"),
             ("unknown type", [(transfer.MANIFEST, json.dumps({**manifest, "items": [
                 {"type": "notes", "members": [{"path": "notes.tar", "size": 0, "sha256": "0" * 64}]}]}).encode())],
              "unexpected item 'notes'"),
-            ("chats without webui", [(transfer.MANIFEST, json.dumps({**manifest, "items": [
-                {"type": "chats", "members": [{"path": transfer.CHAT_KEY, "size": 0, "sha256": "0" * 64}]}]}).encode())],
-             "chats without the WebUI data"),
+            ("terminal without webui", [(transfer.MANIFEST, json.dumps({**manifest, "items": [
+                {"type": "terminal", "members": [{"path": transfer.TERMINAL_KEY, "size": 0, "sha256": "0" * 64}]}]}).encode())],
+             "terminal without the WebUI data"),
         ):
             with self.subTest(name):
                 write_archive(loose, data)
                 self.assertEqual(self.invoke("restore", "--archive", str(loose), custom=False,
                                              project=self.destination), 1)
                 self.assertIn(message, self.progress.getvalue())
-        self.settings.write_text("[transfer]\nbackup_version_min = 3\n", encoding="utf-8")
+        self.settings.write_text("[transfer]\nbackup_version_min = 4\n", encoding="utf-8")
         with self.assertRaises(SystemExit):
             self.invoke("restore", "--archive", str(self.bundle), custom=False)
-        self.assertIn("expected an archive format from 2 to 2", self.progress.getvalue())
+        self.assertIn("expected archive format 3", self.progress.getvalue())
 
     def copied_bundle(self, name):
         """Copy the backup folder under another name, as transfer media often renames it."""
@@ -505,9 +502,9 @@ class TransferTests(unittest.TestCase):
         self.assertEqual([call for call in self.docker_calls if call[:2] != ["docker", "compose"]], [])
 
     def test_system_restore_shares_files_with_the_group_and_keeps_the_terminal_key(self):
-        self.add_terminal_workspaces()
+        self.add_terminal_volume()
         self.settings.write_text("[webui]\nport = 8818\n[terminal_server]\nenabled = true\n", encoding="utf-8")
-        self.assertEqual(self.invoke("backup", "config", "installers", "chats"), 0, self.progress.getvalue())
+        self.assertEqual(self.invoke("backup", "config", "installers", "terminal"), 0, self.progress.getvalue())
         system, state = self.root / "etc loaf", self.root / "var lib loaf"
         system.mkdir()
         state.mkdir()
@@ -654,8 +651,8 @@ class TransferTests(unittest.TestCase):
         self.assertEqual((checkout / "docs/guide.md").read_text(encoding="utf-8"), "new guide\n")
 
     def test_setup_reuses_the_archived_terminal_key(self):
-        self.add_terminal_workspaces()
-        self.assertEqual(self.invoke("backup", "chats"), 0, self.progress.getvalue())
+        self.add_terminal_volume()
+        self.assertEqual(self.invoke("backup", "terminal"), 0, self.progress.getvalue())
         with patch.object(Path, "cwd", return_value=self.bundle):
             self.assertEqual(self.invoke("setup", "--terminal-server-key", custom=False, project=self.destination),
                              0, self.progress.getvalue())
@@ -669,7 +666,7 @@ class TransferTests(unittest.TestCase):
         self.docker_calls.clear()
         self.assertEqual(self.invoke("backup", "--verify", "--archive", str(self.bundle), custom=False), 0)
         output = self.output.getvalue()
-        for line in ("Archive format 2", "config", "installers", "images", "local/open-webui:latest  linux/amd64"):
+        for line in ("Archive format 3", "config", "installers", "images", "local/open-webui:latest  linux/amd64"):
             self.assertIn(line, output)
         self.assertEqual(self.invoke("restore", "--dry-run", "--archive", str(self.bundle), custom=False,
                                      project=self.destination), 0)
@@ -1035,13 +1032,11 @@ class ArchiveValidationTests(unittest.TestCase):
                 with self.assertRaisesRegex(transfer.TransferError, message):
                     transfer.open_archive(archive)
 
-    def test_chat_metadata_must_match_the_deployment(self):
-        for chats in ([{"id": "temporary:x", "owner": OWNER}], [{"id": "chat", "owner": "short"}],
-                      [SAVED_CHAT, SAVED_CHAT], [{**SAVED_CHAT, "extra": 1}], "chat"):
-            with self.subTest(chats=chats), self.assertRaises(transfer.TransferError):
-                transfer.validate_chats(chats)
-        self.assertEqual(transfer.chat_volume("", SAVED_CHAT),
-                         transfer.workspace_prefix("") + sha256(f"{OWNER}/chat-1".encode()).hexdigest() + "-chat")
+    def test_terminal_volume_name_and_labels_follow_the_deployment(self):
+        project = sha256(b"v2-local-inference").hexdigest()[:16]
+        self.assertEqual(transfer.terminal_volume("v2-local-inference"), f"loaf-tools-{project}-users")
+        self.assertEqual(transfer.terminal_volume_labels(""),
+                         {"loaf.tool-server.project": "local-inference", "loaf.terminal.users": "true"})
 
     def model_members(self, manifest_value, blob=b"weights", *, size=None, digest=None):
         digest = digest or f"sha256:{sha256(blob).hexdigest()}"

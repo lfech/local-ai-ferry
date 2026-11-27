@@ -23,18 +23,19 @@ available type and restore recovers everything in the archive.
 | `images` | The three core images and the matching Open Terminal image when available locally | The Docker image store |
 | `models` | Ollama blobs, manifests and saved Modelfiles | The Ollama volume, merged |
 | `webui` | The Open WebUI volume: accounts, chat history, settings and the saved terminal connection | A new or empty volume |
-| `chats` | Each account's `/home/user`, each saved chat's `/home/chat`, the chats' package images and the terminal bearer key | New or empty volumes and the configured key file |
+| `terminal` | The user volume with each account's `/home/user` folder, and the terminal bearer key | A new or empty user volume and the configured key file |
 
 | Alias | Types |
 | --- | --- |
 | `project` | `config`, `installers` |
-| `volumes` | `models`, `webui`, and `chats` when the terminal server is enabled |
+| `volumes` | `models`, `webui`, and `terminal` when the terminal server is enabled |
 
 `source` exists only in a source checkout. Backups without names include
-`chats` only with `[terminal_server] include_in_backup = true`, because the
-archive then contains the bearer key in plaintext. `chats` always brings
-`webui`, which owns the accounts and chats that the folders belong to. A
-temporary chat's folder and package image stay on the source host.
+`terminal` only with `[terminal_server] include_in_backup = true`, because
+the archive then contains the bearer key in plaintext. `terminal` always
+brings `webui`, which owns the accounts that the folders belong to. Chat
+containers, with their `/home/chat` folders and installed packages, stay on
+the source host.
 
 ```bash
 loaf backup project images
@@ -43,7 +44,7 @@ loaf restore config --archive /media/transfer/YYYYMMDD-HHMM_local-ai-ferry
 
 Restore verifies every member before it changes anything and reports any
 requested type missing from the archive. A backup that includes `webui` or
-`chats` stops the project services. A backup of `models` alone stops only
+`terminal` stops the project services. A backup of `models` alone stops only
 the downloader. Restoring Docker types without `images` requires the matching
 local `local/ollama-online` helper image.
 
@@ -108,14 +109,14 @@ deployment includes the binary that launched it.
 
 The archive's first member, `loaf.json`, lists its types. loaf reads it
 before any payload, so it can refuse an unsupported archive or a missing type
-without unpacking the rest. Then each type has one plain tar member. `chats`
-has three: `chats/volumes.tar`, `chats/images.tar` when chats have package
-images, and `chats/terminal-server.key`.
+without unpacking the rest. Then each type has one plain tar member.
+`terminal` has two: `terminal/users.tar` with the user volume, absent before
+any account used the terminal, and `terminal/terminal-server.key`.
 
 ```json
 {
   "format": "loaf-archive",
-  "version": 2,
+  "version": 3,
   "created": "2026-11-26T18:30:00+01:00",
   "loaf": "0.2.2",
   "deployment": "",
@@ -127,12 +128,11 @@ images, and `chats/terminal-server.key`.
 }
 ```
 
-`deployment` is the backup's `[launcher] version`. The `chats` item also
-lists the account folders, the saved chats by ID and owner, and the package
-images; the bearer key stays out of `loaf.json`. Restore accepts archive
-format 2. `[transfer] backup_version_min` names the oldest accepted format.
-loaf releases before format 2 wrote another layout. Restore such a backup
-with the launcher in its folder.
+`deployment` is the backup's `[launcher] version`. The bearer key stays
+out of `loaf.json`. Restore accepts archive format 3, which stores the
+terminal type as one user volume. `[transfer] backup_version_min` names the
+oldest accepted format. Releases before v1.0.0 read only their own format.
+Restore an older backup with the launcher in its folder.
 
 Backups are readable only by their owner. In a setgid directory, such as the
 system deployment's `/var/lib/loaf/backup`, they are also readable by the
@@ -152,7 +152,7 @@ include Git history. The release executable supplies the packaged defaults and
 Docker files. Copy required `.env` settings and other external data
 separately. The `config` type excludes the configured terminal key file. Open
 WebUI's saved connection and its credential are part of `webui`. Restore
-`chats` with `webui`, or update the saved connection to the destination's key.
+`terminal` with `webui`, or update the saved connection to the destination's key.
 [Terminal server transfer](terminal-server.md#offline-transfer-and-shutdown)
 
 Source checkout backups prepare the launcher wheel, dependency wheels and wheel
@@ -313,10 +313,9 @@ calling Docker. For a backup folder, it also checks the launcher and the
 archive against `SHA256SUMS`. It checks volume paths and archive links before
 extracting volumes, and refuses volumes in use. Restore applies the selected
 types in this order: `source`, `config`, `installers`, `images`, `models`,
-`webui`, `chats`. Restoring `config` keeps the backup's deployment version.
-Restoring `chats` creates the account and chat volumes with their ownership
-labels, loads the chats' package images and writes the bearer key with
-owner-only permissions. It refuses a different existing key. Restored
+`webui`, `terminal`. Restoring `config` keeps the backup's deployment
+version. Restoring `terminal` creates the user volume with its ownership
+labels and writes the bearer key with owner-only permissions. It refuses a different existing key. Restored
 settings and installers are owner-only as well.
 
 In the system deployment, restored settings in `/etc/loaf` and installers

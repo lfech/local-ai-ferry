@@ -99,7 +99,7 @@ or override them for a run with the flags below. Transfer tests require Git.
 | Host setup | Checks APT-managed and pyenv interpreters, wheel reuse and refresh, virtualenv recovery, setup diagnostics, and the NVIDIA toolkit cache. Also checks that Docker setup is opt-in and uses only the prepared APT source when the cache is present. |
 | Configuration | Checks packaged defaults and their Compose and Dockerfile fallbacks, local overrides, model file selection, INI validation, and resolved Compose settings. |
 | Host integrations | Checks the generated systemd unit and Continue YAML against project paths, deployment version, WebUI settings and model selection. Checks that the Tether command prints installation steps and the official downloads link. |
-| Transfer | Uses real project files and archives with simulated Docker calls. Checks that `loaf.json` comes first and lists every member's size and hash, the restore of every type into a new project, type and alias selection, the chats round trip with volume labels, images and key, versioned and cross-version restores, setup and restore inside a backup folder that becomes the project, source restores over existing files with rollback, and the rejection of changed, older, newer and unsafe archives before any change. Also checks Modelfile replay and v1 and v2 model archives. The Docker suite merges and mirrors models into another deployment version through the CLI. |
+| Transfer | Uses real project files and archives with simulated Docker calls. Checks that `loaf.json` comes first and lists every member's size and hash, the restore of every type into a new project, type and alias selection, the terminal round trip with the user volume's labels and the key, versioned and cross-version restores, setup and restore inside a backup folder that becomes the project, source restores over existing files with rollback, and the rejection of changed, older, newer and unsafe archives before any change. Also checks Modelfile replay and v1 and v2 model archives. The Docker suite merges and mirrors models into another deployment version through the CLI. |
 | Readiness | Checks Docker and Compose version reporting, Open Terminal image and key reporting, GPU and volume probes, recognition of the deployment's WebUI port, and relative Ollama v2 manifest links. |
 | Open WebUI tool history | Checks the optional compatibility filter for interrupted Ollama tool turns, including provider selection, preserved tool results, and repeated requests. |
 | Documentation | Checks local links, heading anchors and guide navigation. Parses Bash examples. Checks that the command reference covers every command and global flag. |
@@ -108,7 +108,7 @@ or override them for a run with the flags below. Transfer tests require Git.
 | Release tagging | Uses temporary Git repositories to check version selection, annotated tags, previews, and tag-only pushes and retries. Requires Python 3.11 or newer. |
 | Docker | Checks resolved Compose profiles, CPU and GPU device settings, image settings, and that each Dockerfile and build secret stays inside its build context. Tests each export and startup shell scenario, verifies container removal and the stop opt-out, and runs a two-volume archive round trip. |
 | CPU and GPU model workflows | Check downloaded model exports, offline Ministral inference, startup failure and recovery, explicit Modelfile replay, and model archive mirroring with the connected services running. |
-| Terminal server | Checks credential validation, HTTP and WebSocket proxying, routing of model tools to the agent runner and of interface requests and commands to the user runner, APT command parsing and the shell guard, account and chat storage, file browsing and chat deletion, development tools through Open WebUI, and backup and restore of the image, user volumes and key. Transfer tests also cover automatic image inclusion and `--no-terminal-server`. Docker-backed workflows are opt-in. |
+| Terminal server | Checks credential validation, HTTP and WebSocket proxying to the chat's container, the root container policy with only the account's folder of the user volume, network access settings, resuming stopped containers and replacing them after a configuration change, startup reconciliation and shutdown, file browsing and chat deletion, `apt` as root, development tools through Open WebUI, and backup and restore of the image, user volume and key. Transfer tests also cover automatic image inclusion and `--no-terminal-server`. Docker-backed workflows are opt-in. |
 | Model catalog | Checks that the example/default model specifiers resolve to Ollama-compatible manifests. |
 
 ## Debian smoke checks
@@ -226,17 +226,18 @@ concurrently. They need no model or GPU.
 The serving cases use `http://terminal-server:8000` for saved connections
 and check the default and recent entries offered in the working-directory
 menu, selection before the first message, and visibility of files created by
-model commands.
-They also check chat isolation and volume removal after chat deletion.
+commands.
+They also check chat isolation and container removal after chat deletion.
 The suite includes a Docker backup round trip for a versioned terminal image,
-an account folder with its ownership, a saved chat folder with its labels, and
-an owner-only bearer key, also with `chats` alone.
+the user volume with an account folder and its ownership, and an owner-only
+bearer key, also with `terminal` alone.
 The local APT case uses `dpkg-deb` to create a disposable repository. It checks
-installation through a plain `apt-get` command and the package tool, a real
-dependency and post-install script, removal and its refusal for packages of
-the shared image, availability in both working directories, the read-only
-user folder for model commands, isolation from a second chat, the shared
-folder of a temporary chat, restart persistence, and package image cleanup.
+root commands that start in `/home/chat`, installation with `apt-get` and
+`sudo apt-get` including a real dependency and post-install script, the
+account's folder shared by its chats, isolation from a second chat and from
+another account's draft, a temporary chat that starts fresh after a restart,
+packages and files of a saved chat across the restart, and container removal
+after chat deletion.
 
 The serving cases exercise production isolation by default and use `iproute2` on
 the local Docker host to inspect the bridge. It checks that the host bridge

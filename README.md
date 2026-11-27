@@ -130,7 +130,7 @@ when starting from a prepared archive.
 
 | Mode | What it does |
 | --- | --- |
-| `setup` / `install` | Prepare the deployment and its terminal key. Use `--terminal-server-key` for key setup alone. `--test-local-repository` creates a small APT repository for chat packages. `setup tests` caches and installs the test packages. [Setup options](docs/cli-help.md#setup) |
+| `setup` / `install` | Prepare the deployment and its terminal key. Use `--terminal-server-key` for key setup alone. `--test-local-repository` creates a small APT repository for `apt` in chat containers. `setup tests` caches and installs the test packages. [Setup options](docs/cli-help.md#setup) |
 | `link-docker-project` | Create a `docker-project` symlink to the packaged Compose file, Dockerfiles, and default configuration. [Direct Compose commands](docs/launcher.md#link-the-docker-project) |
 | `integration` | Print a systemd unit, Continue YAML, or Tether installation instructions. [Host integrations](docs/installation.md#host-integrations) |
 | `build` / `upgrade` | Build the local images. Upgrade refreshes upstream base images first. |
@@ -138,7 +138,7 @@ when starting from a prepared archive.
 | `clean` | Remove temporary files and the runtime cache. Add `--full` to clear generated installation files too. [Cleanup](docs/launcher.md#clean-generated-files) |
 | `download` | Download selected models using the downloader. |
 | `online` / `offline` | Start Ollama and WebUI with the selected network profile. Add `--cpu` for CPU inference. |
-| `backup` / `restore` | Select any of `source`, `config`, `installers`, `images`, `models`, `webui` and `chats`, or the aliases `project` and `volumes`. `models` alone transfers the model store. [Archive types](docs/transfer.md#select-archive-types) |
+| `backup` / `restore` | Select any of `source`, `config`, `installers`, `images`, `models`, `webui` and `terminal`, or the aliases `project` and `volumes`. `models` alone transfers the model store. [Archive types](docs/transfer.md#select-archive-types) |
 | `backup --verify` | Check the archive members and the bundled launcher, list the types, and report saved image platforms without Docker. |
 | `version` / `docs` | Show the release and installation, or read the bundled guides and manual page. [Bundled guides](docs/launcher.md#read-the-bundled-guides) |
 | `status` / `stop` | Check deployment readiness and list containers, or stop and remove containers across all profiles. [Keep stopped containers](docs/launcher.md#stop-and-remove-containers) |
@@ -192,7 +192,7 @@ explains context precedence and sampling.
 | --- | --- |
 | `ollama`, mounted at `/ollama` | `models/`: weights, projectors and manifests; `config/`: exported Modelfiles |
 | `open-webui`, mounted at `/app/backend/data` | Accounts, chats, settings and caches |
-| Per-account terminal volume at `/home/user` | Persistent files and settings shared by the account's chats. [Workspace storage](docs/terminal-server.md#offline-transfer-and-shutdown) |
+| Terminal user volume, the account's folder at `/home/user` | Persistent files and settings shared by the account's chats. [Workspace storage](docs/terminal-server.md#offline-transfer-and-shutdown) |
 | Saved chat terminal volume at `/home/chat` | Files private to a chat until it is deleted. [Files tab](docs/terminal-server.md#use-the-terminal-from-a-model) |
 
 Backend startup imports all saved `.model` files. Models and exports persist

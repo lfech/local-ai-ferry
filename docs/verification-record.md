@@ -4,6 +4,40 @@
 
 Older entries use the current command and project names in examples.
 
+## 2026-11-27 13:37:43 +0100 — Terminal container per chat with Docker acceptance runs
+
+- Environment: Debian 13 in WSL2, Docker Engine 26.1.5, Compose 2.26.1,
+  Buildx 0.13.1, the checkout's `.venv` on Python 3.13.5, and the existing
+  `local/open-webui:latest`. The test image `local/open-terminal:loaf-test`
+  was built from the checkout; the base image came from ghcr.io and the
+  packages from Debian. `local/open-terminal:latest` was left unchanged.
+- Docker probes with disposable names checked three behaviors:
+  - a missing volume subpath is refused, and an existing one shows only that
+    folder;
+  - a stopped container keeps `/home/chat` across network disconnect,
+    removal, recreation and reconnect;
+  - `apt-get` and `sudo` work as root with the selected capabilities and
+    `no-new-privileges`.
+- Docker-free suite (`python -m unittest discover -s tests -t .` from
+  `python-package/`, every opt-in flag set to 0): 280 cases passed in 9.7
+  seconds with 58 skips.
+- Inside the test image: `ProvisionerTests` (11 cases) and `RunnerTests`
+  (1 case) passed.
+- `RUN_DOCKER_TESTS=1 RUN_TERMINAL_SERVER_TESTS=1
+  LOAF_TEST_TERMINAL_IMAGE=local/open-terminal:loaf-test`, production
+  isolation with `inhibit_ipv4`:
+  - the APT case passed in 48.7 seconds;
+  - the runtime source and backup cases passed in 62.6 seconds;
+  - the Open WebUI serving case passed for both profiles in 142 seconds.
+- Earlier attempts found the log driver error and the `HOME` choice that the
+  development record describes. One run without the test image ran two Docker
+  cases against the stale `local/open-terminal:latest`, because the class's
+  skip decorator was lost. They failed as expected, and the decorator is
+  restored.
+- Not run: `network = outbound` with real Docker (unit tests only), Docker
+  Engine 28's isolated gateway mode, the model workflows, `test_debian` and
+  the release handoff.
+
 ## 2026-11-27 12:48:51 +0100 — Group-readable system restores and the terminal key
 
 - Environment: Debian 13 in WSL2, the checkout's `.venv` on Python 3.13.5,

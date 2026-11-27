@@ -41,6 +41,19 @@ def load_component(name):
     return module
 
 
+class FakeDocker:
+    """Answer Docker API calls from a table; a list answers successive calls in turn."""
+
+    def __init__(self):
+        self.responses = {}
+        self.calls = []
+
+    async def call(self, method, path, *, body=None, **_):
+        self.calls.append((method, path, body))
+        answer = self.responses.get((method, path))
+        return answer.pop(0) if isinstance(answer, list) else answer
+
+
 KEY_FORMAT_CASES = (
     ("minimum length", b"!" + b"k" * 30 + b"~", True),
     ("LF", b"k" * 32 + b"\n", True),
@@ -163,7 +176,7 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
                         with self.assertRaises(ValueError):
                             self.module.read_terminal_key(key)
 
-    async def test_discovery_and_streams_use_verified_identity_and_runner_credential(self):
+    async def test_discovery_and_streams_use_verified_identity_and_container_credential(self):
         module = self.module
         try:
             with sockets.socket() as listener:
@@ -172,7 +185,7 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
             self.skipTest(f"Loopback sockets unavailable: {exc}")
 
         async def backend(request):
-            self.assertEqual(request.headers.get("Authorization"), "Bearer runner-only")
+            self.assertEqual(request.headers.get("Authorization"), "Bearer container-only")
             socket = web.WebSocketResponse()
             if socket.can_prepare(request).ok:
                 await socket.prepare(request)
@@ -183,25 +196,22 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
             return web.json_response({
                 "user": request.headers["X-User-Id"], "session": request.headers.get("X-Session-Id"),
                 "path": request.path, "body": await request.text(), "query": dict(request.query),
-                "id": "started-by-account", "cwd": "/home/user/project",
+                "cwd": "/home/user/project",
             })
 
         upstream = web.Application()
         upstream.router.add_route("*", "/{path:.*}", backend)
         async with TestServer(upstream) as runner, ClientSession() as proxy_client:
             class Workspaces(module.Workspaces):
-                packages = None
-
                 def __init__(self):
                     self.client = proxy_client
                     self.directories = {}
-                    self.user_processes = {}
-                    self.users = []
+                    self.leases = []
 
                 @asynccontextmanager
-                async def lease(self, user, session="", role=module.USER_ROLE):
-                    self.users.append((user, session, role))
-                    workspace = module.Workspace("container", "network", runner.host, "runner-only")
+                async def lease(self, user, session=""):
+                    self.leases.append((user, session))
+                    workspace = module.Workspace("container", "network", runner.host, "container-only")
                     with patch.object(module, "PORT", runner.port):
                         yield workspace
 
@@ -214,32 +224,26 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
             manager = Workspaces()
             metadata = {"config": {"features": {"terminal": True}}, "schema": {"paths": {
                 "/execute": {"post": {"operationId": "run_command", "description": "Execute."}}, "/agents": {},
-                "/api/terminals/user/output": {}, "/api/terminals/user/input": {},
+                "/api/terminals/user/output": {}, "/api/v1/terminals/templates": {},
             }}}
             headers = {"Authorization": "Bearer " + self.secret}
             identity = {"X-User-Id": "account-a", "X-Session-Id": "chat-a"}
             authorized = {**headers, **identity}
             async with TestClient(TestServer(module.application(manager, self.secret, metadata))) as client:
                 async with client.get("/api/config", headers=headers) as result:
-                    self.assertTrue((await result.json())["features"]["terminal"])
+                    self.assertEqual((await result.json())["features"], {"terminal": True, "agents": False})
                 async with client.get("/openapi.json", headers=headers) as result:
                     paths = (await result.json())["paths"]
-                self.assertEqual(set(paths), {"/agent/execute", "/agent/api/terminals/user/output"})
-                self.assertIn("/home/user is read-only", paths["/agent/execute"]["post"]["description"])
-                self.assertNotIn("apt-get", paths["/agent/execute"]["post"]["description"])
+                # Model tools keep Open Terminal's own paths; the chat's single container serves them.
+                self.assertEqual(set(paths), {"/execute", "/api/terminals/user/output"})
+                self.assertIn("so apt and apt-get work", paths["/execute"]["post"]["description"])
                 for path, info, status in (("/execute", {}, 401), ("/execute", headers, 403),
                                            ("/api/v1/terminals/templates", headers, 404),
-                                           ("/agent/api/terminals/user/input", authorized, 404),
-                                           ("/agent/api/terminals", authorized, 404),
-                                           ("/agent/agents", authorized, 404),
-                                           ("/agent/packages/install", authorized, 404)):
+                                           ("/agents", authorized, 404), ("/agent/execute", authorized, 404)):
                     async with client.get(path, headers=info) as result:
                         self.assertEqual(result.status, status, path)
-                async with client.post("/agent/api/terminals/user/output", headers=authorized) as result:
-                    self.assertEqual(result.status, 404)
-                self.assertEqual(manager.users, [])
+                self.assertEqual(manager.leases, [])
 
-                # The account's own requests use the user runner.
                 async with client.post("/files/upload", headers=authorized,
                                        params={"file": "hello + world"}, data="hello") as result:
                     reply = await result.json()
@@ -247,53 +251,27 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
                                  ("account-a", "chat-a", "/files/upload", "hello", {"file": "hello + world"}))
                 async with client.post("/files/cwd", headers=authorized, json={"path": "/home/user/project"}):
                     pass
-                key = module.account_workspace_key("account-a", "chat-a")
-                self.assertEqual(manager.directories, {key: "/home/user/project"})
-                async with client.post("/execute", headers=authorized, json={"command": "git clone x"}):
-                    pass
-                self.assertEqual(manager.users[-3:], [("account-a", "chat-a", module.USER_ROLE)] * 3)
-
-                # Model tools reach the agent runner without the prefix. Command views follow their command.
-                async with client.post("/agent/execute", headers=authorized, json={"command": "ls"}) as result:
+                self.assertEqual(manager.directories,
+                                 {module.account_workspace_key("account-a", "chat-a"): "/home/user/project"})
+                # Package commands reach the container unchanged.
+                command = {"command": "sudo apt-get update && apt-get install -y curl"}
+                async with client.post("/execute", headers=authorized, json=command) as result:
                     reply = await result.json()
-                self.assertEqual((reply["path"], json.loads(reply["body"])), ("/execute", {"command": "ls"}))
-                async with client.get("/agent/api/terminals/user/output", headers=authorized) as result:
-                    self.assertEqual((await result.json())["path"], "/api/terminals/user/output")
-                for path in ("/execute", "/execute/started-by-account/status", "/execute/model-command/status"):
-                    async with client.get(path, headers=authorized) as result:
-                        self.assertEqual(result.status, 200)
-                self.assertEqual([role for _, _, role in manager.users[-5:]], [
-                    module.AGENT_ROLE, module.USER_ROLE, module.AGENT_ROLE, module.USER_ROLE, module.AGENT_ROLE,
-                ])
-
-                # APT commands never reach a runner, and the server reports when it has no package source.
-                calls = len(manager.users)
-                async with client.post("/agent/execute", headers=authorized,
-                                       json={"command": "sudo apt-get update && apt-get install -y curl"}) as result:
-                    reply = await result.json()
-                self.assertEqual((reply["status"], reply["exit_code"]), ("done", 100))
-                self.assertIn("no package source", reply["output"][0]["data"])
-                self.assertEqual(len(manager.users), calls)
+                self.assertEqual((reply["path"], json.loads(reply["body"])), ("/execute", command))
+                self.assertEqual(manager.leases, [("account-a", "chat-a")] * 3)
 
                 async with client.ws_connect("/api/terminals/session", headers=identity) as socket:
                     await socket.send_json({"type": "auth", "token": "bad"})
                     self.assertEqual((await socket.receive()).type, WSMsgType.CLOSE)
-                self.assertEqual(len(manager.users), calls)
+                self.assertEqual(len(manager.leases), 3)
                 async with client.ws_connect("/api/terminals/session", headers=identity) as socket:
                     await socket.send_json({"type": "auth", "token": self.secret})
                     self.assertEqual(await socket.receive_json(), {
-                        "type": "auth", "token": "runner-only", "chat_id": "chat-a", "identity": "account-a",
+                        "type": "auth", "token": "container-only", "chat_id": "chat-a", "identity": "account-a",
                     })
-                async with client.ws_connect("/execute", headers=identity) as socket:
-                    await socket.send_json({"type": "auth", "token": self.secret})
-                    await socket.receive_json()
-                self.assertEqual(manager.users[calls:], [("account-a", "chat-a", module.USER_ROLE),
-                                                         ("account-a", "chat-a", module.AGENT_ROLE)])
-                with self.assertRaises(Exception):
-                    async with client.ws_connect("/agent/execute", headers=identity):
-                        pass
+                self.assertEqual(manager.leases[-1], ("account-a", "chat-a"))
 
-    async def test_concurrent_requests_reuse_runners_and_idle_cleanup_keeps_active_jobs(self):
+    async def test_concurrent_requests_reuse_containers_and_idle_cleanup_keeps_active_jobs(self):
         module = self.module
         policy = module.Policy("test-project", 1, 256, 2, 5, 1, "local", {})
         docker = AsyncMock()
@@ -310,8 +288,8 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
         first = module.Workspace("a", "a-net", "127.0.0.1", "key-a")
         second = module.Workspace("b", "b-net", "127.0.0.1", "key-b")
         third = module.Workspace("c", "c-net", "127.0.0.1", "key-c")
-        manager.create = AsyncMock(side_effect=[first, second, third])
-        manager.remove = AsyncMock()
+        manager.open = AsyncMock(side_effect=[first, second, third])
+        manager.park = AsyncMock()
 
         async def open_workspace(user):
             async with manager.lease(user) as workspace:
@@ -321,7 +299,7 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
         a, again, b = await asyncio.gather(open_workspace("A"), open_workspace("A"), open_workspace("B"))
         self.assertIs(a, again)
         self.assertIsNot(a, b)
-        self.assertEqual(manager.create.await_count, 2)
+        self.assertEqual(manager.open.await_count, 2)
         first.used = second.used = monotonic() - 6
         docker.call.side_effect = [
             {"Processes": [["1"], ["2"], ["3"]]},
@@ -329,102 +307,202 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
             {"Processes": [["1"], ["2"], ["3"]]},
             {"Processes": [["1"], ["2"]]},
         ]
+        # A full slot list stops one idle container; a busy one keeps running.
         self.assertIs(await open_workspace("C"), third)
-        manager.remove.assert_awaited_once_with("b", "b-net")
+        manager.park.assert_awaited_once_with(module.account_key("B"), "b")
         self.assertEqual(list(manager.active.values()), [first, third])
         with self.assertRaises(web.HTTPServiceUnavailable):
             await open_workspace("D")
-        manager.remove.assert_awaited_once_with("b", "b-net")
         await manager.reap_idle()
-        manager.remove.assert_awaited_with("a", "a-net")
+        manager.park.assert_awaited_with(module.account_key("A"), "a")
         self.assertEqual(list(manager.active.values()), [third])
 
-    def test_workload_uses_fixed_unprivileged_docker_policy(self):
+    def test_container_runs_as_root_with_only_the_account_folder(self):
         module = self.module
         policy = module.Policy("test-project", 2, 512, 2, 5, 1, "local", {})
         manager = module.Workspaces(policy, None, None, "provisioner", "pinned-image-id", None)
-        spec = manager.container_spec("workspace", policy.runner_labels("key", "user"), "runner-only", "user-volume")
-        self.assertEqual(spec["User"], "1000:1000")
-        self.assertEqual(spec["Image"], "pinned-image-id")
-        self.assertEqual(spec["WorkingDir"], "/home/user")
-        self.assertIn("HOME=/home/user", spec["Env"])
-        self.assertIn("OPEN_TERMINAL_START_DIR=/home/user", spec["Env"])
-        self.assertIn("OPEN_TERMINAL_FILE_BROWSER_ROOT=/home", spec["Env"])
+        owner_key = module.account_key("account")
+        key = module.workspace_key(owner_key, "chat-1")
+        labels = policy.container_labels(key, owner_key, "chat-1", manager.revision)
+        spec = manager.container_spec("network", labels, "container-only", owner_key, "chat-1")
+        self.assertEqual((spec["Image"], spec["User"], spec["WorkingDir"]), ("pinned-image-id", "0:0", "/home/user"))
+        for variable in ("HOME=/home/user", "OPEN_TERMINAL_START_DIR=/home/user", "OPEN_TERMINAL_FILE_BROWSER_ROOT=/home",
+                         "OPEN_TERMINAL_API_KEY=container-only", "DEBIAN_FRONTEND=noninteractive"):
+            self.assertIn(variable, spec["Env"])
         host = spec["HostConfig"]
-        self.assertEqual(host["NetworkMode"], "workspace")
-        user_mount = {"Type": "volume", "Source": "user-volume", "Target": "/home/user", "ReadOnly": False}
-        chat_mount = {"Type": "volume", "Source": "chat-volume", "Target": "/home/chat"}
-        self.assertEqual(host["Mounts"], [user_mount])
-        self.assertNotIn("/home/chat", host["Tmpfs"])
-        self.assertTrue(host["ReadonlyRootfs"])
-        self.assertEqual(host["CapDrop"], ["ALL"])
+        self.assertEqual(host["Mounts"], [{"Type": "volume", "Source": policy.users_volume, "Target": "/home/user",
+                                           "VolumeOptions": {"Subpath": owner_key}}])
+        self.assertNotIn("ReadonlyRootfs", host)
+        self.assertEqual((host["CapDrop"], host["CapAdd"], host["SecurityOpt"]),
+                         (["ALL"], list(module.ROOT_CAPABILITIES), ["no-new-privileges:true"]))
+        self.assertEqual((host["NetworkMode"], host["Dns"]), ("network", ["127.0.0.1"]))
+        self.assertEqual(set(host["Tmpfs"]), {"/tmp"})
         self.assertNotIn("PortBindings", host)
-        saved = manager.container_spec("workspace", policy.runner_labels("key", "user"), "runner-only",
-                                       "user-volume", chat_volume="chat-volume")
-        self.assertEqual(saved["WorkingDir"], "/home/user")
-        self.assertIn("OPEN_TERMINAL_START_DIR=/home/user", saved["Env"])
-        self.assertIn("OPEN_TERMINAL_FILE_BROWSER_ROOT=/home", saved["Env"])
-        self.assertEqual(saved["HostConfig"]["Mounts"], [user_mount, chat_mount])
 
-        # Model tool calls get the same chat folder and a read-only view of the account's folder.
-        agent = manager.container_spec("workspace-agent", policy.runner_labels("key", "agent"), "runner-only",
-                                       "user-volume", role="agent", chat_volume="chat-volume")
-        self.assertEqual(agent["WorkingDir"], "/home/chat")
-        self.assertIn("HOME=/home/chat", agent["Env"])
-        self.assertIn("OPEN_TERMINAL_START_DIR=/home/chat", agent["Env"])
-        self.assertEqual(agent["HostConfig"]["Mounts"], [{**user_mount, "ReadOnly": True}, chat_mount])
-        self.assertEqual({key: agent["HostConfig"][key] for key in ("ReadonlyRootfs", "CapDrop", "SecurityOpt")},
-                         {key: host[key] for key in ("ReadonlyRootfs", "CapDrop", "SecurityOpt")})
-        draft = manager.container_spec("workspace-agent", policy.runner_labels("key", "agent"), "runner-only",
-                                       "user-volume", role="agent")
-        self.assertEqual(draft["HostConfig"]["Mounts"], [{**user_mount, "ReadOnly": True}])
-        self.assertIn("/home/chat", draft["HostConfig"]["Tmpfs"])
-        self.assertEqual(policy.runner_name("key", "agent"), policy.asset_name("key") + "-agent")
-        key = "a" * 64
-        agent_network = policy.runner_name(key, "agent")
-        self.assertEqual(policy.runner_identity(policy.runner_labels(key, "agent"), agent_network), (key, "agent"))
-        self.assertIsNone(policy.runner_identity(policy.runner_labels(key, "agent"), policy.asset_name(key)))
-        self.assertIsNone(policy.runner_identity(policy.runner_labels(key, "user"), agent_network))
-        self.assertEqual(policy.runner_identity(policy.labels(key), policy.asset_name(key)), (key, None))
+        # Outbound access uses Docker's resolver; a local repository is mounted read-only.
+        outbound_policy = module.Policy("test-project", 2, 512, 2, 5, 1, "local", {}, "outbound")
+        outbound = module.Workspaces(outbound_policy, None, None, "provisioner", "image", None, repository="/srv/repo")
+        mounts = outbound.container_spec("network", labels, "key", owner_key, "chat-1")["HostConfig"]
+        self.assertNotIn("Dns", mounts)
+        self.assertEqual(mounts["Mounts"][-1], {"Type": "bind", "Source": "/srv/repo",
+                                                "Target": "/run/loaf-apt/repository", "ReadOnly": True})
+        self.assertNotEqual(outbound.revision, manager.revision)
 
-    async def test_deleted_chats_remove_only_verified_chat_volumes(self):
+        # Ownership needs the deployment, the container name and a matching chat key.
+        names = ["/" + policy.asset_name(key)]
+        self.assertEqual(policy.container_identity(labels, names), (key, "chat-1"))
+        self.assertEqual(policy.container_identity(policy.container_labels(owner_key, owner_key, "", "r"),
+                                                   ["/" + policy.asset_name(owner_key)]), (owner_key, ""))
+        self.assertIsNone(policy.container_identity(labels, ["/" + policy.asset_name(owner_key)]))
+        self.assertIsNone(policy.container_identity({**labels, module.CHAT_ID: "chat-2"}, names))
+        self.assertIsNone(policy.container_identity({**labels, module.PROJECT: "other"}, names))
+
+    def test_policy_reads_the_network_access(self):
+        module = self.module
+        env = {"LOAF_TERMINAL_CPUS": "1", "LOAF_TERMINAL_MEMORY_MIB": "256", "LOAF_TERMINAL_MAX_WORKSPACES": "2",
+               "LOAF_TERMINAL_IDLE_SECONDS": "5", "LOAF_TERMINAL_COMMAND_SECONDS": "1",
+               "LOAF_TERMINAL_VOLUME_DRIVER": "local"}
+        self.assertEqual(module.Policy.load("p", env, bridge_options={}).network, "isolated")
+        self.assertEqual(module.Policy.load("p", {**env, "LOAF_TERMINAL_NETWORK": "outbound"},
+                                            bridge_options={}).network, "outbound")
+        with self.assertRaisesRegex(ValueError, "isolated or outbound"):
+            module.Policy.load("p", {**env, "LOAF_TERMINAL_NETWORK": "open"}, bridge_options={})
+
+    async def test_open_resumes_a_stopped_container_or_recreates_it_after_a_change(self):
+        module = self.module
+        policy = module.Policy("test-project", 1, 256, 2, 5, 1, "local", {})
+        owner_key = module.account_key("account")
+        key = module.workspace_key(owner_key, "chat-1")
+        name = policy.asset_name(key)
+        network = {"Labels": policy.labels(key), "Driver": "bridge", "Internal": True, "EnableIPv6": False,
+                   "Options": dict(policy.bridge_options), "Containers": {}}
+        docker = FakeDocker()
+        manager = module.Workspaces(policy, docker, None, "provisioner", "image", None)
+        stopped = {"Id": "stopped", "Name": "/" + name, "NetworkSettings": {"Networks": {}}, "Config": {
+            "Labels": policy.container_labels(key, owner_key, "chat-1", manager.revision),
+            "Env": ["OPEN_TERMINAL_API_KEY=kept-credential"]}}
+        started = {**stopped, "NetworkSettings": {"Networks": {name: {"IPAddress": "10.1.0.2"}}}}
+        docker.responses = {
+            ("GET", f"/containers/{name}/json"): stopped, ("GET", f"/networks/{name}"): [None, network],
+            ("GET", "/containers/stopped/json"): started,
+        }
+        workspace = await manager.open(key, owner_key, "chat-1")
+        self.assertEqual((workspace.container, workspace.address, workspace.credential),
+                         ("stopped", "10.1.0.2", "kept-credential"))
+        self.assertIn(("POST", f"/networks/{name}/connect", {"Container": "stopped"}), docker.calls)
+        self.assertIn(("POST", "/containers/stopped/start", None), docker.calls)
+        self.assertFalse([call for call in docker.calls if call[1] == "/containers/create"])
+
+        # A container from another configuration is replaced, after creating the account's folder.
+        stopped["Config"]["Labels"][module.REVISION] = "earlier"
+        docker.calls.clear()
+        docker.responses.update({
+            ("GET", f"/networks/{name}"): [None, None, network], ("POST", "/containers/create"): [
+                {"Id": "folder-helper"}, {"Id": "new"}],
+            ("POST", "/containers/folder-helper/wait"): {"StatusCode": 0},
+            ("GET", "/containers/new/json"): {**started, "Id": "new"},
+        })
+        workspace = await manager.open(key, owner_key, "chat-1")
+        self.assertEqual(workspace.container, "new")
+        self.assertIn(("DELETE", "/containers/stopped", None), docker.calls)
+        helper = next(body for method, path, body in docker.calls
+                      if path == "/containers/create" and module.HELPER in body["Labels"])
+        self.assertEqual(helper["Entrypoint"], ["install", "-d", "-m", "0700", f"/users/{owner_key}"])
+        self.assertEqual(helper["HostConfig"]["Mounts"],
+                         [{"Type": "volume", "Source": policy.users_volume, "Target": "/users"}])
+        self.assertEqual(helper["HostConfig"]["NetworkMode"], "none")
+        self.assertIn(("DELETE", "/containers/folder-helper", None), docker.calls)
+        self.assertEqual(manager.user_folders, {owner_key})
+
+    async def test_initialize_recovers_running_stops_saved_and_removes_temporary_containers(self):
+        module = self.module
+        policy = module.Policy("test-project", 1, 256, 1, 5, 1, "local", {})
+        manager = module.Workspaces(policy, FakeDocker(), None, "provisioner", "image", None)
+        owner_key = module.account_key("account")
+        containers = {}
+        for session, running, revision in (("chat-running", True, manager.revision),
+                                           ("chat-extra", True, manager.revision),
+                                           ("temporary:chat", False, manager.revision),
+                                           ("chat-changed", False, "earlier"), ("", False, manager.revision)):
+            key = module.workspace_key(owner_key, session)
+            labels = policy.container_labels(key, owner_key, session, revision)
+            containers[key] = {"Id": session or "draft", "State": {"Running": running}, "Config": {"Labels": labels},
+                               "Names": ["/" + policy.asset_name(key)], "Labels": labels}
+        foreign = {**containers[module.workspace_key(owner_key, "chat-running")], "Id": "foreign",
+                   "Names": ["/someone-else"]}
+
+        async def call(method, path, *, params=None, **_):
+            if path == "/containers/json":
+                return [] if module.HELPER in params["filters"] else [*containers.values(), foreign]
+            if path == "/networks":
+                return []
+            return next(record for record in containers.values() if path == f"/containers/{record['Id']}/json")
+
+        manager.docker.call = call
+        manager.ensure_users_volume = AsyncMock()
+        manager.recover = AsyncMock(return_value="recovered")
+        manager.park = AsyncMock()
+        manager.remove = AsyncMock()
+        await manager.initialize()
+        self.assertEqual(manager.active, {module.workspace_key(owner_key, "chat-running"): "recovered"})
+        self.assertEqual(sorted(call.args[1] for call in manager.park.await_args_list), ["chat-extra", "draft"])
+        self.assertEqual(sorted(call.args[0] for call in manager.remove.await_args_list),
+                         ["chat-changed", "temporary:chat"])
+
+    async def test_deleted_chats_remove_only_their_containers(self):
         module = self.module
         policy = module.Policy("test-project", 1, 256, 4, 5, 1, "local", {})
-        owner_key = hashlib.sha256(b"account").hexdigest()
-        deleted_key = module.workspace_key(owner_key, "deleted")
-        deleted_volume = policy.chat_volume(deleted_key)
-        kept_volume = policy.chat_volume(module.workspace_key(owner_key, "kept"))
-        docker = AsyncMock()
-        listing = {"Volumes": [
-            {"Name": deleted_volume, "Labels": policy.chat_labels("deleted", owner_key)},
-            {"Name": kept_volume, "Labels": policy.chat_labels("kept", owner_key)},
-            {"Name": policy.asset_name(owner_key), "Labels": policy.labels(owner_key)},
-            {"Name": "unrelated", "Labels": policy.chat_labels("deleted", owner_key)},
-        ]}
-        docker.call.return_value = listing
+        owner_key = module.account_key("account")
+        keys = {session: module.workspace_key(owner_key, session) for session in ("deleted", "kept", "temporary:x", "")}
         with TemporaryDirectory() as folder:
             database = Path(folder) / "webui.db"
-            manager = module.Workspaces(policy, docker, None, "provisioner", "image", module.Chats(database))
-            manager.remove = AsyncMock()
-            manager.active[(deleted_key, "agent")] = module.Workspace("container", "network", "127.0.0.1", "key",
-                                                                         active=1)
+            manager = module.Workspaces(policy, None, None, "provisioner", "image", module.Chats(database))
+            manager.owned_containers = AsyncMock(return_value=[
+                (key, session, f"container-{session or 'draft'}") for session, key in keys.items()])
+            manager.discard = AsyncMock()
+            manager.active[keys["deleted"]] = module.Workspace("container-deleted", "network", "127.0.0.1", "key")
             with self.assertRaises(sqlite3.OperationalError):
                 await manager.reap_deleted_chats()
-            manager.remove.assert_not_awaited()
-            self.assertEqual(docker.call.await_count, 1)
+            manager.discard.assert_not_awaited()
             self.assertFalse(database.exists())
 
             with closing(sqlite3.connect(database)) as db, db:
                 db.execute("CREATE TABLE chat (id TEXT PRIMARY KEY, user_id TEXT, archived INTEGER)")
                 db.execute("INSERT INTO chat VALUES ('kept', 'account', 1)")
             await manager.reap_deleted_chats()
-            manager.remove.assert_awaited_once_with("container", "network")
-            docker.call.assert_awaited_with("DELETE", f"/volumes/{deleted_volume}", missing=True)
-            self.assertEqual(docker.call.await_count, 3)
-            self.assertNotIn(deleted_key, manager.active)
+            manager.discard.assert_awaited_once_with(keys["deleted"], "container-deleted")
+            self.assertNotIn(keys["deleted"], manager.active)
             with self.assertRaises(web.HTTPNotFound):
                 async with manager.lease("someone else", "kept"):
-                    self.fail("A different account reached the saved chat's workspace")
+                    self.fail("A different account reached the saved chat's container")
+
+    async def test_shutdown_stops_saved_chats_and_removes_temporary_ones(self):
+        module = self.module
+        policy = module.Policy("test-project", 1, 256, 4, 5, 1, "local", {})
+        manager = module.Workspaces(policy, None, None, "provisioner", "image", None)
+        manager.active = {"saved": module.Workspace("a", "a-net", "127.0.0.1", "k"),
+                          "temporary": module.Workspace("b", "b-net", "127.0.0.1", "k")}
+        manager.temporary = {"temporary": 0}
+        manager.park, manager.remove = AsyncMock(), AsyncMock()
+        await manager.close()
+        manager.park.assert_awaited_once_with("saved", "a")
+        manager.remove.assert_awaited_once_with("b", "temporary")
+        self.assertEqual(manager.temporary, {})
+
+    async def test_outbound_network_disables_traffic_between_chat_containers(self):
+        module = self.module
+        policy = module.Policy("test-project", 1, 256, 4, 5, 1, "local", {}, "outbound")
+        docker = FakeDocker()
+        docker.responses = {("GET", f"/networks/{policy.outbound_network}"): None}
+        manager = module.Workspaces(policy, docker, None, "provisioner", "image", None)
+        await manager.ensure_outbound_network()
+        _, _, body = docker.calls[-1]
+        self.assertEqual((body["Internal"], body["Options"], body["Labels"]),
+                         (False, {module.INTER_CONTAINER: "false"}, policy.outbound_labels))
+        docker.responses[("GET", f"/networks/{policy.outbound_network}")] = {
+            "Labels": policy.outbound_labels, "Driver": "bridge", "Internal": False, "Options": {}}
+        with self.assertRaisesRegex(RuntimeError, "isolation mismatch"):
+            await manager.ensure_outbound_network()
 
     async def test_workspace_bridge_requires_the_selected_isolation(self):
         module = self.module
@@ -454,199 +532,21 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(await isolated.connect("workspace", labels), network)
 
 
-    def test_plain_apt_commands_become_chat_package_operations(self):
-        parse = self.module.parse_apt_command
-        for command, expected in (
-            ("apt-get install -y curl", [("install", ["curl"])]),
-            ("sudo apt update && sudo apt install -y --no-install-recommends python3-numpy g++",
-             [("install", ["python3-numpy", "g++"])]),
-            ("DEBIAN_FRONTEND=noninteractive apt-get -yq install jq=1.7-1 libc6:amd64;",
-             [("install", ["jq=1.7-1", "libc6:amd64"])]),
-            ("apt-get purge curl; apt-get remove --auto-remove jq", [("remove", ["curl"]), ("remove", ["jq"])]),
-            ("apt-get install 'curl'", [("install", ["curl"])]),
-            ("apt-get update", []),
-            ("sudo -E apt-get autoremove -y", []),
-        ):
-            with self.subTest(command=command):
-                self.assertEqual(parse(command), expected)
-        for command in (
-            "", "ls", "apt-get install", "apt-get update curl", "apt-get upgrade", "apt-get install curl | tee log",
-            "apt-get install curl && ls", "apt-get install curl || true", "apt-get install $PACKAGE",
-            "apt-get install $(cat list)", "apt-get install ./local.deb", "apt-get install curl-",
-            "apt-get -o Debug::pkgProblemResolver=1 install curl", "apt-get install curl > log",
-            "&& apt-get install curl", "apt-get install curl &&", "apt-get install curl\napt-get install jq",
-            "apt-get install 'a;b'", "sudo -u root apt-get install curl",
-            "apt-get install " + " ".join(f"package{number}" for number in range(33)), None,
-        ):
-            with self.subTest(command=command):
-                self.assertIsNone(parse(command))
-
-    def test_chat_package_list_changes_only_its_own_packages(self):
-        module = self.module
-        plan = module.plan_packages
-        self.assertEqual(plan([], [("install", ["jq", "curl"])]), ["curl", "jq"])
-        self.assertEqual(plan(["curl", "jq"], [("install", ["jq=1.7-1"]), ("remove", ["curl:amd64"])]), ["jq=1.7-1"])
-        self.assertEqual(plan(["curl"], [("remove", ["curl"]), ("install", ["curl"])]), ["curl"])
-        with self.assertRaises(web.HTTPUnprocessableEntity) as refused:
-            plan(["curl"], [("remove", ["cmake"])])
-        self.assertIn("cmake was not installed for this chat", refused.exception.text)
-
-    async def test_package_changes_rebuild_the_chat_image_from_the_shared_image(self):
-        module = self.module
-        policy = module.Policy("test-project", 1, 256, 2, 5, 1, "local", {})
-        docker = AsyncMock()
-        docker.call.return_value = {"Labels": policy.chat_labels("chat", hashlib.sha256(b"account").hexdigest()),
-                                    "Driver": "local", "Options": {}}
-
-        class Chats:
-            async def owners(self, chats):
-                return {chat: "account" for chat in chats}
-
-        class Packages:
-            def __init__(self):
-                self.current, self.events = [], []
-
-            async def requested(self, key):
-                return self.current
-
-            @asynccontextmanager
-            async def install(self, key, image, packages):
-                self.events.append(("install", image, packages))
-                yield "installer"
-
-            async def publish(self, key, container, image, packages, *, saved):
-                self.events.append(("publish", container, image, packages, saved))
-                self.current = packages
-
-            async def remove(self, key):
-                self.events.append(("remove",))
-                self.current = []
-
-        packages = Packages()
-        manager = module.Workspaces(policy, docker, None, "provisioner", "shared-image", Chats(), packages=packages)
-        manager.remove = AsyncMock()
-        key = module.account_workspace_key("account", "chat")
-        for role in module.ROLES:
-            manager.active[(key, role)] = module.Workspace(role, role + "-net", "127.0.0.1", "credential")
-        manager.directories[key] = "/home/chat"
-
-        result = await manager.change_packages("account", "chat", [("install", ["jq", "curl"])])
-        self.assertEqual(result, {"packages": ["curl", "jq"], "changed": True, "untracked_reset": False})
-        self.assertEqual(packages.events, [("install", "shared-image", ["curl", "jq"]),
-                                           ("publish", "installer", "shared-image", ["curl", "jq"], True)])
-        self.assertEqual(manager.remove.await_args_list, [unittest.mock.call("user", "user-net"),
-                                                          unittest.mock.call("agent", "agent-net")])
-        self.assertEqual(manager.active, {})
-        self.assertEqual(manager.installing, set())
-
-        packages.events.clear()
-        self.assertEqual(await manager.change_packages("account", "chat", [("install", ["jq"])]),
-                         {"packages": ["curl", "jq"], "changed": False})
-        with self.assertRaises(web.HTTPUnprocessableEntity):
-            await manager.change_packages("account", "chat", [("remove", ["cmake"])])
-        self.assertEqual(packages.events, [])
-        await manager.change_packages("account", "chat", [("remove", ["jq"])])
-        self.assertEqual(packages.events[0], ("install", "shared-image", ["curl"]))
-        packages.events.clear()
-        await manager.change_packages("account", "chat", [("remove", ["curl"])])
-        self.assertEqual(packages.events, [("remove",)])
-
-        packages.current = None
-        result = await manager.change_packages("account", "chat", [("install", ["jq"])])
-        self.assertTrue(result["untracked_reset"])
-        for session in ("", "channel:room"):
-            with self.assertRaises(web.HTTPBadRequest):
-                await manager.change_packages("account", session, [("install", ["jq"])])
-        with self.assertRaises(web.HTTPNotFound):
-            await manager.change_packages("someone else", "chat", [("install", ["jq"])])
-
-    async def test_apt_commands_from_model_tools_change_chat_packages(self):
-        module = self.module
-
-        class Workspaces(module.Workspaces):
-            packages = type("Packages", (), {"source": {"Target": "/etc/apt/sources.list.d/loaf.list"}})()
-
-            def __init__(self):
-                self.directories = {}
-                self.calls = []
-                self.failure = None
-
-            async def change_packages(self, user, session, operations):
-                self.calls.append((user, session, operations))
-                if self.failure:
-                    raise self.failure
-                return {"packages": ["curl"], "changed": True, "untracked_reset": False}
-
-            @asynccontextmanager
-            async def lease(self, user, session="", role=module.USER_ROLE):
-                raise AssertionError("A package command reached a runner")
-                yield
-
-            async def sweep(self):
-                await asyncio.Future()
-
-            async def close(self):
-                pass
-
-        manager = Workspaces()
-        metadata = {"config": {"features": {}}, "schema": {"paths": {"/execute": {"post": {"description": "Run."}}}}}
-        headers = {"Authorization": "Bearer " + self.secret, "X-User-Id": "account", "X-Session-Id": "chat"}
-        async with TestClient(TestServer(module.application(manager, self.secret, metadata))) as client:
-            async with client.get("/openapi.json", headers=headers) as result:
-                paths = (await result.json())["paths"]
-            self.assertEqual({paths[path]["post"].get("operationId") for path in paths},
-                             {None, "install_chat_packages", "remove_chat_packages"})
-            self.assertIn("apt-get install|remove|purge", paths["/agent/execute"]["post"]["description"])
-
-            command = "sudo apt-get update && sudo apt-get install -y curl"
-            async with client.post("/agent/execute", headers=headers, json={"command": command}) as result:
-                reply = await result.json()
-            self.assertEqual((reply["command"], reply["status"], reply["exit_code"], reply["cwd"]),
-                             (command, "done", 0, "/home/chat"))
-            self.assertIn("Installed for this chat: curl.", reply["output"][0]["data"])
-            self.assertEqual(manager.calls, [("account", "chat", [("install", ["curl"])])])
-
-            manager.failure = web.HTTPUnprocessableEntity(text="E: Unable to locate package curl")
-            async with client.post("/agent/execute", headers=headers,
-                                   json={"command": "apt-get purge curl", "cwd": "/home/chat/project"}) as result:
-                reply = await result.json()
-            self.assertEqual((reply["exit_code"], reply["cwd"], reply["output"]),
-                             (100, "/home/chat/project", [{"type": "stderr",
-                                                           "data": "E: Unable to locate package curl\n"}]))
-            self.assertEqual(manager.calls[-1][2], [("remove", ["curl"])])
-
-            manager.failure = None
-            async with client.post("/agent/packages/remove", headers=headers, json={"packages": ["curl"]}) as result:
-                self.assertEqual(await result.json(), {"removed": ["curl"], "packages": ["curl"], "changed": True,
-                                                       "untracked_reset": False})
-            for body in ({"packages": ["curl-"]}, {"packages": []}, {"packages": "curl"}):
-                async with client.post("/agent/packages/install", headers=headers, json=body) as result:
-                    self.assertEqual(result.status, 400)
-            async with client.post("/packages/install", headers=headers, json={"packages": ["curl"]}) as result:
-                self.assertEqual(result.status, 404)
-
-    def test_apt_guard_explains_chat_packages_in_the_shell(self):
-        if os.geteuid() == 0:
-            self.skipTest("The guard passes root through to APT.")
-        with TemporaryDirectory() as folder:
-            guard = Path(folder) / "apt-get"
-            shutil.copy(DATA / "docker/terminal-server/apt-guard.sh", guard)
-            guard.chmod(0o755)
-            for arguments in (["install", "curl"], ["-y", "remove", "curl"], ["update"]):
-                with self.subTest(arguments=arguments):
-                    result = subprocess.run([str(guard), *arguments], capture_output=True, text=True)
-                    self.assertEqual(result.returncode, 100)
-                    self.assertIn("apt-get: packages cannot be changed from this shell", result.stderr)
-                    self.assertIn("apt-get install PACKAGE", result.stderr)
-            if Path("/usr/bin/apt-get").is_file():
-                self.assertEqual(subprocess.run([str(guard), "--version"], capture_output=True).returncode, 0)
-
-
 @unittest.skipUnless(os.environ.get("RUN_TERMINAL_SERVER_TESTS") == "1", "Set RUN_TERMINAL_SERVER_TESTS=1 for terminal-server Docker tests.")
 class TerminalServerDockerTests(unittest.TestCase):
     image = os.environ.get("LOAF_TEST_TERMINAL_IMAGE", "local/open-terminal:latest")
 
-    def test_chat_packages_use_the_local_mirror_and_survive_restart(self):
+    @staticmethod
+    def remove_terminal_assets(project):
+        """Remove the chat containers, networks and user volume that the provisioner keeps for later use."""
+        label = f"label={transfer.WORKSPACE_PROJECT_LABEL}={project}"
+        for kind, listing in (("container", ("ps", "-aq")), ("network", ("network", "ls", "-q")),
+                              ("volume", ("volume", "ls", "-q"))):
+            names = command(["docker", *listing, "--filter", label]).split()
+            if names:
+                command(["docker", kind, "rm", *(("--force",) if kind == "container" else ()), *names])
+
+    def test_chat_containers_run_apt_as_root_and_keep_chat_files(self):
         self.bridge_options()
         if not shutil.which("dpkg-deb"):
             self.skipTest("dpkg-deb is required to create the local APT fixture.")
@@ -656,6 +556,7 @@ class TerminalServerDockerTests(unittest.TestCase):
         webui = f"{project_name}-open-webui"
         command(["docker", "image", "tag", self.image, image])
         self.addCleanup(command, ["docker", "image", "rm", image])
+        self.addCleanup(self.remove_terminal_assets, project_name)
         with TemporaryDirectory() as temporary:
             project = Path(temporary)
             key = project / "terminal-server.key"
@@ -696,21 +597,18 @@ def request(path, body=None, *, chat='first', user='alice', status=200):
                   headers={'Authorization': 'Bearer ' + Path('/test.key').read_text(),
                            'X-User-Id': user, 'X-Session-Id': chat, 'Content-Type': 'application/json'})
     try:
-        with urlopen(req, timeout=90) as response:
+        with urlopen(req, timeout=120) as response:
             assert response.status == status, (path, response.status)
             return json.load(response)
     except HTTPError as error:
         assert error.code == status, (path, error.code, error.read().decode())
 
-def run(command, *, chat='first', agent=True, exit_code=0):
-    # Model tools use the agent prefix. Plain paths are the account's own requests.
-    result = request(('/agent' if agent else '') + '/execute?wait=15', {'command': command}, chat=chat)
+def run(command, *, chat='first', user='alice', exit_code=0):
+    result = request('/execute?wait=90', {'command': command}, chat=chat, user=user)
     assert result['exit_code'] == exit_code, result
     return result
 """ + script)
 
-            apps = f"label=loaf.terminal.apt-project={project_name}"
-            saved_chats = f"label=loaf.terminal.chat-project={project_name}"
             workspace = f"label={transfer.WORKSPACE_PROJECT_LABEL}={project_name}"
             start = ("up", "-d", "--no-build", "--pull", "never", "--wait", "--wait-timeout", "60", "terminal-server")
             try:
@@ -720,61 +618,37 @@ def run(command, *, chat='first', agent=True, exit_code=0):
                 invoke(*start)
                 check("""\
 paths = request('/openapi.json')['paths']
-assert paths['/agent/packages/install']['post']['operationId'] == 'install_chat_packages'
-assert paths['/agent/packages/remove']['post']['operationId'] == 'remove_chat_packages'
-assert '/agent/execute' in paths and '/execute' not in paths, sorted(paths)
-request('/files/cwd', {'path': '/home/chat'})
-run('echo personal > /home/user/shared.txt', agent=False)
-run('echo chat > kept.txt && test -f /home/user/shared.txt && ! touch /home/user/model.txt')
-run('test "$(id -u)" = 1000 && test "$HOME" = /home/chat && test ! -e /home/user/model.txt')
-request('/agent/packages/install', {'packages': ['loaf-chat-demo']}, chat='', status=400)
-request('/agent/packages/install', {'packages': ['loaf-chat-demo']}, user='bob', status=404)
-request('/agent/packages/install', {'packages': ['--allow-unauthenticated']}, status=400)
-result = run('sudo apt-get update && sudo apt-get install -y loaf-chat-demo')
-assert 'Installed for this chat: loaf-chat-demo.' in result['output'][0]['data'], result
-assert request('/files/cwd')['cwd'] == '/home/chat'
-run('test -f kept.txt && test "$(loaf-chat-demo)" = configured')
-run('test "$(loaf-chat-demo)" = configured && echo account > /home/user/account.txt', agent=False)
-request('/files/cwd', {'path': '/home/user'})
-run('test -f shared.txt && test "$(loaf-chat-demo)" = configured && ! touch model.txt')
-assert 'cmake was not installed for this chat' in run('apt-get remove cmake', exit_code=100)['output'][0]['data']
-request('/agent/packages/install', {'packages': ['loaf-unavailable-package']}, status=422)
+assert '/execute' in paths and not any(path.startswith('/agent/') for path in paths), sorted(paths)
+run('test "$(id -u)" = 0 && test "$PWD" = /home/chat && test "$HOME" = /home/user')
+run('test "$(ls -A /home | sort | xargs)" = "chat user"')
+run('echo personal > /home/user/shared.txt && echo chat > kept.txt')
+run('apt-get update; apt-get install -y loaf-chat-demo')
 run('test "$(loaf-chat-demo)" = configured')
-run('test -f /home/user/shared.txt && ! command -v loaf-chat-demo', chat='second')
-run('apt-get purge loaf-chat-demo', chat='second', exit_code=100)
-result = request('/agent/packages/install', {'packages': ['loaf-chat-demo']}, chat='temporary:first')
-assert result['packages'] == ['loaf-chat-demo'], result
+run('sudo apt-get install -y --reinstall loaf-chat-demo && sudo -n true')
+run('test -f /home/user/shared.txt && test ! -e /home/chat/kept.txt && ! command -v loaf-chat-demo', chat='second')
+run('test "$PWD" = /home/user && test ! -e /home/user/shared.txt', chat='', user='bob')
 run('printf temporary > /home/chat/note.txt', chat='temporary:first')
-run('test "$(loaf-chat-demo)" = configured && test -f /home/chat/note.txt', chat='temporary:first', agent=False)
-run('! command -v loaf-chat-demo', chat='temporary:second')
 """)
                 invoke("stop", "--timeout", "45", "terminal-server")
+                # Saved chats and drafts keep their stopped containers; temporary chats end with the server.
+                self.assertEqual(command(["docker", "ps", "-q", "--filter", workspace]).strip(), "")
+                self.assertEqual(len(command(["docker", "ps", "-aq", "--filter", workspace]).split()), 3)
                 invoke(*start)
-                check("run('test \"$(loaf-chat-demo)\" = configured')\n"
+                check("run('test \"$(loaf-chat-demo)\" = configured && test -f kept.txt')\n"
                       "run('! command -v loaf-chat-demo', chat='second')\n"
-                      "run('! command -v loaf-chat-demo && test ! -e /home/chat/note.txt', chat='temporary:first')\n"
-                      "run('apt-get purge loaf-chat-demo')\n"
-                      "run('! command -v loaf-chat-demo && test -f /home/chat/kept.txt')\n"
-                      "run('apt-get install loaf-chat-demo')\n")
+                      "run('test ! -e /home/chat/note.txt', chat='temporary:first')\n")
                 seed_database("DELETE FROM chat WHERE id = 'first';")
                 deadline = monotonic() + 20
-                while command(["docker", "image", "ls", "-q", "--filter", apps]).strip():
-                    self.assertLess(monotonic(), deadline, "Deleted chat's image was not removed")
+                while command(["docker", "ps", "-aq", "--filter", workspace,
+                               "--filter", "label=loaf.terminal.chat-id=first"]).strip():
+                    self.assertLess(monotonic(), deadline, "Deleted chat's container was not removed")
                     sleep(1)
+                check("run('test -f /home/user/shared.txt', chat='second')\n")
             except AssertionError:
                 print(invoke("logs", "--no-color", "terminal-server"))
                 raise
             finally:
                 invoke("down", "--volumes", "--timeout", "45")
-                for label in (workspace, saved_chats):
-                    volumes = command(["docker", "volume", "ls", "-q", "--filter", label]).split()
-                    if volumes:
-                        command(["docker", "volume", "rm", *volumes])
-                images = command(["docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}",
-                                  "--filter", apps]).split()
-                for tag in images:
-                    if tag.startswith("local/loaf-terminal-chat:loaf-tools-"):
-                        command(["docker", "image", "rm", tag])
 
     @staticmethod
     def create_apt_repository(project, repository):
@@ -810,6 +684,7 @@ run('! command -v loaf-chat-demo', chat='temporary:second')
         image = f"local/open-terminal:{project_name}"
         command(["docker", "image", "tag", self.image, image])
         self.addCleanup(command, ["docker", "image", "rm", image])
+        self.addCleanup(self.remove_terminal_assets, project_name)
         with TemporaryDirectory() as temporary:
             project = Path(temporary)
             key = project / "terminal-server.key"
@@ -848,8 +723,8 @@ with urlopen(request, timeout=45) as response:
                 mounts = {mount["Destination"]: mount for mount in details["Mounts"]}
                 self.assertEqual(mounts[apt_target]["Source"], str(source))
                 self.assertFalse(mounts[apt_target]["RW"])
-                self.assertTrue(details["HostConfig"]["ReadonlyRootfs"])
-                self.assertEqual(details["Config"]["User"], "1000:1000")
+                self.assertFalse(details["HostConfig"]["ReadonlyRootfs"])
+                self.assertEqual(details["Config"]["User"], "0:0")
                 self.assertEqual(command(["docker", "exec", runner, "/bin/cat", apt_target]), source.read_text())
                 return runner
 
@@ -862,38 +737,35 @@ with urlopen(request, timeout=45) as response:
                 replacement = source.with_name("replace.sources")
                 replacement.write_text(source.read_text().replace("live-edit.invalid", "second.invalid"))
                 replacement.replace(source)
+                # A changed source needs a new container; the one with the old mount is removed.
                 invoke(*start)
                 self.assertNotEqual(check_workspace(), first)
+                self.assertEqual(command(["docker", "ps", "-aq", "--filter", f"id={first}"]).strip(), "")
             finally:
                 invoke("down", "--volumes", "--timeout", "45")
-                volumes = command(["docker", "volume", "ls", "-q", "--filter",
-                                   f"label={transfer.WORKSPACE_PROJECT_LABEL}={project_name}"]).split()
-                if volumes:
-                    command(["docker", "volume", "rm", *volumes])
 
-    def test_terminal_backup_restores_image_home_and_key(self):
+    def test_terminal_backup_restores_image_user_volume_and_key(self):
         namespace = f"loaf-terminal-transfer-{uuid4().hex}"
         tags = transfer.image_names(namespace, include_terminal=True)
-        workspace = transfer.workspace_prefix(namespace) + "a" * 64
-        chat = {"id": "saved-chat", "owner": "a" * 64}
-        chat_volume = transfer.chat_volume(namespace, chat)
+        users = transfer.terminal_volume(namespace)
+        folder_name = "a" * 64
         webui = next(name for name, role in transfer.volume_names(namespace).items() if role == "webui")
-        volumes = (webui, workspace, chat_volume)
+        volumes = (webui, users)
         for resource, names in (("image", tags), ("volume", volumes)):
             self.addCleanup(subprocess.run, ["docker", resource, "rm", *names],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for tag in tags:
             command(["docker", "image", "tag", self.image, tag])
 
-        def volume_shell(volume, script):
+        def volume_shell(script):
             return command([
                 "docker", "run", "--rm", "--pull", "never", "--network", "none",
-                "--mount", f"type=volume,source={volume},target=/workspace,volume-nocopy",
+                "--mount", f"type=volume,source={users},target=/users,volume-nocopy",
                 "--entrypoint", "/bin/sh", tags[-1], "-c", script,
             ])
 
-        def labels(volume):
-            details, = json.loads(command(["docker", "volume", "inspect", volume]))
+        def labels():
+            details, = json.loads(command(["docker", "volume", "inspect", users]))
             return details["Labels"]
 
         with TemporaryDirectory() as folder:
@@ -902,35 +774,34 @@ with urlopen(request, timeout=45) as response:
             key = project / "source.key"
             key.write_bytes(secret)
             archive = project / "backup" / "fixture.tar.gz"
-            transfer.create_workspace_volumes(project, namespace, (workspace,), "local", {})
-            transfer.create_labeled_volume(project, chat_volume, transfer.chat_labels(namespace, chat), "local", {})
-            volume_shell(workspace, "printf 'persistent work' > /workspace/code.c && chown 1000:1000 /workspace/code.c")
-            volume_shell(chat_volume, "printf 'chat work' > /workspace/notes.md")
-            transfer.backup(project, archive, lambda: None, types=("images", "webui", "chats"), namespace=namespace,
+            transfer.create_labeled_volume(project, users, transfer.terminal_volume_labels(namespace), "local", {})
+            volume_shell(f"install -d -m 0700 /users/{folder_name} && printf 'persistent work' > /users/{folder_name}/code.c"
+                         f" && chown 1000:1000 /users/{folder_name}/code.c")
+            transfer.backup(project, archive, lambda: None, types=("images", "webui", "terminal"), namespace=namespace,
                             compression_level=0, terminal_key=key)
             command(["docker", "volume", "rm", *volumes])
             command(["docker", "image", "rm", tags[-1]])
             target = project / config.TERMINAL_SECRET
             restored = transfer.restore(project, transfer.open_archive(archive), namespace=namespace)
-            self.assertEqual(restored.types, ("images", "webui", "chats"))
+            self.assertEqual(restored.types, ("images", "webui", "terminal"))
             self.assertEqual(target.read_bytes(), secret)
             self.assertEqual(target.stat().st_mode & 0o777, 0o600)
-            self.assertEqual(volume_shell(workspace, "cat /workspace/code.c; stat -c ' %u:%g' /workspace/code.c").strip(),
-                             "persistent work 1000:1000")
-            self.assertEqual(volume_shell(chat_volume, "cat /workspace/notes.md"), "chat work")
-            self.assertEqual(labels(workspace), transfer.workspace_labels(namespace, workspace))
-            self.assertEqual(labels(chat_volume), transfer.chat_labels(namespace, chat))
+            self.assertEqual(volume_shell(f"cat /users/{folder_name}/code.c; stat -c ' %u:%g' /users/{folder_name}/code.c;"
+                                          f" stat -c ' %a' /users/{folder_name}").split(),
+                             ["persistent", "work", "1000:1000", "700"])
+            self.assertEqual(labels(), transfer.terminal_volume_labels(namespace))
 
-            # Chats alone bring the WebUI data they belong to.
-            chats_archive = archive.with_name("chats-only.tar.gz")
-            transfer.backup(project, chats_archive, lambda: None, types=("webui", "chats"), namespace=namespace,
+            # The terminal type alone brings the WebUI data that owns its accounts.
+            terminal_archive = archive.with_name("terminal-only.tar.gz")
+            transfer.backup(project, terminal_archive, lambda: None, types=("webui", "terminal"), namespace=namespace,
                             terminal_key=target)
             command(["docker", "volume", "rm", *volumes])
             target.unlink()
-            restored = transfer.restore(project, transfer.open_archive(chats_archive), ("chats",), namespace=namespace)
-            self.assertEqual(restored.types, ("webui", "chats"))
+            restored = transfer.restore(project, transfer.open_archive(terminal_archive), ("terminal",),
+                                        namespace=namespace)
+            self.assertEqual(restored.types, ("webui", "terminal"))
             self.assertEqual(target.read_bytes(), secret)
-            self.assertEqual(volume_shell(workspace, "cat /workspace/code.c"), "persistent work")
+            self.assertEqual(volume_shell(f"cat /users/{folder_name}/code.c"), "persistent work")
 
     def test_offline_and_connected_workspaces_survive_a_cold_restart(self):
         # Each profile uses its own Compose project, volumes and labels, so both run at once.
@@ -947,7 +818,7 @@ with urlopen(request, timeout=45) as response:
 
     def require_current_scripts(self):
         """This test runs the scripts baked into the image, so the image must match the checkout."""
-        for name in ("provisioner.py", "runner.py", "apt-guard.sh"):
+        for name in ("provisioner.py", "runner.py"):
             baked = subprocess.run([
                 "docker", "run", "--rm", "--pull", "never", "--network", "none", "--entrypoint", "cat",
                 self.image, f"/opt/loaf-terminal/{name}",
@@ -983,7 +854,7 @@ with urlopen(request, timeout=45) as response:
         control = f"{project}_terminal-control"
         # The terminal image uses these persisted labels for workspace ownership.
         label = f"label={transfer.WORKSPACE_PROJECT_LABEL}={project}"
-        chat_label = f"label=loaf.terminal.chat-project={project}"
+        self.addCleanup(self.remove_terminal_assets, project)
         with TemporaryDirectory() as temporary:
             folder = Path(temporary)
             profiles = (profile, "terminal")
@@ -1036,15 +907,15 @@ with urlopen(request, timeout=45) as response:
                 expected = [retained] if retained else []
                 deadline = monotonic() + 15
                 while True:
+                    # Draft containers have no chat label; deleted chats lose their container.
                     ids = command([
-                        "docker", "volume", "ls", "--filter", chat_label,
-                        "--format", '{{.Label "loaf.terminal.chat-id"}}',
+                        "docker", "ps", "-a", "--filter", label, "--format", '{{.Label "loaf.terminal.chat-id"}}',
                     ]).split()
                     if ids == expected or monotonic() >= deadline:
                         self.assertEqual(ids, expected)
                         break
                     sleep(0.25)
-                self.assertEqual(len(transfer.list_terminal_workspaces(folder, project)), 2)
+                self.assertTrue(transfer.terminal_volume_exists(folder, project))
                 runners = command(["docker", "ps", "-q", "--filter", label]).split()
                 self.assertEqual(len(runners), 3 if retained else 2)
                 workspace_networks = command(["docker", "network", "ls", "-q", "--filter", label]).split()
@@ -1085,19 +956,15 @@ with urlopen(request, timeout=45) as response:
                     services[webui]["networks"] = private_network
                 self.assertEqual(webui_networks(webui_container), {control})
                 invoke("down", "--timeout", "45")
-                self.assertEqual(command(["docker", "ps", "-aq", "--filter", label]).strip(), "")
+                # The drafts and the retained chat keep their stopped containers for the next start.
+                self.assertEqual(command(["docker", "ps", "-q", "--filter", label]).strip(), "")
+                self.assertEqual(len(command(["docker", "ps", "-aq", "--filter", label]).split()), 3)
                 networks.pop("connected", None)
                 path.write_text(json.dumps(fixture), encoding="utf-8")
                 self.assertEqual(webui_networks(start()), {control})
                 check("reopen", retained)
             finally:
                 invoke("down", "--volumes", "--timeout", "45")
-                volumes = [
-                    name for scope in (label, chat_label)
-                    for name in command(["docker", "volume", "ls", "-q", "--filter", scope]).split()
-                ]
-                if volumes:
-                    command(["docker", "volume", "rm", *volumes])
 
     def check_workspace_routes(self, runners, provisioner, control):
         inspected = json.loads(command(["docker", "inspect", *runners, provisioner]))

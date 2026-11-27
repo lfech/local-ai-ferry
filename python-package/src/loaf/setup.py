@@ -81,7 +81,7 @@ print(sys.prefix)
 """
 
 
-# A small local APT repository for trying chat packages offline.
+# A small local APT repository for trying apt in chat containers offline.
 TEST_REPOSITORY_DIR = Path("apt-test-repository")
 TEST_REPOSITORY_SOURCE = Path("config/apt-test-repository.list")
 TEST_REPOSITORY_LIST = "packages.txt"
@@ -110,7 +110,7 @@ if [ -z "$chosen" ]; then
     echo "The image's APT sources offer none of the candidate tools." >&2
     exit 1
 fi
-# Download what the shared terminal image lacks, as the chat package installer would install it.
+# Download what the terminal image lacks, as apt in a chat container would install it.
 mkdir -p /tmp/archives/partial
 apt-get -qq -o Dir::Cache::Archives=/tmp/archives/ install -y --download-only $chosen
 cp /tmp/archives/*.deb /repository/
@@ -824,7 +824,7 @@ def install(project: Path, *, with_docker_deps: bool = False) -> None:
 
 
 def create_test_repository(project: Path, image: str) -> list[str]:
-    """Download a few Debian command-line tools into a flat APT repository for chat package tests."""
+    """Download a few Debian command-line tools into a flat APT repository for apt in chat containers."""
     target = project / TEST_REPOSITORY_DIR
     if (target.exists() or target.is_symlink()) and not (
         target.is_dir() and not target.is_symlink() and (target / TEST_REPOSITORY_LIST).is_file()
@@ -836,7 +836,7 @@ def create_test_repository(project: Path, image: str) -> list[str]:
     with TemporaryDirectory(prefix=".loaf-repository-", dir=project) as folder:
         staging = Path(folder) / TEST_REPOSITORY_DIR.name
         staging.mkdir()
-        # The terminal image matches the Debian release and architecture of the chat package installer.
+        # The terminal image matches the Debian release and architecture of the chat containers.
         subprocess.run([
             "docker", "run", "--rm", "--pull", "never", "--user", "0:0", "--entrypoint", "/bin/sh",
             "--mount", f"type=bind,source={staging},target=/repository", image, "-c", TEST_REPOSITORY_SCRIPT,
@@ -852,7 +852,7 @@ def create_test_repository(project: Path, image: str) -> list[str]:
     print(f"Test APT repository in {target} with these tools:")
     for package in packages:
         print(f"  {package}")
-    print(f"Use it for chat packages with these settings in {project / 'config' / config.CONFIG_NAME}:\n"
+    print(f"Use it for apt in chat containers with these settings in {project / 'config' / config.CONFIG_NAME}:\n"
           f"  [terminal_server]\n  apt_source_file = {TEST_REPOSITORY_SOURCE.as_posix()}\n"
           f"  apt_repository_dir = {TEST_REPOSITORY_DIR.as_posix()}\n"
           f"Then run loaf offline or loaf online and ask the model to run: apt-get install {packages[0]}")

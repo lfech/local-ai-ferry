@@ -54,7 +54,7 @@ class CleanupTests(unittest.TestCase):
         return result, stdout.getvalue() + stderr.getvalue()
 
     def test_clean_removes_runtime_and_temporaries(self):
-        staged = self.put(self.project / "backup/.loaf-backup-dead/volumes.tar")
+        staged = self.put(self.project / "backup/.loaf-backup-dead/users.tar")
         bytecode = self.put(self.project / "python-package/src/loaf/__pycache__/cli.pyc")
         download = self.put(self.project / "install-cache/wheels/.loaf-wheels-dead/package.whl")
         self.put(self.runtime / ".build-interrupted/python.tar.gz")

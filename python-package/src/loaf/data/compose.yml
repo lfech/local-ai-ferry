@@ -155,6 +155,7 @@ services:
       LOAF_TERMINAL_COMMAND_SECONDS: ${LOAF_TERMINAL_COMMAND_SECONDS:-900}
       LOAF_TERMINAL_VOLUME_DRIVER: ${LOAF_TERMINAL_VOLUME_DRIVER:-local}
       LOAF_TERMINAL_VOLUME_OPTIONS: ${LOAF_TERMINAL_VOLUME_OPTIONS:-}
+      LOAF_TERMINAL_NETWORK: ${LOAF_TERMINAL_NETWORK:-isolated}
     secrets: [terminal-server-key]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

@@ -39,7 +39,7 @@ stays inside its context, which Compose always allows Buildx to read.
 
 | Command | Behavior |
 | --- | --- |
-| `loaf setup` / `loaf install` | Standalone setup copies missing configuration and links the packaged deployment. Source checkout setup prepares the Python wheel cache, virtualenv and NVIDIA Container Toolkit on Debian. Both create the terminal bearer key if needed. `setup tests` adds the pinned test packages to the wheel cache and the running virtualenv. `--test-local-repository` downloads a few command-line tools into a local APT repository for chat packages. [Installation](../installation.md) |
+| `loaf setup` / `loaf install` | Standalone setup copies missing configuration and links the packaged deployment. Source checkout setup prepares the Python wheel cache, virtualenv and NVIDIA Container Toolkit on Debian. Both create the terminal bearer key if needed. `setup tests` adds the pinned test packages to the wheel cache and the running virtualenv. `--test-local-repository` downloads a few command-line tools into a local APT repository for `apt` in chat containers. [Installation](../installation.md) |
 | `loaf package binary debian` | Build the selected targets from the current source files into `dist/`: `binary` is the standalone Linux amd64 executable `dist/loaf`, `debian` the Debian package `dist/loaf_<version>_all.deb`. [Local builds](../releases.md#build-and-check-locally) |
 | `loaf clean` | Clear the user runtime cache and project temporaries. `--full` also clears generated installation files. Git, backups, settings, credentials and Docker data are preserved. [Cleanup](../launcher.md#clean-generated-files) |
 | `loaf build` | Builds the downloader, Ollama serving and Open WebUI images. Includes the terminal image when enabled. |
@@ -47,7 +47,7 @@ stays inside its context, which Compose always allows Buildx to read.
 | `loaf download` | Stops serving services, starts the downloader in the `download` profile and pulls each selected model. |
 | `loaf online` | Switches to connected Ollama and WebUI with outbound access. |
 | `loaf offline` | Switches to Ollama on an internal network and WebUI with offline settings. |
-| `loaf backup` / `loaf restore` | Create or recover a backup folder with selectable archive types: source, config, installers, images, models, webui and chats. The aliases `project` and `volumes` group them. |
+| `loaf backup` / `loaf restore` | Create or recover a backup folder with selectable archive types: source, config, installers, images, models, webui and terminal. The aliases `project` and `volumes` group them. |
 | `loaf version` / `loaf docs` | Shows the release, installation and default deployment, or prints the bundled guides and manual page. |
 | `loaf status` | Checks deployment readiness and lists the project's containers. [Readiness checks](../launcher.md#check-readiness-with-status) |
 | `loaf stop` | Stops services and removes their Compose containers by default. Use `-n` or `--no-remove-containers` to keep stopped service containers and their logs. Images and volumes persist. [Shutdown options](../launcher.md#stop-and-remove-containers) |
@@ -148,62 +148,49 @@ key and routes file requests, model commands and terminal streams to the
 corresponding runner. [Terminal connection](../terminal-server.md#enable-and-connect)
 
 Compose mounts the Docker socket in the provisioner so it can create a
-container and internal bridge for each runner. Draft requests use the
-account's workspace. Each chat session has a separate workspace for that
-account. A workspace has up to two runners, started on first use. The user
-runner serves the account's interface requests: terminal, files, uploads and
-the working directory. The agent runner serves model tool calls and mounts
-the account's folder read-only. The provisioner publishes the model tools
-below `/agent/` in its tool schema, and Open WebUI calls a tool at its
-published path, so the path decides the runner. Commands started from the
-interface run in the user runner; the process views follow each command.
-The selected working directory applies to both runners. Runners start from
-the provisioner's image or the current chat's locally derived package image. They run as an unprivileged user and have a
-read-only root filesystem, a bounded temporary filesystem at
-`/tmp`, and CPU and memory limits. Each runner's API stays on its own bridge.
-Docker Engine 26 and 27 use `inhibit_ipv4` to keep an IPv4 address off the
-host bridge. Docker Engine 28 and newer use the `isolated` gateway mode.
+container and internal bridge for each chat. Draft requests use one container
+per account. The account's own requests and the model's tool calls reach the
+same container, and the provisioner publishes Open Terminal's tools at their
+own paths. Containers start from the provisioner's image. Commands run as root
+with only the capabilities that `apt`, `dpkg` and `sudo` need and with
+`no-new-privileges`, so `apt` works as usual. Each container has a writable
+root filesystem, a bounded temporary filesystem at `/tmp`, CPU and memory
+limits and an unpublished API on its own internal bridge. Docker Engine 26 and
+27 use `inhibit_ipv4` to keep an IPv4 address off the host bridge. Docker
+Engine 28 and newer use the `isolated` gateway mode. `[terminal_server]
+network` decides further access: `isolated` keeps containers on their bridge
+alone, and `outbound` also attaches them to a shared bridge with outbound
+access and inter-container traffic disabled.
 [Workspace isolation and limits](../terminal-server.md#workspace-policy)
 
 A configured `apt_source_file` replaces inherited sources during an image
 build. At startup, a Compose override mounts the source file and the
-launcher's bundled provisioner and runner scripts read-only. This enables
-per-chat package changes using an already loaded image. Each chat's packages
-form a list. The model changes it with the package tools or a plain `apt` or
-`apt-get` install, remove or purge command, which the provisioner handles
-instead of the runner. Only packages installed for the chat can be removed.
-For every change, the provisioner runs APT with the whole list in a disposable
-installer based on the shared image, with access to the configured mirror and
-without runner data volumes or credentials. An `apt_repository_dir` mounts a
-local repository read-only in a network-disabled installer. After APT
-succeeds, the provisioner publishes the chat-specific image and records the
-list in its labels. An empty list removes the image. The next workspace
-request starts runners from the chat's image. In the runners, the image's
-`apt` and `apt-get` refuse package changes and explain this route.
+launcher's bundled provisioner and runner scripts read-only. The provisioner
+mounts the source file in every chat container, and an `apt_repository_dir`
+read-only at `/run/loaf-apt/repository`. A container records the runtime
+mounts, the repository and the network setting it was created with; a change
+replaces it on the next start.
 [Package mirror](../terminal-server.md#package-mirror-for-image-builds) ·
-[Chat packages](../terminal-server.md#install-packages-for-a-chat)
+[Install packages in a chat](../terminal-server.md#install-packages-in-a-chat)
 
 | Folder | Storage and lifetime |
 | --- | --- |
-| `/home/user` | Persistent named volume per account. All of the account's workspaces mount it, writable in user runners and read-only in agent runners. |
-| `/home/chat` in a draft | Empty, read-only placeholder that the user can select as the working directory before sending the first message. An agent runner without a chat gets a temporary filesystem. |
-| `/home/chat` in a saved chat | Writable named volume provisioned on first terminal use. It survives runner replacement, service shutdown and chat archival. |
-| `/home/chat` in a temporary chat | Writable named volume shared by the chat's runners. It is removed after `idle_seconds` without a runner and at provisioner shutdown. |
+| `/home/user` | The account's folder in the deployment's single user volume, mounted as a volume subpath. A container sees no other account's folder. A short-lived container creates the folder on the account's first use. |
+| `/home/chat` in a chat | Part of the chat's container, together with installed packages. An idle container stops and gives up its bridge, and both survive until the chat is deleted. A temporary chat's container is removed after `idle_seconds` and at provisioner shutdown. |
+| `/home/chat` in a draft | Part of the account's draft container, not carried into the chat. |
 
-The file browser root is `/home`. The default working directory is
-`/home/chat` in a chat and `/home/user` in a draft. The agent runner's home
-is `/home/chat`. The provisioner supplies `user` and `chat` as direct entries
-in Open WebUI's **Working Directory** menu alongside the account's folder
-history. [Files and working directory](../terminal-server.md#use-the-terminal-from-a-model)
+The file browser root is `/home`. `HOME` is `/home/user`, so dotfiles persist
+with the account. The default working directory is `/home/chat` in a chat and
+`/home/user` in a draft. The provisioner supplies `user` and `chat` as direct
+entries in Open WebUI's **Working Directory** menu alongside the account's
+folder history. [Files and working directory](../terminal-server.md#use-the-terminal-from-a-model)
 
 The bundled deployment mounts the existing `open-webui` volume read-only in
 the provisioner. It checks saved chat ownership and existence in the WebUI
 SQLite database. After WebUI deletes a chat, the next successful cleanup pass
-removes its runners, networks, chat volume and package image. Saved chat
-images survive service shutdown.
-Temporary chat images are eligible for idle cleanup and are removed at
-provisioner shutdown. Idle cleanup and shutdown remove runners and their
-networks while preserving named volumes.
+removes its container and bridge. At shutdown, the provisioner stops the
+containers of saved chats and drafts and removes those of temporary chats.
+Releases before v1.0.0 migrate no terminal data from earlier layouts.
 [Workspace lifecycle](../terminal-server.md#workspace-policy)
 
 ## Backup and restore
@@ -214,8 +201,8 @@ standalone `loaf` launcher that can restore it, and `SHA256SUMS` with both
 files' SHA-256 hashes. The archive is a gzip-compressed tar. Its first member,
 `loaf.json`, records the archive format, the deployment version and one item
 per type with each member's path, size and SHA-256 hash. Each type adds one
-plain tar member; `chats` adds its volumes, its package images and the
-bearer key as separate members. Readers learn the types from `loaf.json`
+plain tar member; `terminal` adds its volume and the bearer key as separate
+members. Readers learn the types from `loaf.json`
 before any payload.
 
 | Type | Contents | Restore |
@@ -226,14 +213,14 @@ before any payload.
 | `images` | The three core Docker images and the matching shared Open Terminal image when available locally. | `docker image load`. |
 | `models` | A consistent snapshot of the Ollama blobs, manifests and saved Modelfiles. | Merged by `rsync`; `--delete` mirrors. |
 | `webui` | The Open WebUI volume. | Into a new or empty volume. |
-| `chats` | Each account's `/home/user` and each saved chat's `/home/chat` volume, the saved chats' package images and the terminal bearer key. | Volumes with their ownership labels, images and the key. Implies `webui`. |
+| `terminal` | The user volume with each account's `/home/user` folder and the terminal bearer key. Chat containers stay behind. | A new or empty user volume with its ownership labels, and the key. Implies `webui`. |
 
 The aliases are `project` for `config` and `installers`, and `volumes` for
-`models`, `webui` and, with the terminal server enabled, `chats`. Without
+`models`, `webui` and, with the terminal server enabled, `terminal`. Without
 type names, backup saves every available type: `source` only from a checkout
-and `chats` only with `[terminal_server] include_in_backup = true`. Restore
+and `terminal` only with `[terminal_server] include_in_backup = true`. Restore
 recovers everything in the archive. Backup stops all project services before
-capturing `webui` or `chats`, and only the downloader for `models`. Model
+capturing `webui` or `terminal`, and only the downloader for `models`. Model
 snapshots tolerate the selected deployment's serving backend. All Docker
 operations use disposable, network-disabled containers from the local
 downloader image.

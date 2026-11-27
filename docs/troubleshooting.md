@@ -158,21 +158,18 @@ To set the working directory for the model, use the **Working Directory**
 folder button next to the terminal selector below the chat input.
 [Terminal workspace folders](terminal-server.md#use-the-terminal-from-a-model)
 
-A model command that writes to `/home/user` fails with `Read-only file system`.
-Model commands can write only to `/home/chat` and `/tmp`. Select `chat` as the
-working directory, or copy the result into `/home/user` yourself.
-[Folder access](terminal-server.md#use-the-terminal-from-a-model)
-
 ## Packages in the terminal
 
-`apt-get: packages cannot be changed from this shell` comes from the
-terminal's own `apt` and `apt-get`. Ask the model to run the APT command
-on its own, without pipes or other commands, or to use its package tools.
-If the result reports that the server has no package source, set
-`[terminal_server] apt_source_file` and run `loaf offline` or `loaf online`.
-[Chat packages](terminal-server.md#install-packages-for-a-chat)
+Commands run as root, so `apt-get install` works in the chat's container.
+When `apt-get update` cannot reach any source, the container has no route to
+a mirror: with `[terminal_server] network = isolated`, set `apt_source_file`
+and `apt_repository_dir` for a repository on the Docker host. With
+`network = outbound`, check that the Docker host reaches the mirror. Then run
+`loaf offline` or `loaf online`. Packages installed in a chat stay in its
+container only; a new chat starts without them.
+[Install packages in a chat](terminal-server.md#install-packages-in-a-chat)
 
-When the installer reports that a repository `is not signed`, mark a local
+When APT reports that a repository `is not signed`, mark a local
 unsigned repository as trusted in the source file, for example
 `deb [trusted=yes] file:/run/loaf-apt/repository ./`, or reference its key
 with `signed-by=`. `Unable to locate package` means that the configured

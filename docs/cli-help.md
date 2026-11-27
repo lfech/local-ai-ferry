@@ -49,9 +49,9 @@ server key when it is missing. [Installation](installation.md)
 Uses `--config-dir PATH` and `--dry-run`.
 
 - `--with-docker-deps` caches Docker Engine, Compose and Buildx packages on Debian 12 or 13 and installs them as needed. [Docker packages](debian.md#install-docker-and-cache-its-packages)
-- `--archive PATH` selects a backup folder or archive when running standalone setup. Inside a backup folder, setup makes the folder the project, uses the backup without this flag and prints the restore command to run next. With `--with-docker-deps`, setup recovers the backup's `installers` first. Setup reuses the backup's terminal key from `chats` and copies the launcher into the project. [Debian restore](transfer.md#debian-restore)
+- `--archive PATH` selects a backup folder or archive when running standalone setup. Inside a backup folder, setup makes the folder the project, uses the backup without this flag and prints the restore command to run next. With `--with-docker-deps`, setup recovers the backup's `installers` first. Setup reuses the backup's terminal key from `terminal` and copies the launcher into the project. [Debian restore](transfer.md#debian-restore)
 - `--terminal-server-key` creates the configured key only, with owner-only permissions. It preserves an existing key and reuses a key from the selected backup.
-- `--test-local-repository` downloads three command-line tools, chosen at random from a fixed list, with the dependencies that the terminal image lacks into `apt-test-repository/`. It writes `config/apt-test-repository.list` and prints the tools and the settings that use them for chat packages. It needs the built terminal image and network access. [Chat packages](terminal-server.md#install-packages-for-a-chat)
+- `--test-local-repository` downloads three command-line tools, chosen at random from a fixed list, with the dependencies that the terminal image lacks into `apt-test-repository/`. It writes `config/apt-test-repository.list` and prints the tools and the settings that use them for `apt` in chat containers. It needs the built terminal image and network access. [Install packages in a chat](terminal-server.md#install-packages-in-a-chat)
 
 In the system deployment, setup creates the terminal server key, readable by
 root and the `docker` group. The Debian package's dependencies replace
@@ -154,15 +154,15 @@ Stop the selected deployment's services and remove their containers. Uses
 
 Create a dated backup folder containing the archive, its checksums and the
 standalone launcher. Name the types `source`, `config`, `installers`,
-`images`, `models`, `webui` and `chats`, or the aliases `project` and
+`images`, `models`, `webui` and `terminal`, or the aliases `project` and
 `volumes`, or omit them to save every available type. `source` is available
-in a source checkout; `chats` adds `webui`. Uses `--config-dir PATH`,
+in a source checkout; `terminal` adds `webui`. Uses `--config-dir PATH`,
 `--version VERSION`, `--dry-run`, and `--backup-dir PATH`. Use `-a` or
 `--attach` when creating a backup. [Archive types](transfer.md#select-archive-types) ·
 [Backup contents](transfer.md#archive-contents)
 
 - `--verify` checks the whole archive, lists its types and reports any image platforms without Docker. `--archive PATH` selects the backup to verify.
-- `--no-terminal-server` skips the Open Terminal image. Backup includes the matching local image by default when it exists. `chats` follows `[terminal_server] include_in_backup` when no types are named.
+- `--no-terminal-server` skips the Open Terminal image. Backup includes the matching local image by default when it exists. `terminal` follows `[terminal_server] include_in_backup` when no types are named.
 - `--export`, `--no-export` enable or disable refreshing selected Modelfiles from cached models before saving `models`. The default comes from `[transfer] export_models`.
 - `--models-file PATH`, `--wait-timeout SECONDS` apply when refreshing Modelfiles.
 
@@ -170,7 +170,7 @@ in a source checkout; `chats` adds `webui`. Uses `--config-dir PATH`,
 
 Restore types from a verified backup. Name them as for `backup`, or omit them
 to restore everything in the archive. `models` merge into the Ollama store.
-`webui` and `chats` require new or empty volumes; `chats` adds `webui`.
+`webui` and `terminal` require new or empty volumes; `terminal` adds `webui`.
 `source` replaces existing files with the archived ones and keeps the
 others. Run in a backup folder, restore makes it the project and moves the
 backup to `backup/`. Restore ends with the command to run next. Uses `--config-dir PATH`,

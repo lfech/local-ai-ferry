@@ -466,16 +466,16 @@ COMMAND_HELP = {
         "Save the deployment in a portable backup folder.",
         (*TRANSFER_OPTIONS, "--verify", "--no-terminal-server", "--export", "--models-file", "--wait-timeout",
          "--attach"),
-        "Types are source, config, installers, images, models, webui and chats.\n"
-        "project means config and installers; volumes means models, webui and chats.\n"
-        "chats adds webui. Omit types to save all available ones. Use --archive with --verify.",
+        "Types are source, config, installers, images, models, webui and terminal.\n"
+        "project means config and installers; volumes means models, webui and terminal.\n"
+        "terminal adds webui. Omit types to save all available ones. Use --archive with --verify.",
     ),
     "restore": CommandHelp(
         "Restore selected types from a backup.",
         (*TRANSFER_OPTIONS, "--delete", "--import", "--cpu", "--wait-timeout", "--attach"),
         "Types are those of backup. Omit them to restore everything in the archive.\n"
         "models merge into the model store; add --delete to mirror them. webui and\n"
-        "chats need new or empty volumes. source replaces the archived files in the project.\n"
+        "terminal need new or empty volumes. source replaces the archived files in the project.\n"
         + ADOPT_NOTE.rstrip("\n"),
     ),
     "integration": CommandHelp("Print a host integration."),
@@ -920,9 +920,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         f"or restore only {', '.join(transfer.PORTABLE_TYPES)} into another deployment.")
         selected = ()
         if args.mode == "backup" and not args.verify:
-            selected = (transfer.expand_types(components, chats_available=settings.terminal_server_enabled)
+            selected = (transfer.expand_types(components, terminal_available=settings.terminal_server_enabled)
                         if components else
-                        transfer.default_backup_types(project_dir, chats=settings.terminal_server_include_in_backup))
+                        transfer.default_backup_types(project_dir, terminal=settings.terminal_server_include_in_backup))
         elif args.mode == "restore":
             selected = (transfer.expand_types(components) if components else
                         tuple(kind for kind in transfer.TYPES if archive is None or kind in archive.items))
