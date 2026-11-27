@@ -320,7 +320,9 @@ bearer key in plaintext and is created with owner-only permissions.
 version so the workspace names and WebUI account IDs match. The destination's `volume_driver` and `volume_options` determine
 how workspace volumes are created. Restore writes the key to `secret_file`
 with owner-only permissions, reuses a matching key, and refuses to replace a
-different key or overwrite populated volumes. Setup from the copied backup
+different key or overwrite populated volumes. In the system deployment, the
+key stays at `/etc/loaf/terminal-server.key`, readable by root and the
+`docker` group, which runs Compose. Setup from the copied backup
 uses its saved key when creating the local file.
 
 For archives without the terminal image, save and load it separately before

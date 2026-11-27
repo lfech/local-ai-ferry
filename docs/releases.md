@@ -141,14 +141,26 @@ large enough for the executable. [Gitea Actions setup](https://docs.gitea.com/us
 
 ## Build and check locally
 
-On a connected Linux amd64 machine, run `loaf binary` from the source
-directory to build or update the ignored `dist/loaf` and `dist/LICENSE.txt`
-files from your working files. From a fresh checkout, run
-`PYTHONPATH=python-package/src python3 -m loaf binary`.
+`loaf package` builds release files from your working files into the ignored
+`dist/` directory. Name one or both targets. From a fresh checkout, run
+`PYTHONPATH=python-package/src python3 -m loaf package binary debian`.
+
+```bash
+loaf package binary debian
+```
+
+`binary` builds or updates `dist/loaf` and `dist/LICENSE.txt` on a connected
+Linux amd64 machine. It fetches the pinned standalone Python runtime.
 Source checkout backups run this build automatically.
 
-The build uses compatible build wheels, including setuptools, from
-`install-cache/wheels/` when available. It fetches the build requirements
+`debian` builds `dist/loaf_<version>_all.deb` with
+[`scripts/build-deb.sh`](../scripts/build-deb.sh). It needs `dpkg-deb`, so
+run it on Debian or Ubuntu. It builds the launcher wheel into
+`install-cache/wheels/` like `loaf setup`, or reuses the cached wheel when the
+source files are unchanged.
+
+Both targets use compatible build wheels, including setuptools, from
+`install-cache/wheels/` when available. They fetch the build requirements
 when the cache cannot satisfy them. The terminal shows each build step
 and prints pip's output if a step fails.
 
@@ -163,8 +175,8 @@ bash scripts/build-release.sh v0.1.0 dist/release
 ```
 
 The release build also creates the Debian package from the wheel with
-[`scripts/build-deb.sh`](../scripts/build-deb.sh). It runs `lintian` when
-available. Set `LOAF_DEB_MAINTAINER` to the name and address for the
+[`scripts/build-deb.sh`](../scripts/build-deb.sh), as `loaf package debian`
+does. It runs `lintian` when available. Set `LOAF_DEB_MAINTAINER` to the name and address for the
 package's `Maintainer` field. The release workflows install the package in
 the disconnected handoff destination. [Debian package](installation.md#debian-package)
 

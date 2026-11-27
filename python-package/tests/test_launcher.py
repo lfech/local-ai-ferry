@@ -373,25 +373,76 @@ class CliTests(unittest.TestCase):
     def invoke(self, *arguments):
         return cli.main(["--project-dir", str(self.project), *arguments])
 
-    def test_binary_previews_and_builds_the_selected_source_directory(self):
+    def make_source_directory(self):
         (self.project / "compose.yml").unlink()
-        script = self.project / "scripts/build-release.sh"
-        script.parent.mkdir()
-        script.touch()
+        (self.project / "scripts").mkdir()
+        for script in cli.PACKAGE_SCRIPTS.values():
+            (self.project / script).touch()
         package = self.project / "python-package"
         package.mkdir()
         (package / "pyproject.toml").touch()
+
+    def test_package_binary_previews_and_builds_the_selected_source_directory(self):
+        self.make_source_directory()
+        script = self.project / "scripts/build-release.sh"
         with patch("loaf.cli.subprocess.run") as run, redirect_stdout(io.StringIO()) as output:
-            self.assertEqual(self.invoke("binary", "--dry-run"), 0)
+            self.assertEqual(self.invoke("package", "binary", "--dry-run"), 0)
             run.assert_not_called()
             self.assertIn(str(self.project / "dist/loaf"), output.getvalue())
             self.assertFalse((self.project / "dist").exists())
 
             run.return_value.returncode = 0
-            self.assertEqual(self.invoke("binary"), 0)
+            self.assertEqual(self.invoke("package", "binary"), 0)
         self.assertEqual(run.call_args.args[0], ["bash", str(script), "--binary-only"])
         self.assertEqual(run.call_args.kwargs["cwd"], self.project)
         self.assertEqual(run.call_args.kwargs["env"]["LOAF_BUILD_PYTHON"], sys.executable)
+
+    def test_package_debian_builds_the_package_from_the_cached_launcher_wheel(self):
+        self.make_source_directory()
+        script = self.project / "scripts/build-deb.sh"
+        wheel = self.project / "install-cache/wheels/local_ai_ferry-1.0.0-py3-none-any.whl"
+        with (
+            patch("loaf.cli.subprocess.run") as run, patch("loaf.cli.setup.launcher_wheel", return_value=wheel) as build,
+            patch("loaf.cli.shutil.which", return_value="/usr/bin/dpkg-deb"), redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(self.invoke("package", "debian", "--dry-run"), 0)
+            run.assert_not_called()
+            build.assert_not_called()
+            self.assertIn(f"Debian package in {self.project / 'dist'}", output.getvalue())
+
+            run.return_value.returncode = 0
+            self.assertEqual(self.invoke("package", "debian"), 0)
+        build.assert_called_once_with(self.project)
+        self.assertEqual(run.call_args.args[0], ["bash", str(script), str(wheel), str(self.project / "dist")])
+        self.assertEqual(run.call_args.kwargs["cwd"], self.project)
+        self.assertEqual(run.call_args.kwargs["env"]["LOAF_BUILD_PYTHON"], sys.executable)
+
+    def test_package_debian_requires_dpkg_deb_before_building_wheels(self):
+        self.make_source_directory()
+        with (
+            patch("loaf.cli.subprocess.run") as run, patch("loaf.cli.setup.launcher_wheel") as build,
+            patch("loaf.cli.shutil.which", return_value=None), redirect_stderr(io.StringIO()) as errors,
+        ):
+            self.assertEqual(self.invoke("package", "debian"), 1)
+        build.assert_not_called()
+        run.assert_not_called()
+        self.assertIn("requires dpkg-deb", errors.getvalue())
+
+    def test_package_runs_targets_in_order_and_stops_at_the_first_failure(self):
+        self.make_source_directory()
+        with (
+            patch("loaf.cli.subprocess.run") as run, patch("loaf.cli.setup.launcher_wheel") as build,
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(self.invoke("package", "debian", "binary", "--dry-run"), 0)
+            lines = output.getvalue().splitlines()
+            self.assertIn("Debian package", lines[0])
+            self.assertIn("standalone executable", lines[1])
+
+            run.return_value.returncode = 3
+            self.assertEqual(self.invoke("package", "binary", "debian"), 3)
+        run.assert_called_once()
+        build.assert_not_called()
 
     def test_live_command_trace_requires_verbose(self):
         for verbose in ((), ('-v',)):
@@ -531,6 +582,12 @@ class CliTests(unittest.TestCase):
             (("offline", "extra"), "Unexpected arguments for offline"),
             (("offline", "systemd"), "Use the integration name with loaf integration"),
             (("integration",), "integration requires a name"),
+            (("package",), "package requires a target: binary, debian or both"),
+            (("package", "images"), "invalid package target"),
+            (("package", "binary", "binary"), "Specify each package target once"),
+            (("package", "debian", "--version", "v2"), "Unexpected option for package"),
+            (("package", "binary", "--attach"), "--attach is available for Compose"),
+            (("package", "debian"), "package requires the loaf source directory"),
             (("backup", "logs"), "Unknown archive type logs"),
             (("backup", "images", "images"), "Specify each archive type once"),
             (("offline", "-n"), "only supported by stop"),

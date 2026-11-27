@@ -35,10 +35,11 @@ SERVICES = {
 PROFILES = tuple(SERVICES)
 MODES = ("build", "upgrade", "download", "online", "offline", "status", "stop")
 TRANSFER_MODES = ("backup", "restore")
-# A backup folder is transfer media. Run from inside one, setup and restore use this project instead.
-DEFAULT_PROJECT_DIR = Path("~/.local-ai-ferry")
 INSTALL_MODES = ("setup", "install")
 LINK_MODE = "link-docker-project"
+# Package targets and the source checkout scripts that build them into dist/.
+DIST_DIR = Path("dist")
+PACKAGE_SCRIPTS = {"binary": Path("scripts/build-release.sh"), "debian": Path("scripts/build-deb.sh")}
 # Tags may be quantization names or complete GGUF filenames. This conservative
 # grammar checks syntax locally; repository/tag availability is a separate check.
 MODEL_PATTERN = re.compile(
@@ -434,14 +435,16 @@ START_OPTIONS = (*COMPOSE_OPTIONS, "--wait-timeout")
 TRANSFER_OPTIONS = (*DEPLOYMENT_OPTIONS, "--backup-dir", "--archive")
 SETUP_OPTIONS = ("--config-dir", "--dry-run", "--archive", "--with-docker-deps", "--terminal-server-key",
                  "--test-local-repository")
-SETUP_NOTES = (
-    "Run inside a copied backup folder to prepare ~/.local-ai-ferry from it.\n"
-    "Run 'setup tests' with the checkout's virtualenv to cache and install the test packages."
-)
+ADOPT_NOTE = "Run inside a copied backup folder to make it the project. The backup moves to backup/.\n"
+SETUP_NOTES = ADOPT_NOTE + "Run 'setup tests' with the checkout's virtualenv to cache and install the test packages."
 COMMAND_HELP = {
     "setup": CommandHelp("Prepare a deployment or install loaf from source.", SETUP_OPTIONS, SETUP_NOTES),
     "install": CommandHelp("Alias for setup.", SETUP_OPTIONS, SETUP_NOTES),
-    "binary": CommandHelp("Build the standalone executable at dist/loaf.", ("--dry-run",)),
+    "package": CommandHelp(
+        "Build the standalone executable or Debian package into dist/.", ("--dry-run",),
+        "Targets are binary (dist/loaf) and debian (dist/loaf_VERSION_all.deb).\n"
+        "Run from the loaf source directory or select it with --project-dir.",
+    ),
     "clean": CommandHelp("Remove generated temporary files and the runtime cache.", ("--dry-run", "--full")),
     "link-docker-project": CommandHelp("Link the packaged Docker project for direct Compose use.", ("--dry-run",)),
     "version": CommandHelp("Show the loaf release, installation and default deployment."),
@@ -472,7 +475,8 @@ COMMAND_HELP = {
         (*TRANSFER_OPTIONS, "--delete", "--import", "--cpu", "--wait-timeout", "--attach"),
         "Types are those of backup. Omit them to restore everything in the archive.\n"
         "models merge into the model store; add --delete to mirror them. webui and\n"
-        "chats need new or empty volumes. source needs a project without its files.",
+        "chats need new or empty volumes. source replaces the archived files in the project.\n"
+        + ADOPT_NOTE.rstrip("\n"),
     ),
     "integration": CommandHelp("Print a host integration."),
     "test": CommandHelp(
@@ -495,7 +499,7 @@ def add_options(parser, selected: tuple[str, ...] | None = None) -> None:
 
     add("-h", "--help", action="store_true", help="Show help and exit.")
     add("--project-dir", type=Path, metavar="PATH",
-        help="Use PATH as the project (default: current directory; inside a backup folder, ~/.local-ai-ferry).")
+        help="Use PATH as the project (default: current directory).")
     add("--system", action="store_true", help="Use the system deployment: settings in /etc/loaf, data in /var/lib/loaf.")
     add("-v", "--verbose", action="store_true", help="Show external commands or individual test names.")
     add("--config-dir", type=Path, metavar="PATH", help="Use PATH for settings (default: project config/).")
@@ -551,6 +555,8 @@ def show_help(command: str | None, integration: str | None) -> None:
             usage = "%(prog)s [OPTIONS] [TYPE ...]"
         elif command in INSTALL_MODES:
             usage = "%(prog)s [OPTIONS] [tests]"
+        elif command == "package":
+            usage = "%(prog)s [OPTIONS] TARGET ..."
         elif command == "docs":
             usage = "%(prog)s [NAME]"
     parser = argparse.ArgumentParser(
@@ -581,8 +587,53 @@ def project_command(project: Path, config_dir: Path | None, version: str | None,
     return command
 
 
-def binary_builder(project: Path) -> Path | None:
-    script = project / "scripts/build-release.sh"
+# --- Follow-up hints for the backup workflow ---
+def own_launcher(project: Path) -> bool:
+    """Whether the project is the current directory and holds its own standalone launcher."""
+    return project == Path.cwd().resolve() and transfer.standalone_executable(project / transfer.LAUNCHER)
+
+
+def next_command(project: Path, config_dir: Path | None, version: str | None, *arguments: str,
+                 system: bool = False) -> str:
+    """A copyable follow-up command; inside a project with its own launcher, the short ./loaf form."""
+    command = project_command(project, config_dir, version, system=system)
+    if not system and own_launcher(project):
+        command[:command.index("--project-dir") + 2] = ["./loaf"]
+    return display_command([*command, *arguments])
+
+
+def docs_hint(project: Path) -> str:
+    # Without options, the command ends in --project-dir PATH, which docs does not take.
+    loaf = ["./loaf"] if own_launcher(project) else project_command(project, None, None)[:-2]
+    return f"Read the guides with {display_command([*loaf, 'docs'])}, for example {display_command([*loaf, 'docs', 'transfer'])}."
+
+
+def system_restore_hint(backup: Path) -> str:
+    command = project_command(assets.SYSTEM_PROJECT_DIR, None, None, system=True)
+    return ("The loaf Debian package is installed. To restore into its system deployment instead, run:\n"
+            f"  sudo {display_command([*command, 'restore', '--archive', str(backup)])}")
+
+
+def backup_folder_hints(folder: Path) -> str:
+    """The typical next steps for a directory that holds a backup and no project."""
+    loaf = display_command([str(folder / transfer.LAUNCHER)])
+    lines = [
+        f"{folder} is a backup folder. The typical next steps in it are:",
+        "  ./loaf setup      make the folder the project; the backup moves to backup/",
+        "  ./loaf restore    restore everything in the backup",
+        "  ./loaf offline    start Ollama and Open WebUI offline",
+        "To keep the backup unchanged, run its loaf from a new project directory instead:",
+        f"  mkdir -p ~/loaf && cd ~/loaf && {loaf} setup && {loaf} restore",
+    ]
+    if assets.system_deployment_installed():
+        lines.append(system_restore_hint(folder))
+    lines.append("Read the guides with ./loaf docs, for example ./loaf docs transfer.")
+    return "\n".join(lines)
+
+
+def package_script(project: Path, target: str) -> Path | None:
+    """Return the source checkout's build script for a package target, or None outside a checkout."""
+    script = project / PACKAGE_SCRIPTS[target]
     package = project / setup.PYTHON_PACKAGE_DIR
     return script if script.is_file() and (package / "pyproject.toml").is_file() else None
 
@@ -618,12 +669,25 @@ def warn_shared_deployment(layers: Sequence[Path], version: str, config_dir: Pat
         )
 
 
-def build_executable(project: Path, script: Path, *, verbose: bool) -> int:
-    command = ["bash", str(script), "--binary-only"]
+def run_build_script(project: Path, command: list[str], *, verbose: bool) -> int:
     if verbose:
         print("+ " + display_command(command), flush=True)
     env = {**os.environ, "LOAF_BUILD_PYTHON": sys.executable}
     return subprocess.run(command, cwd=project, env=env, check=False).returncode
+
+
+def build_executable(project: Path, script: Path, *, verbose: bool) -> int:
+    return run_build_script(project, ["bash", str(script), "--binary-only"], verbose=verbose)
+
+
+def build_debian_package(project: Path, script: Path, *, verbose: bool) -> int:
+    if shutil.which("dpkg-deb") is None:
+        raise setup.SetupError("package debian requires dpkg-deb. Run it on Debian or Ubuntu.")
+    wheel = setup.launcher_wheel(project)
+    return run_build_script(project, ["bash", str(script), str(wheel), str(project / DIST_DIR)], verbose=verbose)
+
+
+PACKAGE_BUILDERS = {"binary": build_executable, "debian": build_debian_package}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -633,6 +697,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     add_options(parser)
     args = parser.parse_intermixed_args(argv)
     integration = None
+    targets = ()
     components = tuple(args.arguments) if args.mode in TRANSFER_MODES and args.arguments else None
     setup_tests = args.mode in INSTALL_MODES and args.arguments == ["tests"]
     docs_name = args.arguments[0] if args.mode == "docs" and len(args.arguments) == 1 else None
@@ -640,6 +705,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if len(args.arguments) != 1 or args.arguments[0] not in INTEGRATION_HELP:
             parser.error("invalid choice for integration. Use systemd, continue or tether.")
         integration = args.arguments[0]
+    elif args.mode == "package" and args.arguments:
+        targets = tuple(args.arguments)
+        if not set(targets) <= set(PACKAGE_SCRIPTS):
+            parser.error("invalid package target. Use binary, debian or both.")
+        if len(set(targets)) != len(targets):
+            parser.error("Specify each package target once.")
     elif components is None and args.arguments and not setup_tests and docs_name is None:
         if args.arguments[0] in INTEGRATION_HELP:
             parser.error("Use the integration name with loaf integration.")
@@ -649,9 +720,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.help:
         show_help(args.mode, integration)
     if args.mode is None:
+        folder = (args.project_dir or Path.cwd()).resolve()
+        if not args.system and transfer.is_bundle(folder):
+            print(f"loaf: error: A command is required.\n{backup_folder_hints(folder)}", file=sys.stderr)
+            return 2
         parser.error("A command is required. See 'loaf --help'.")
     if args.mode == "integration" and integration is None:
         parser.error("integration requires a name: systemd, continue or tether.")
+    if args.mode == "package" and not targets:
+        parser.error("package requires a target: binary, debian or both.")
     continue_integration = integration == "continue"
     named = ()
     if components:
@@ -732,6 +809,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     ):
         parser.error("The system deployment uses the Debian package's dependencies. Omit tests, "
                      "--test-local-repository, --with-docker-deps and --archive, or select a project with --project-dir.")
+    adopt_backup = False
     if system_mode:
         project_dir = assets.SYSTEM_PROJECT_DIR
         if not project_dir.is_dir():
@@ -744,15 +822,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                   file=sys.stderr, flush=True)
     else:
         project_dir = (args.project_dir or Path.cwd()).resolve()
-        if args.project_dir is None and transfer.is_bundle(project_dir):
-            project_dir = DEFAULT_PROJECT_DIR.expanduser()
-            print(f"Using the project {project_dir}. The backup folder stays unchanged. "
-                  "Select another project with --project-dir.", file=sys.stderr, flush=True)
-        elif transfer.is_bundle(project_dir) and not args.verify:
-            parser.error(f"{project_dir} is a backup folder, which loaf leaves unchanged. Select another --project-dir.")
+        # Setup and restore make a backup folder they run in the project; other commands need a project.
+        adopt_backup = transfer.is_bundle(project_dir) and not args.verify
+        if adopt_backup and args.mode not in (*INSTALL_MODES, "restore"):
+            print(f"loaf: error: {args.mode} needs a project.\n{backup_folder_hints(project_dir)}", file=sys.stderr)
+            return 2
         if args.mode in (*INSTALL_MODES, "restore") and not args.dry_run:
             project_dir.mkdir(parents=True, exist_ok=True)
-    if args.mode in (LINK_MODE, "binary", "clean") or setup_tests:
+    if args.mode in (LINK_MODE, "package", "clean") or setup_tests:
         if unexpected:
             parser.error(f"Unexpected option for {args.mode}. See 'loaf {args.mode} --help'.")
         try:
@@ -770,14 +847,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.mode == LINK_MODE:
                 assets.link_docker_project(project_dir, dry_run=args.dry_run)
                 return 0
-            script = binary_builder(project_dir)
-            if script is None:
-                parser.error("binary requires the loaf source directory. Select it with --project-dir.")
+            scripts = {target: package_script(project_dir, target) for target in targets}
+            if None in scripts.values():
+                parser.error("package requires the loaf source directory. Select it with --project-dir.")
             if args.dry_run:
-                print(f"Build the standalone executable at {project_dir / 'dist/loaf'}.")
+                for target in targets:
+                    print(f"Build the standalone executable at {project_dir / DIST_DIR / 'loaf'}."
+                          if target == "binary" else f"Build the Debian package in {project_dir / DIST_DIR}.")
                 return 0
             with project_lock(project_dir / PROJECT_LOCK):
-                return build_executable(project_dir, script, verbose=args.verbose)
+                for target in targets:
+                    result = PACKAGE_BUILDERS[target](project_dir, scripts[target], verbose=args.verbose)
+                    if result:
+                        return result
+            return 0
         except (OSError, config.ConfigError, setup.SetupError, AlreadyRunningError, subprocess.CalledProcessError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
@@ -814,12 +897,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             # An explicit archive, else the backup folder this runs in or from, else the newest backup.
             selection = args.archive.resolve() if args.archive is not None else None
             if selection is None and args.backup_dir is None:
-                selection = transfer.find_bundle(Path.cwd(), None)
+                selection = project_dir if adopt_backup else transfer.find_bundle(Path.cwd(), None)
             if selection is None and (args.mode == "restore" or args.verify):
                 backup_dir = (args.backup_dir or project_dir / settings.backup_dir).resolve()
                 selection = transfer.latest_backup(backup_dir, namespace=namespace)
                 if selection is None and not args.dry_run:
-                    raise transfer.TransferError(f"No backup found in {backup_dir}. Use --backup-dir or --archive.")
+                    others = sorted(path for path in backup_dir.iterdir() if transfer.is_bundle(path)) \
+                        if backup_dir.is_dir() else []
+                    hint = (f"It holds backups of other deployment versions. Select one with --archive, for example "
+                            f"--archive {display_command([str(others[-1])])}." if others
+                            else "Use --backup-dir or --archive.")
+                    raise transfer.TransferError(f"No backup found in {backup_dir}. {hint}")
             if selection is not None:
                 archive = transfer.open_archive(selection, minimum=settings.backup_version_min,
                                                 verify_launcher=not args.dry_run)
@@ -946,7 +1034,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
+    # The backup folder that setup or restore makes the project, at its location after the move.
+    adopted = None
     try:
+        if adopt_backup:
+            # The first change: everything above only read and validated.
+            if args.dry_run:
+                print(f"Move the backup to {project_dir / 'backup'} and make {project_dir} the project.")
+                if assets.system_deployment_installed():
+                    print(system_restore_hint(project_dir))
+            else:
+                try:
+                    with project_lock(lock_path):
+                        moved = transfer.adopt_bundle(project_dir)
+                except OSError as exc:
+                    raise transfer.TransferError(
+                        f"Cannot make the backup folder {project_dir} the project: {exc}. Copy the folder to a "
+                        "writable location, or run its loaf from the project directory.") from exc
+                print(f"Moved the backup to {moved}. {project_dir} is the project now.", file=sys.stderr, flush=True)
+                adopted = moved
+                if archive is not None and archive.path.parent == project_dir:
+                    archive = transfer.open_archive(moved, minimum=settings.backup_version_min)
         if args.mode in INSTALL_MODES:
             key_path = config.terminal_secret_path(project_dir, settings.terminal_server_secret_file)
             if system_mode:
@@ -1003,6 +1111,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                             launcher.chmod(transfer.file_modes(project_dir)[1])
                         print(f"Deployment ready in {project_dir}.")
                     warn_shared_deployment(layer_dirs, version, config_dir)
+                    if archive is not None:
+                        backup = archive.path.parent if archive.executable is not None else archive.path
+                        # The project finds only the newest backup of its configured deployment version.
+                        found = transfer.latest_backup(project_dir / settings.backup_dir,
+                                                       namespace=config.namespace(settings.version))
+                        selection = () if found == backup else ("--archive", str(backup))
+                        print("Next: " + next_command(project_dir, override_dir, None, "restore", *selection))
+                        print(docs_hint(project_dir))
+                        if adopted is not None and assets.system_deployment_installed():
+                            print(system_restore_hint(adopted))
                 return 0
             if args.dry_run:
                 if args.with_docker_deps:
@@ -1043,10 +1161,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     elif "models" in selected:
                         # A model snapshot tolerates the serving backend, not the downloader.
                         steps += [*(() if steps else (VALIDATE,)), STOP_DOWNLOADER]
-                    script = binary_builder(project_dir)
+                    script = package_script(project_dir, "binary")
                     if args.dry_run:
                         if script is not None:
-                            print(f"Build the standalone executable at {project_dir / 'dist/loaf'}")
+                            print(f"Build the standalone executable at {project_dir / DIST_DIR / 'loaf'}")
                         print(f"Save {', '.join(selected)} to {destination}")
                         if "images" in selected:
                             print("Skip the Open Terminal image" if args.no_terminal_server else
@@ -1060,7 +1178,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                             result = build_executable(project_dir, script, verbose=args.verbose)
                             if result:
                                 return result
-                            executable = project_dir / "dist/loaf"
+                            executable = project_dir / DIST_DIR / "loaf"
 
                         def prepare_services():
                             for step in steps:
@@ -1080,7 +1198,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else:
                     restored = transfer.restore(
                         project_dir, archive, components, namespace=namespace, settings=settings,
-                        configuration=(layer_dirs[:-1], config_dir, version), delete=args.delete,
+                        configuration=(layer_dirs[:-1], config_dir, version), delete=args.delete, system=system_mode,
                     )
                     if restored.settings is not None:
                         compose = Compose(project_dir, files=compose_files, namespace=namespace, settings=restored.settings,
@@ -1097,9 +1215,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if import_models:
                         backend = "CPU Ollama" if args.cpu else "GPU Ollama"
                         print(f"Modelfiles imported. {backend} is ready. Open WebUI is stopped.", flush=True)
-                    if project_dir != Path.cwd().resolve():
-                        followup = project_command(project_dir, override_dir, version)
-                        print("Next: " + display_command(followup + ["offline"]), flush=True)
+                    # Name the version only when the project's settings would select another one.
+                    followup_version = None if version == compose.settings.version else version
+                    print("Next: " + next_command(project_dir, override_dir, followup_version, "offline",
+                                                  system=system_mode), flush=True)
+                    if adopted is not None and assets.system_deployment_installed():
+                        print(system_restore_hint(adopted), flush=True)
             if args.attach:
                 follow_logs(compose, workflow_mode, dry_run=args.dry_run, import_definitions=import_models)
             return 0

@@ -5,9 +5,10 @@
 Run `loaf backup` on the source and copy the entire dated backup folder to the
 destination. The folder holds the archive, the standalone Linux amd64
 launcher that can restore it, and their checksums. Run `./loaf setup` and
-`./loaf restore` inside the folder. Both prepare the project
-`~/.local-ai-ferry` and leave the folder unchanged, so it can stay on
-read-only media. [Debian restore](#debian-restore)
+`./loaf restore` inside the folder. The folder becomes the project, and the
+backup moves unchanged to its `backup/` directory. To keep the backup on
+read-only media, run its `loaf` from the project directory instead.
+[Debian restore](#debian-restore)
 
 ## Select archive types
 
@@ -16,7 +17,7 @@ available type and restore recovers everything in the archive.
 
 | Type | Contents | Restored to |
 | --- | --- | --- |
-| `source` | Git history and working files of a source checkout, without settings, installer caches or the virtualenv | The project directory, which must not contain any of these files yet |
+| `source` | Git history and working files of a source checkout, without settings, installer caches or the virtualenv | The project directory, replacing existing files with the archived ones |
 | `config` | Settings, saved Modelfiles and APT source files from `config/` | The configuration directory |
 | `installers` | Cached Python wheels, NVIDIA and Docker Debian packages from `install-cache/` | The project's `install-cache/` |
 | `images` | The three core images and the matching Open Terminal image when available locally | The Docker image store |
@@ -248,31 +249,56 @@ readable and writable by their owner on filesystems that enforce Unix permission
 
 ## Debian restore
 
-Copy the complete trusted backup folder to the destination, or attach the
-media that holds it. Use a login with Docker access. On Debian 12 or 13, use
+Copy the complete trusted backup folder to the destination, where it
+becomes the project. Use a login with Docker access. On Debian 12 or 13, use
 `./loaf setup --with-docker-deps` in place of the first setup command when
 installing Docker from the backup's matching Debian package cache.
 [Docker access](debian.md#docker-access) · [Disconnected Debian installation](installation.md#disconnected-debian-installation)
 
 ```bash
-cd /media/transfer/YYYYMMDD-HHMM_local-ai-ferry
+cp -r /media/transfer/YYYYMMDD-HHMM_local-ai-ferry ~/loaf
+cd ~/loaf
 ./loaf setup
 ./loaf restore
-cd ~/.local-ai-ferry
 ./loaf offline
 ```
 
-Run inside a backup folder without `--project-dir`, setup and restore use
-the project `~/.local-ai-ferry`. Setup prepares it and copies the launcher to
-`~/.local-ai-ferry/loaf`. The backup folder stays unchanged, and loaf refuses a
-backup folder as `--project-dir`. To use another project, pass
-`--project-dir PATH`, or run the backup's `loaf` by its full path from that
-project directory.
+The first setup or restore in a backup folder makes it the project. It moves
+the archive, the launcher and `SHA256SUMS` unchanged to
+`backup/YYYYMMDD-HHMM_local-ai-ferry/` and keeps a copy of `loaf` in the
+folder. The archive's name gives the directory name, even if you renamed the
+folder. Restores find the newest backup of the deployment version in the
+settings. Setup and restore end with the command to run next. After setup,
+it includes `--archive` when the backup belongs to another deployment
+version.
 
-To recover a source checkout, restore `source`, or everything, into a new
-project directory. Restore adds the archived files, including
-`python-package/`, `docs/` and the Git history, without replacing existing
-files. Backups leave the host-specific virtualenv behind. Run
+Other commands, or `./loaf` without a command, do not run in a backup
+folder. They list the typical next steps, the alternative of running the
+backup's `loaf` from a new project directory, and `./loaf docs` for the
+guides.
+
+When the loaf Debian package is installed, setup and restore still make the
+folder the project. They also print the command for the system deployment:
+`sudo ./loaf --system restore --archive PATH`, with the backup's path after
+the move. [Debian package](installation.md#debian-package)
+
+To leave the backup on its media, create the project directory and run the
+backup's `loaf` by its full path from there:
+
+```bash
+mkdir -p ~/loaf && cd ~/loaf
+/media/transfer/YYYYMMDD-HHMM_local-ai-ferry/loaf setup
+/media/transfer/YYYYMMDD-HHMM_local-ai-ferry/loaf restore
+./loaf offline
+```
+
+To recover a source checkout, restore `source`, or everything. Restore
+writes the archived files, including `python-package/`, `docs/` and the Git
+history, over existing files in the project and keeps files that the
+archive lacks. Local changes to archived files are lost. A file where the
+archive has a directory, or the reverse, stops the restore before any
+change. If moving the files into place fails, restore puts back the files
+it replaced. Backups leave the host-specific virtualenv behind. Run
 `PYTHONPATH=python-package/src python3 -m loaf setup` in the project to
 rebuild `.venv` from the restored wheels when you develop there.
 
@@ -290,7 +316,18 @@ types in this order: `source`, `config`, `installers`, `images`, `models`,
 `webui`, `chats`. Restoring `config` keeps the backup's deployment version.
 Restoring `chats` creates the account and chat volumes with their ownership
 labels, loads the chats' package images and writes the bearer key with
-owner-only permissions. It refuses a different existing key.
+owner-only permissions. It refuses a different existing key. Restored
+settings and installers are owner-only as well.
+
+In the system deployment, restored settings in `/etc/loaf` and installers
+in `/var/lib/loaf` are readable by the group of those directories, which is
+the `docker` group, and new directories are open to that group. The bearer
+key keeps its own rule: like the key from `loaf --system setup`, it is
+readable by root and the `docker` group and never by others. Restoring
+`config` keeps the key at `/etc/loaf/terminal-server.key`, even when the
+backup's settings name another path. Writing `/etc/loaf` needs root, so run
+the system restore with `sudo`. In every deployment, restore refuses a
+settings file at the key's path.
 
 Restore starts services only when Modelfile replay is enabled. On a
 recovered host, run `loaf offline` and open the printed address to sign in

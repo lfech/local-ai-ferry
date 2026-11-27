@@ -7,6 +7,91 @@ Git milestones use commit timestamps. Working-tree milestones use the
 associated verification time where it was recorded.
 Earlier entries use the current names for commands, paths and artifacts.
 
+## 2026-11-27 12:48 CET — System restores share settings with the group; the key keeps its own rule
+
+- Resolves the open point of the previous entry. In the system deployment,
+  restored settings get mode 0640 and the group of `/etc/loaf`, and
+  installers get the group of `/var/lib/loaf`, the `docker` group from the
+  package's postinst. Missing directories are created 0750 with that group.
+  The group comes from the deployment directory, not from setgid
+  inheritance, so this also works with an older package's 0750
+  `/etc/loaf`. Outside the system deployment, restored files stay
+  owner-only.
+- The terminal key never takes its mode from the directory. One helper,
+  `setup.protect_terminal_key`, serves setup and restore. The key stays
+  owner-only in projects. In the system deployment it gets `root:docker`
+  0640, because the group's members run Compose, which reads it. Before,
+  a system restore wrote it owner-only.
+- Restoring `config` into the system deployment keeps `[terminal_server]
+  secret_file` at the system key path. Before, a portable `config.ini`
+  without that line moved the key to `/var/lib/loaf/config/`.
+- A restored settings file at the key's path is refused for every restore;
+  before, only restores with `chats` refused it.
+
+## 2026-11-27 12:00 CET — Next-step hints for backup folders and a `--system` hint
+
+- The author decided that loaf never selects the system deployment by
+  itself. With the loaf Debian package installed (`/var/lib/loaf` exists),
+  setup and restore in a backup folder still make it the project. They then
+  print `sudo <launcher> --system restore --archive <moved backup>`.
+- `./loaf` without a command, or any command other than setup and restore,
+  in a backup folder prints the typical steps (setup, restore, offline), the
+  alternative of running the backup's launcher from a new project
+  directory, and `./loaf docs` with `./loaf docs transfer`. It exits with 2.
+- Setup from a backup ends with `Next:` and the restore command, followed by
+  the docs hint. Every restore ends with `Next:` and the offline command.
+  Inside the project they use the short `./loaf` form and name `--version`
+  only when the project's settings would select another one. In the system
+  deployment the follow-up uses `--system` instead of
+  `--project-dir /var/lib/loaf`.
+- Fixed a regression from the previous entry: after setup in the folder of a
+  versioned backup, a plain `./loaf restore` misses the moved backup,
+  because the default settings select unversioned backups. Setup's hint adds
+  `--archive` in that case. When restore finds no backup, it names one of
+  another deployment version to select with `--archive`.
+- Open, found while writing the hint: restoring `config` into the system
+  deployment writes `/etc/loaf` files with mode 0600. As root this hides
+  `config.ini` from the `docker` group, and without root the write fails,
+  because `/etc/loaf` is `root:docker` 0750.
+
+## 2026-11-27 11:12 CET — A backup folder becomes the project, and source restores overwrite
+
+- The author dropped the home project `~/.local-ai-ferry`. loaf uses the
+  current directory or `--project-dir`.
+- Setup and restore run in a backup folder make it the project. They move
+  the archive, its launcher and `SHA256SUMS` unchanged to
+  `backup/<archive name>/` and copy the launcher back to the root, all
+  under the project lock and before the first other change. The archive
+  name keeps the dated folder name, so later restores find the backup even
+  in a renamed folder. A failed move puts the files back. Read-only media
+  end in an error that suggests copying the folder or running its launcher
+  from the project directory. Other commands refuse a backup folder.
+  [Debian restore](transfer.md#debian-restore)
+- `source` restores write archived files and links over existing ones and
+  keep files that the archive lacks. Directories merge. A file where the
+  archive has a directory, or the reverse, stops the restore before any
+  change, so nothing is written through links. Publishing moves replaced
+  files aside and puts them back on failure.
+- Open: whether the backup's launcher should select the system deployment
+  when the loaf Debian package is installed. The release handoff installs the
+  package and then restores with the backup's launcher into a project, so
+  that check depends on the decision.
+
+## 2026-11-27 10:05 CET — `loaf package` builds the executable and the Debian package
+
+- `loaf package binary debian` replaces `loaf binary`, without an alias.
+  `loaf build` still builds the deployment images. The author chose
+  `package` over `export`, which already names the Modelfile refresh of
+  `backup --export` and suggests a deployment transfer. The architecture
+  command table follows. [Local builds](releases.md#build-and-check-locally)
+- `binary` builds `dist/loaf` and `dist/LICENSE.txt` with
+  `scripts/build-release.sh --binary-only`, as before. `debian` checks for
+  `dpkg-deb`, builds or reuses the launcher wheel in `install-cache/wheels/`
+  the way `loaf setup` does, and runs `scripts/build-deb.sh` into `dist/`.
+- Name one or both targets. They run in the given order under the project
+  lock, and the first failure stops the command. `--dry-run` previews them.
+  Source checkout backups still build `dist/loaf` themselves.
+
 ## 2026-11-26 20:45 CET — Display names replace long model names, and review findings
 
 - `loaf download` now removes the long `hf.co/...` name after creating an

@@ -144,7 +144,7 @@ and give your login [Docker access](#docker-access).
 ## Use a prepared archive
 
 Copy the complete backup folder to Debian and enter it. Run `./loaf setup`
-and `./loaf restore` to prepare `~/.local-ai-ferry` with the images, volumes
+and `./loaf restore` to make the folder the project with the images, volumes
 and saved settings. Then start or resume inference there.
 [Debian restore](transfer.md#debian-restore)
 

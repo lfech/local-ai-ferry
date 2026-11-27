@@ -40,7 +40,7 @@ stays inside its context, which Compose always allows Buildx to read.
 | Command | Behavior |
 | --- | --- |
 | `loaf setup` / `loaf install` | Standalone setup copies missing configuration and links the packaged deployment. Source checkout setup prepares the Python wheel cache, virtualenv and NVIDIA Container Toolkit on Debian. Both create the terminal bearer key if needed. `setup tests` adds the pinned test packages to the wheel cache and the running virtualenv. `--test-local-repository` downloads a few command-line tools into a local APT repository for chat packages. [Installation](../installation.md) |
-| `loaf binary` | Build or update the standalone Linux amd64 executable at `dist/loaf` using the current source files. [Local binary build](../releases.md#build-and-check-locally) |
+| `loaf package binary debian` | Build the selected targets from the current source files into `dist/`: `binary` is the standalone Linux amd64 executable `dist/loaf`, `debian` the Debian package `dist/loaf_<version>_all.deb`. [Local builds](../releases.md#build-and-check-locally) |
 | `loaf clean` | Clear the user runtime cache and project temporaries. `--full` also clears generated installation files. Git, backups, settings, credentials and Docker data are preserved. [Cleanup](../launcher.md#clean-generated-files) |
 | `loaf build` | Builds the downloader, Ollama serving and Open WebUI images. Includes the terminal image when enabled. |
 | `loaf upgrade` | Builds the same images with Compose's `--pull` option to refresh their base images. |
@@ -220,8 +220,8 @@ before any payload.
 
 | Type | Contents | Restore |
 | --- | --- | --- |
-| `source` | Git history and working files of a source checkout, without settings, installer caches or the virtualenv. | Into the project directory, without replacing files. |
-| `config` | Settings, saved Modelfiles and APT source files, without the terminal key. | Into the configuration directory, keeping the backup's deployment version. |
+| `source` | Git history and working files of a source checkout, without settings, installer caches or the virtualenv. | Into the project directory, replacing archived files and keeping others. |
+| `config` | Settings, saved Modelfiles and APT source files, without the terminal key. | Into the configuration directory, keeping the backup's deployment version and, in the system deployment, its terminal key path. |
 | `installers` | Python wheels, NVIDIA and Docker Debian packages, the same for every channel. | Into `install-cache/`. |
 | `images` | The three core Docker images and the matching shared Open Terminal image when available locally. | `docker image load`. |
 | `models` | A consistent snapshot of the Ollama blobs, manifests and saved Modelfiles. | Merged by `rsync`; `--delete` mirrors. |
@@ -253,11 +253,28 @@ Modelfiles before capturing `models`. Both options run under the transfer's
 project lock. A prepared compatible host can restore and start offline
 without network access. [Backup and restore](../transfer.md)
 
-A backup folder is transfer media that loaf never changes. Run inside one
-without `--project-dir`, setup and restore use the project
-`~/.local-ai-ferry`. Standalone setup reuses the archived bearer key when
-available, recovers `installers` with `--with-docker-deps`, and copies the
-launcher into the project. loaf refuses a backup folder as `--project-dir`.
+Restored settings and installers are owner-only. In the system deployment
+they are readable by the group of `/etc/loaf` and `/var/lib/loaf`, the
+`docker` group after installation, and new directories are 0750 with that
+group. The terminal key never takes its mode from a directory: it is
+owner-only in a project and readable by root and the `docker` group in the
+system deployment, like the key that the package creates. Compose, run by
+that group, reads it. A settings file is never restored at the key's path.
+[Restore behavior](../transfer.md#restore-behavior)
+
+Setup and restore run in a backup folder make it the project. They move the
+archive, its launcher and `SHA256SUMS` unchanged to
+`backup/<archive name>/`, where later restores find it, and keep a copy of
+the launcher at the root. Both end with the command to run next. Other
+commands, and a missing command, refuse a backup folder as the project and
+print the typical next steps with a pointer to `loaf docs`. With the loaf
+Debian package installed, setup and restore still use the folder and also
+print the `--system` restore command; loaf never selects the system
+deployment by itself. To keep the backup on its media, run its launcher from
+the project directory. Standalone setup reuses the archived bearer key when available,
+recovers `installers` with `--with-docker-deps`, and copies the launcher into
+the project. Restoring `source` replaces existing files with the archived
+ones and puts them back if publishing fails.
 [Backup recovery](../transfer.md#debian-restore)
 
 Source setup caches Python wheels in `install-cache/wheels/` and matching

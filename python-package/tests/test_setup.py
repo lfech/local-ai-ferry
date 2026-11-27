@@ -605,6 +605,25 @@ class SetupTests(unittest.TestCase):
                 self.assertEqual(wheel.read_bytes(), b"after!")
             self.assertIn("Reuse the cached Python wheels", status.getvalue())
 
+    def test_launcher_wheel_selects_the_current_build_from_the_cache_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            wheels = project / setup.PYTHON_WHEEL_DIR
+            wheels.mkdir(parents=True)
+            # An older launcher release stays in the cache next to the current build.
+            (wheels / "local_ai_ferry-0.1.0-py3-none-any.whl").touch()
+            record = wheels / setup.WHEEL_CACHE_RECORD
+            current = {"local_ai_ferry-1.0.0-py3-none-any.whl": "a", "setuptools-80-py3-none-any.whl": "b"}
+            record.write_text(json.dumps({"inputs": {}, "wheels": current}), encoding="utf-8")
+            with patch.object(setup, "prepare_python_wheels", return_value=wheels) as prepare:
+                self.assertEqual(setup.launcher_wheel(project), wheels / "local_ai_ferry-1.0.0-py3-none-any.whl")
+            prepare.assert_called_once_with(project, allow_downloads=True)
+            record.write_text(json.dumps({"inputs": {}, "wheels": {"setuptools-80-py3-none-any.whl": "b"}}),
+                              encoding="utf-8")
+            with patch.object(setup, "prepare_python_wheels", return_value=wheels):
+                with self.assertRaisesRegex(setup.SetupError, "Expected one launcher wheel"):
+                    setup.launcher_wheel(project)
+
     def test_unsuccessful_rebuild_restores_previous_environment(self):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)

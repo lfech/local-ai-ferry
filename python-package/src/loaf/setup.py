@@ -186,11 +186,7 @@ def ensure_terminal_key(path: Path, archived_key: bytes | None = None, *, group:
         with NamedTemporaryFile(dir=path.parent, prefix=".loaf-terminal-key-") as pending:
             pending.write(archived_key if archived_key is not None else new_terminal_key())
             pending.flush()
-            if group is not None:
-                # The system deployment's key is readable by root and the Docker group.
-                with suppress(LookupError):
-                    shutil.chown(pending.name, group=group)
-                    os.chmod(pending.name, 0o640)
+            protect_terminal_key(pending.name, group)
             try:
                 os.link(pending.name, path)
             except FileExistsError:
@@ -198,6 +194,18 @@ def ensure_terminal_key(path: Path, archived_key: bytes | None = None, *, group:
             else:
                 print(f"Created terminal server key at {path}.")
     config.read_terminal_secret(path)
+
+
+def protect_terminal_key(path: str | Path, group: str | None) -> None:
+    """Keep a new key owner-only, or let the system deployment's group read it; never others.
+
+    The key decides its own mode instead of following the directory, because Compose,
+    run by the group's members, must read the system deployment's key.
+    """
+    if group is not None:
+        with suppress(LookupError):
+            shutil.chown(path, group=group)
+            os.chmod(path, 0o640)
 
 
 def new_terminal_key() -> bytes:
@@ -670,6 +678,17 @@ def prepare_python_wheels(project: Path, python: Path | None = None, *, allow_do
             check_python_step(run_python_step([*command, "--", *requirements]))
         publish_wheels(staging, wheels, WHEEL_CACHE_RECORD, inputs)
     return wheels
+
+
+def launcher_wheel(project: Path) -> Path:
+    """Return the cached launcher wheel built from the current source files."""
+    wheels = prepare_python_wheels(project, allow_downloads=True)
+    record = json.loads((wheels / WHEEL_CACHE_RECORD).read_text(encoding="utf-8"))
+    prefix = assets.DISTRIBUTION.replace("-", "_") + "-"
+    names = [name for name in record["wheels"] if name.startswith(prefix)]
+    if len(names) != 1:
+        raise SetupError(f"Expected one launcher wheel in {wheels}, found {len(names)}.")
+    return wheels / names[0]
 
 
 def publish_wheels(staging: Path, wheels: Path, record_name: str, inputs: dict) -> None:

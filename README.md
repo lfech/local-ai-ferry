@@ -18,9 +18,9 @@ to prepare the deployment. Run `loaf online` to test it. Use
 `loaf online --cpu` on a machine without NVIDIA GPU access.
 
 To move the deployment offline, run `loaf backup` and copy the entire backup
-folder to the destination. From the backup folder, run `./loaf setup` and
-`./loaf restore`. They prepare `~/.local-ai-ferry` and leave the folder
-unchanged. Then run `./loaf offline` in `~/.local-ai-ferry`.
+folder to the destination. From the backup folder, run `./loaf setup`,
+`./loaf restore` and `./loaf offline`. The folder becomes the project, and
+the backup moves to its `backup/` directory.
 [Backup recovery](docs/transfer.md#debian-restore)
 
 ## Development disclosure
@@ -134,7 +134,7 @@ when starting from a prepared archive.
 | `link-docker-project` | Create a `docker-project` symlink to the packaged Compose file, Dockerfiles, and default configuration. [Direct Compose commands](docs/launcher.md#link-the-docker-project) |
 | `integration` | Print a systemd unit, Continue YAML, or Tether installation instructions. [Host integrations](docs/installation.md#host-integrations) |
 | `build` / `upgrade` | Build the local images. Upgrade refreshes upstream base images first. |
-| `binary` | Build or update the standalone executable at `dist/loaf`. |
+| `package` | Build the standalone executable (`binary`) or the Debian package (`debian`) from the source checkout into `dist/`. [Local builds](docs/releases.md#build-and-check-locally) |
 | `clean` | Remove temporary files and the runtime cache. Add `--full` to clear generated installation files too. [Cleanup](docs/launcher.md#clean-generated-files) |
 | `download` | Download selected models using the downloader. |
 | `online` / `offline` | Start Ollama and WebUI with the selected network profile. Add `--cpu` for CPU inference. |
@@ -207,8 +207,8 @@ loaf stop
 
 To move computers, run `loaf backup` and transfer the resulting
 `backup/YYYYMMDD-HHMM_local-ai-ferry/` folder. On the destination, enter
-that folder and run `./loaf setup` followed by `./loaf restore`. Both prepare
-`~/.local-ai-ferry`.
+that folder and run `./loaf setup` followed by `./loaf restore`. The folder
+becomes the project.
 [Offline transfer](docs/transfer.md#debian-restore)
 
 Offline startup uses local images and models. Ollama is on an internal network;

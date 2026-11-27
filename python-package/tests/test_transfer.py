@@ -2,6 +2,7 @@
 
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
+import grp
 import gzip
 from hashlib import sha256
 import io
@@ -9,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import posixpath
+import shlex
 import shutil
 import stat
 import subprocess
@@ -18,7 +20,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from loaf import cli, config, setup, transfer
+from loaf import assets, cli, config, setup, transfer
 from loaf.progress import Progress
 from tests import DATA, ROOT
 
@@ -223,7 +225,7 @@ class TransferTests(unittest.TestCase):
             redirect_stdout(self.output),
             redirect_stderr(self.progress),
         ):
-            return cli.main([*location, mode, *options, *arguments])
+            return cli.main([*location, *([mode] if mode else []), *options, *arguments])
 
     def export_wheels(self, project):
         self.assertEqual(project, self.project.resolve())
@@ -300,6 +302,8 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(config.load(self.destination / "config").port, 8818)
         self.assertEqual((self.destination / "config/models/blue.model").read_text(), "FROM model\n")
         self.assertEqual((self.destination / self.toolkit.relative_to(self.project)).read_bytes(), b"fixture deb")
+        # Outside the system deployment, restored settings stay owner-only.
+        self.assertEqual(stat.S_IMODE((self.destination / "config/config.ini").stat().st_mode), 0o600)
         self.assertFalse((self.destination / ".venv").exists())
         self.assertFalse((self.destination / config.TERMINAL_SECRET).exists())
         self.assertFalse(list(self.destination.glob(".loaf-restore-*")))
@@ -390,7 +394,9 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(bundle.name, f"20261120-1500_{namespace}_{transfer.BUNDLE_NAME}")
         self.assertEqual(self.manifest(next(bundle.glob("*.tar.gz")))["deployment"], "v2")
         self.assertEqual(self.invoke("restore", "--version", "v3", project=self.destination), 1)
-        self.assertIn("No backup found", self.progress.getvalue())
+        self.assertIn(f"No backup found in {self.backup_dir}. It holds backups of other deployment versions. "
+                      f"Select one with --archive, for example --archive {shlex.quote(str(bundle))}.",
+                      self.progress.getvalue())
         self.assertEqual(self.invoke("restore", "--archive", str(bundle), "--version", "v3", custom=False,
                                      project=self.destination), 1)
         self.assertIn("Backup version is v2", self.progress.getvalue())
@@ -446,34 +452,206 @@ class TransferTests(unittest.TestCase):
             self.invoke("restore", "--archive", str(self.bundle), custom=False)
         self.assertIn("expected an archive format from 2 to 2", self.progress.getvalue())
 
-    def test_setup_and_restore_inside_the_backup_folder_use_the_home_project(self):
+    def copied_bundle(self, name):
+        """Copy the backup folder under another name, as transfer media often renames it."""
+        folder = (self.root / name).resolve()
+        shutil.copytree(self.bundle, folder)
+        return folder, {path.name: path.read_bytes() for path in folder.iterdir()}
+
+    def test_setup_and_restore_inside_a_backup_folder_make_it_the_project(self):
         self.assertEqual(self.invoke("backup", "project"), 0, self.progress.getvalue())
-        before = {path.name: path.read_bytes() for path in self.bundle.iterdir()}
-        home = self.root / "home"
-        target = home / ".local-ai-ferry"
+        folder, before = self.copied_bundle("copied backup")
+        moved = folder / "backup" / self.bundle.name
         with (
-            patch.dict(os.environ, HOME=str(home)),
-            patch.object(Path, "cwd", return_value=self.bundle),
-            patch.object(setup, "bundled_release", return_value=self.bundle / "runtime"),
+            patch.object(Path, "cwd", return_value=folder),
+            patch.object(setup, "bundled_release", return_value=folder / "runtime"),
             patch.object(setup, "setup_standalone") as prepared,
             patch.object(setup, "install_backup_host_packages") as host_packages,
+            patch("loaf.cli.assets.system_deployment_installed", return_value=False),
         ):
+            for arguments in (("offline",), (None,)):
+                with self.subTest(arguments=arguments):
+                    self.assertEqual(self.invoke(*arguments, custom=False, project=None), 2)
+                    hints = self.progress.getvalue()
+                    self.assertIn(f"{folder} is a backup folder. The typical next steps in it are:", hints)
+                    for step in ("./loaf setup ", "./loaf restore ", "./loaf offline ", "./loaf docs transfer"):
+                        self.assertIn(step, hints)
+                    self.assertIn(f"cd ~/loaf && {shlex.quote(str(folder / 'loaf'))} setup", hints)
+                    self.assertNotIn("--system", hints)
+            self.assertEqual(self.invoke("setup", "--dry-run", custom=False, project=None), 0, self.progress.getvalue())
+            self.assertIn(f"Move the backup to {folder / 'backup'} and make {folder} the project.", self.output.getvalue())
+            self.assertEqual({path.name: path.read_bytes() for path in folder.iterdir()}, before)
+
             self.assertEqual(self.invoke("setup", "--with-docker-deps", custom=False, project=None), 0,
                              self.progress.getvalue())
-            self.assertIn(f"Using the project {target}", self.progress.getvalue())
+            self.assertIn(f"{folder} is the project now", self.progress.getvalue())
+            # The project finds the moved backup as its newest one, so the hint needs no --archive.
+            self.assertIn("Next: ./loaf restore\nRead the guides with ./loaf docs, for example ./loaf docs transfer.\n",
+                          self.output.getvalue())
             self.assertEqual(self.invoke("restore", "config", custom=False, project=None), 0, self.progress.getvalue())
-            with self.assertRaises(SystemExit):
-                self.invoke("restore", custom=False, project=self.bundle)
-            self.assertIn("is a backup folder", self.progress.getvalue())
-        prepared.assert_called_once_with(target)
-        host_packages.assert_called_once_with(target)
-        self.assertEqual((target / self.docker_cache.relative_to(self.project) / "Packages").read_bytes(),
+            self.assertIn("Next: ./loaf offline\n", self.output.getvalue())
+        self.assertEqual({path.name: path.read_bytes() for path in moved.iterdir()}, before)
+        self.assertTrue(transfer.is_bundle(moved))
+        self.assertFalse(transfer.is_bundle(folder))
+        prepared.assert_called_once_with(folder)
+        host_packages.assert_called_once_with(folder)
+        self.assertEqual((folder / self.docker_cache.relative_to(self.project) / "Packages").read_bytes(),
                          b"fixture package index")
-        self.assertEqual((target / "loaf").read_bytes(), self.executable.read_bytes())
-        self.assertEqual(config.load(target / "config").port, 8818)
-        self.assertTrue((target / config.TERMINAL_SECRET).is_file())
-        self.assertEqual({path.name: path.read_bytes() for path in self.bundle.iterdir()}, before)
+        self.assertEqual((folder / "loaf").read_bytes(), self.executable.read_bytes())
+        self.assertTrue(os.access(folder / "loaf", os.X_OK))
+        self.assertEqual(config.load(folder / "config").port, 8818)
+        self.assertTrue((folder / config.TERMINAL_SECRET).is_file())
+        self.assertFalse(list(folder.glob(".loaf-*")))
         self.assertEqual([call for call in self.docker_calls if call[:2] != ["docker", "compose"]], [])
+
+    def test_system_restore_shares_files_with_the_group_and_keeps_the_terminal_key(self):
+        self.add_terminal_workspaces()
+        self.settings.write_text("[webui]\nport = 8818\n[terminal_server]\nenabled = true\n", encoding="utf-8")
+        self.assertEqual(self.invoke("backup", "config", "installers", "chats"), 0, self.progress.getvalue())
+        system, state = self.root / "etc loaf", self.root / "var lib loaf"
+        system.mkdir()
+        state.mkdir()
+        key = system / "terminal-server.key"
+        (system / "config.ini").write_text(f"[terminal_server]\nsecret_file = {key}\n", encoding="utf-8")
+        self.volumes.clear()
+        with (
+            patch.dict(os.environ, LOAF_SYSTEM_CONFIG_DIR=str(system)),
+            patch.object(assets, "SYSTEM_PROJECT_DIR", state),
+            patch("loaf.transfer.SYSTEM_GROUP", grp.getgrgid(os.getgid()).gr_name),
+        ):
+            self.assertEqual(self.invoke("restore", "--system", "--archive", str(self.bundle), custom=False,
+                                         project=None), 0, self.progress.getvalue())
+
+        def access(path):
+            return stat.S_IMODE(path.stat().st_mode), path.stat().st_gid
+
+        # Settings and installers are readable by the deployment directories' group.
+        self.assertEqual(access(system / "config.ini"), (0o640, system.stat().st_gid))
+        self.assertEqual(access(system / "models"), (0o750, system.stat().st_gid))
+        self.assertEqual(access(system / "models/blue.model"), (0o640, system.stat().st_gid))
+        wheel = state / self.launcher_wheel.relative_to(self.project)
+        self.assertEqual(access(wheel), (0o640, state.stat().st_gid))
+        self.assertEqual(access(state / setup.INSTALL_CACHE), (0o750, state.stat().st_gid))
+        # The portable settings keep the system key path, and the key follows its own policy.
+        settings = config.load(system)
+        self.assertEqual((settings.port, settings.terminal_server_secret_file), (8818, key))
+        self.assertEqual(key.read_bytes(), KEY)
+        self.assertEqual(access(key), (0o640, os.getgid()))
+        self.assertFalse((state / config.TERMINAL_SECRET).exists())
+        self.assertIn("Next: ", self.output.getvalue())
+        self.assertIn("--system offline", self.output.getvalue())
+
+    def test_a_restored_settings_file_never_replaces_the_terminal_key(self):
+        self.settings.unlink()
+        self.assertEqual(self.invoke("backup", "config"), 0, self.progress.getvalue())
+        key = self.destination / "config/models/blue.model"
+        key.parent.mkdir(parents=True)
+        key.write_bytes(KEY)
+        (self.destination / "config/config.ini").write_text(
+            "[terminal_server]\nsecret_file = config/models/blue.model\n", encoding="utf-8")
+        self.assertEqual(self.invoke("restore", "--archive", str(self.bundle), custom=False, project=self.destination),
+                         1)
+        self.assertIn("The backup uses the terminal key path for a configuration file.", self.progress.getvalue())
+        self.assertEqual(key.read_bytes(), KEY)
+
+    def test_setup_in_a_versioned_backup_folder_names_the_archive_to_restore(self):
+        self.assertEqual(self.invoke("backup", "config", "--version", "v2"), 0, self.progress.getvalue())
+        self.bundle, = self.backup_dir.iterdir()
+        folder, _ = self.copied_bundle("versioned backup")
+        moved = folder / "backup" / self.bundle.name
+        with (
+            patch.object(Path, "cwd", return_value=folder),
+            patch.object(setup, "bundled_release", return_value=folder / "runtime"),
+            patch.object(setup, "setup_standalone"),
+            patch("loaf.cli.assets.system_deployment_installed", return_value=False),
+        ):
+            self.assertEqual(self.invoke("setup", custom=False, project=None), 0, self.progress.getvalue())
+            # The default settings select unversioned backups, so a plain restore would not find this one.
+            self.assertIn(f"Next: ./loaf restore --archive {shlex.quote(str(moved))}\n", self.output.getvalue())
+            self.assertEqual(self.invoke("restore", "--archive", str(moved), custom=False, project=None), 0,
+                             self.progress.getvalue())
+        self.assertIn("Next: ./loaf offline\n", self.output.getvalue())
+        self.assertEqual(config.load(folder / "config").version, "v2")
+
+    def test_restore_inside_a_backup_folder_restores_into_it_or_changes_nothing(self):
+        self.assertEqual(self.invoke("backup", "project"), 0, self.progress.getvalue())
+        blocked, before = self.copied_bundle("blocked backup")
+        (blocked / "backup" / self.bundle.name).mkdir(parents=True)
+        with patch.object(Path, "cwd", return_value=blocked):
+            self.assertEqual(self.invoke("restore", custom=False, project=None), 1)
+        self.assertIn("which already exists", self.progress.getvalue())
+        self.assertEqual({path.name for path in blocked.iterdir()} - {".run.lock"}, {*before, "backup"})
+        self.assertEqual({path.name: path.read_bytes() for path in blocked.iterdir() if path.is_file()
+                          and path.name != ".run.lock"}, before)
+
+        if os.geteuid():
+            # Read-only transfer media cannot become the project.
+            media, before = self.copied_bundle("read-only backup")
+            media.chmod(0o555)
+            self.addCleanup(media.chmod, 0o755)
+            self.assertEqual(self.invoke("restore", custom=False, project=media), 1)
+            self.assertIn("Copy the folder to a writable location, or run its loaf from the project directory",
+                          self.progress.getvalue())
+            self.assertEqual({path.name: path.read_bytes() for path in media.iterdir()}, before)
+
+        folder, before = self.copied_bundle("restored backup")
+        moved = folder / "backup" / self.bundle.name
+        with patch("loaf.cli.assets.system_deployment_installed", return_value=True):
+            self.assertEqual(self.invoke("restore", "--dry-run", custom=False, project=folder), 0)
+            self.assertIn(f"--system restore --archive {shlex.quote(str(folder))}", self.output.getvalue())
+            self.assertEqual(self.invoke("restore", custom=False, project=folder), 0, self.progress.getvalue())
+        output = self.output.getvalue()
+        # Run from elsewhere, the follow-up names the project; the system hint names the moved backup.
+        self.assertIn(f"Next: {shlex.join(cli.project_command(folder, None, None))} offline\n", output)
+        self.assertIn("The loaf Debian package is installed. To restore into its system deployment instead, run:\n"
+                      f"  sudo {shlex.join(cli.project_command(folder, None, None, system=True))} restore "
+                      f"--archive {shlex.quote(str(moved))}\n", output)
+        self.assertEqual({path.name: path.read_bytes() for path in moved.iterdir()}, before)
+        self.assertEqual(config.load(folder / "config").port, 8818)
+        self.assertEqual((folder / self.toolkit.relative_to(self.project)).read_bytes(), b"fixture deb")
+        self.assertIn(f"Restored config, installers from {folder / 'backup' / self.bundle.name / self.archive.name}",
+                      self.output.getvalue())
+
+    def test_source_restore_replaces_archived_files_and_keeps_other_files(self):
+        self.assertEqual(self.invoke("backup", "source"), 0, self.progress.getvalue())
+        self.destination.mkdir()
+        (self.destination / "compose.yml").write_text("old\n", encoding="utf-8")
+        (self.destination / "notes.txt").write_text("local notes\n", encoding="utf-8")
+        (self.destination / "docs").mkdir()
+        (self.destination / "docs/guide.md").write_text("old guide\n", encoding="utf-8")
+        (self.destination / "docs/guide-link.md").symlink_to("notes.txt")
+        restore = ("restore", "--archive", str(self.bundle))
+        self.assertEqual(self.invoke(*restore, custom=False, project=self.destination), 0, self.progress.getvalue())
+        self.assertEqual((self.destination / "compose.yml").read_bytes(), b"name: edited\nservices: {}\n")
+        self.assertEqual((self.destination / "docs/guide.md").read_bytes(), b"Source documentation\n")
+        self.assertEqual(os.readlink(self.destination / "docs/guide-link.md"), "guide.md")
+        self.assertEqual((self.destination / "notes.txt").read_text(encoding="utf-8"), "local notes\n")
+        self.assertEqual((self.destination / ".git/HEAD").read_bytes(), (self.project / ".git/HEAD").read_bytes())
+        self.assertFalse(list(self.destination.glob(".loaf-restore-*")))
+
+        # A file where the checkout has a directory stops the restore before any change.
+        (self.destination / "compose.yml").write_text("old\n", encoding="utf-8")
+        shutil.rmtree(self.destination / "docs")
+        (self.destination / "docs").write_text("a file\n", encoding="utf-8")
+        self.assertEqual(self.invoke(*restore, custom=False, project=self.destination), 1)
+        self.assertIn("over a file or link", self.progress.getvalue())
+        self.assertEqual((self.destination / "compose.yml").read_text(encoding="utf-8"), "old\n")
+
+    def test_failed_source_publish_puts_back_moved_and_replaced_files(self):
+        checkout, project = self.root / "checkout", self.root / "checkout project"
+        (checkout / "docs").mkdir(parents=True)
+        (project / "docs").mkdir(parents=True)
+        (checkout / "compose.yml").write_text("new\n", encoding="utf-8")
+        (checkout / "docs/guide.md").write_text("new guide\n", encoding="utf-8")
+        (project / "compose.yml").write_text("old\n", encoding="utf-8")
+        entries = transfer.checkout_targets(checkout, project)
+        self.assertEqual(sorted(target for _, target in entries), [project / "compose.yml", project / "docs/guide.md"])
+        with self.assertRaises(FileNotFoundError):
+            transfer.publish_checkout([*entries, (checkout / "missing", project / "missing")], self.root / "replaced")
+        self.assertEqual((project / "compose.yml").read_text(encoding="utf-8"), "old\n")
+        self.assertFalse((project / "docs/guide.md").exists())
+        self.assertEqual((checkout / "compose.yml").read_text(encoding="utf-8"), "new\n")
+        self.assertEqual((checkout / "docs/guide.md").read_text(encoding="utf-8"), "new guide\n")
 
     def test_setup_reuses_the_archived_terminal_key(self):
         self.add_terminal_workspaces()

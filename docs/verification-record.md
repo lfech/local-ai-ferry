@@ -4,6 +4,92 @@
 
 Older entries use the current command and project names in examples.
 
+## 2026-11-27 12:48:51 +0100 — Group-readable system restores and the terminal key
+
+- Environment: Debian 13 in WSL2, the checkout's `.venv` on Python 3.13.5,
+  run as a non-root user.
+- Docker-free suite with every opt-in flag set to 0
+  (`python -m unittest discover -s tests -t .` from `python-package/`):
+  279 cases passed in 10.2 seconds with 58 skips for the opt-in groups.
+- A new transfer case restores `config`, `installers` and `chats` with
+  `--system` into simulated `/etc/loaf` and `/var/lib/loaf` directories,
+  with simulated Docker calls and the current user's group as the system
+  group. It checks:
+  - settings, Modelfiles and installers at 0640 with their directory's
+    group, and new directories at 0750;
+  - the system key path kept in the restored settings;
+  - the key at 0640;
+  - no key under `/var/lib/loaf/config/`;
+  - a `--system` follow-up.
+- Further checks:
+  - a portable restore leaves `config.ini` at 0600;
+  - a settings file aimed at the key's path is refused without `chats`,
+    and the key is unchanged.
+- Not run: a restore as root with a real `docker` group, a host with the
+  Debian package, `test_debian` and the other Docker suites.
+
+## 2026-11-27 12:00:34 +0100 — Backup folder hints and the `--system` hint
+
+- Environment: Debian 13 in WSL2, the checkout's `.venv` on Python 3.13.5.
+- Docker-free suite with every opt-in flag set to 0
+  (`python -m unittest discover -s tests -t .` from `python-package/`):
+  277 cases passed in 9.3 seconds with 58 skips for the opt-in groups.
+- Transfer cases with simulated Docker calls cover:
+  - the hint block for `./loaf` and `./loaf offline` in a backup folder,
+    with exit status 2;
+  - `Next: ./loaf restore` and the docs hint after setup, and
+    `Next: ./loaf offline` after restore;
+  - `--archive` in setup's hint for a versioned backup;
+  - the `--system` restore hint before and after the move, with the
+    installed system deployment simulated;
+  - the long follow-up form for a restore run from another directory;
+  - the "No backup found" hint naming a backup of another version.
+- Rendered the hints once from the test fixture and read them. Not run: a
+  real standalone executable, a host with the Debian package, and the Docker
+  suites.
+
+## 2026-11-27 11:12:19 +0100 — Backup folder as project and overwriting source restores
+
+- Environment: Debian 13 in WSL2, the checkout's `.venv` on Python 3.13.5.
+- Docker-free suite with every opt-in flag set to 0
+  (`python -m unittest discover -s tests -t .` from `python-package/`):
+  276 cases passed in 9.1 seconds with 58 skips for the opt-in groups.
+- New transfer cases with simulated Docker calls cover:
+  - setup and restore in a renamed copy of a backup folder, which becomes
+    the project with the unchanged backup in `backup/<archive name>/`;
+  - an existing target directory and a read-only folder, both of which
+    leave the backup in place;
+  - a source restore over existing files and links that keeps other files,
+    and a file-over-directory conflict that changes nothing;
+  - rollback of a failed source publish.
+- Not run: the Docker suites, and a restore on real read-only media or
+  with a real standalone executable. The release handoff runs the backup's
+  launcher from a separate project directory, which this change does not
+  alter.
+
+## 2026-11-27 10:35:35 +0100 — `loaf package` and the Docker-free suite
+
+- Environment: Debian 13 in WSL2, the checkout's `.venv` on Python 3.13.5,
+  `dpkg-deb` installed, `lintian` not installed.
+- Docker-free suite with every opt-in flag set to 0
+  (`python -m unittest discover -s tests -t .` from `python-package/`):
+  273 cases passed in 9.4 seconds with 58 skips for the opt-in groups.
+- `loaf package debian` ran against a scratch copy of the working tree.
+  A running `loaf download` held the checkout's project lock during the
+  first attempt, and the copy keeps the checkout's `dist/` and wheel cache
+  unchanged. The copy's wheel cache held only setuptools 84.2.1. The command
+  built the launcher wheel and `dist/loaf_0.4.0_all.deb` (133,832 bytes) in
+  3.2 seconds and exited 0. A second run reused the cached wheel. The
+  expected system files, the bundled guides and a manual page listing
+  `package` were present. An earlier run under the name `export` also
+  checked the control fields and the absence of `__pycache__` and record
+  files. `lintian` did not run.
+- `loaf package binary debian --dry-run` previewed both targets. `loaf export`
+  and `loaf package` without a target fail with a parser error. A real
+  `package binary` did not run; the existing `dist/loaf` was kept, and the
+  mocked launcher test covers the script call. The Debian container install
+  test (`test_debian`, Docker opt-in) did not run.
+
 ## 2026-11-26 20:22:57 +0100 — Test badge run
 
 `loaf test --badges` passed on Linux with Python 3.13.5.

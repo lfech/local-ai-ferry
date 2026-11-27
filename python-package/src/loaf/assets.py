@@ -20,6 +20,11 @@ def debian_package() -> bool:
     return DEBIAN_PACKAGE_MARKER.is_file()
 
 
+def system_deployment_installed() -> bool:
+    """Whether the Debian package prepared the system deployment on this host, whichever loaf runs."""
+    return SYSTEM_PROJECT_DIR.is_dir()
+
+
 def source_checkout() -> Path | None:
     """Return the checkout when this launcher runs from its source tree."""
     root = Path(__file__).resolve().parents[3]

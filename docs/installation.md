@@ -2,9 +2,9 @@
 
 ## Disconnected Debian installation
 
-Copy the trusted backup folder to the destination, or attach its media, and
-enter it. The folder's `loaf` uses its bundled Python. Setup and restore
-prepare `~/.local-ai-ferry` and leave the folder unchanged. Prepare a compatible NVIDIA driver
+Copy the trusted backup folder to the destination and enter it. The
+folder's `loaf` uses its bundled Python. Setup and restore make the folder
+the project and move the backup to its `backup/` directory. Prepare a compatible NVIDIA driver
 for GPU inference and use an account with Docker access.
 [Backup recovery](transfer.md#debian-restore) · [Docker access](debian.md#docker-access)
 
@@ -14,13 +14,12 @@ chmod +x loaf
 ./loaf restore
 ```
 
-Setup creates default configuration and the terminal server key, links
-the packaged Docker files and copies the launcher into the project. Restore
-checks the backup and loads everything it contains: settings and Modelfiles,
-installers, images, models and WebUI data, and, when included, the source
-checkout and chat folders. Continue with `./loaf offline` in
-`~/.local-ai-ferry`. For a fresh deployment, use the release executable and
-run setup.
+Setup creates default configuration and the terminal server key and links
+the packaged Docker files. Restore checks the backup and loads everything it
+contains: settings and Modelfiles, installers, images, models and WebUI
+data, and, when included, the source checkout and chat folders. Continue
+with `./loaf offline` in the same folder. For a fresh deployment, use the
+release executable and run setup.
 [Backup recovery](transfer.md#debian-restore) ·
 [Release executable](releases.md#run-the-executable)
 
@@ -69,6 +68,9 @@ sudo apt install ./loaf_0.2.2_all.deb
 loaf version
 ```
 
+To build the package from a source checkout, run `loaf package debian`.
+[Local builds](releases.md#build-and-check-locally)
+
 The package operates the system deployment. Its settings are in `/etc/loaf`
 and its data, backups and lock are in `/var/lib/loaf`. Root, members of the
 `docker` group and the `loaf` systemd service can operate it. Its backups in
@@ -79,7 +81,11 @@ directory with `loaf --project-dir PATH`. A portable deployment reads
 [Settings layers](configuration.md#project-configuration)
 
 To restore a copied backup into the system deployment, run
-`loaf restore --archive PATH` with the backup folder. Start offline serving at
+`sudo loaf restore --archive PATH` with the backup folder. Settings in
+`/etc/loaf` need root. Restored settings, installers and the terminal server
+key stay readable by the `docker` group, and the key stays at
+`/etc/loaf/terminal-server.key`.
+[Restore behavior](transfer.md#restore-behavior) Start offline serving at
 boot after building or restoring the images:
 
 ```bash

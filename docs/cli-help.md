@@ -15,7 +15,7 @@ paths given on the command line start at the shell's current directory.
 | Flag | Effect |
 | --- | --- |
 | `-h`, `--help` | Print help for `loaf`, a command, or an integration and exit. |
-| `--project-dir PATH` | Select the checkout or deployment. Defaults to the current directory, or to `~/.local-ai-ferry` inside a backup folder. A backup folder itself is never a project. |
+| `--project-dir PATH` | Select the checkout or deployment. Defaults to the current directory. Setup and restore make a backup folder the project; other commands refuse one. [Debian restore](transfer.md#debian-restore) |
 | `--system` | Operate the system deployment with settings in `/etc/loaf` and data in `/var/lib/loaf`. The Debian package uses it unless `--project-dir` or `--config-dir` selects a project. [Debian package](installation.md#debian-package) |
 | `-v`, `--verbose` | Show external commands where available. With `test`, show individual test names. |
 
@@ -49,7 +49,7 @@ server key when it is missing. [Installation](installation.md)
 Uses `--config-dir PATH` and `--dry-run`.
 
 - `--with-docker-deps` caches Docker Engine, Compose and Buildx packages on Debian 12 or 13 and installs them as needed. [Docker packages](debian.md#install-docker-and-cache-its-packages)
-- `--archive PATH` selects a backup folder or archive when running standalone setup. Inside a backup folder, setup uses it without this flag. With `--with-docker-deps`, setup recovers the backup's `installers` first. Setup reuses the backup's terminal key from `chats` and copies the launcher into the project. [Debian restore](transfer.md#debian-restore)
+- `--archive PATH` selects a backup folder or archive when running standalone setup. Inside a backup folder, setup makes the folder the project, uses the backup without this flag and prints the restore command to run next. With `--with-docker-deps`, setup recovers the backup's `installers` first. Setup reuses the backup's terminal key from `chats` and copies the launcher into the project. [Debian restore](transfer.md#debian-restore)
 - `--terminal-server-key` creates the configured key only, with owner-only permissions. It preserves an existing key and reuses a key from the selected backup.
 - `--test-local-repository` downloads three command-line tools, chosen at random from a fixed list, with the dependencies that the terminal image lacks into `apt-test-repository/`. It writes `config/apt-test-repository.list` and prints the tools and the settings that use them for chat packages. It needs the built terminal image and network access. [Chat packages](terminal-server.md#install-packages-for-a-chat)
 
@@ -66,10 +66,14 @@ a source checkout, and accepts only `--dry-run` and the global flags.
 
 Alias for [`setup`](#setup) with the same flags.
 
-### binary
+### package
 
-Build or replace `dist/loaf` from the working source checkout. Uses
-`--dry-run`. [Local binary build](releases.md#build-and-check-locally)
+Build release files from the working source checkout into `dist/`. Name one
+or both targets; they run in the given order and stop at the first failure.
+Uses `--dry-run`. [Local builds](releases.md#build-and-check-locally)
+
+- `binary` builds or replaces the standalone executable `dist/loaf` and its `dist/LICENSE.txt`.
+- `debian` builds `dist/loaf_<version>_all.deb` from the launcher wheel in `install-cache/wheels/`. It needs `dpkg-deb`.
 
 ### clean
 
@@ -167,11 +171,14 @@ in a source checkout; `chats` adds `webui`. Uses `--config-dir PATH`,
 Restore types from a verified backup. Name them as for `backup`, or omit them
 to restore everything in the archive. `models` merge into the Ollama store.
 `webui` and `chats` require new or empty volumes; `chats` adds `webui`.
-`source` requires a project without its files. Uses `--config-dir PATH`,
+`source` replaces existing files with the archived ones and keeps the
+others. Run in a backup folder, restore makes it the project and moves the
+backup to `backup/`. Restore ends with the command to run next. Uses `--config-dir PATH`,
 `--version VERSION`, `--dry-run`, and `-a` or `--attach`. `--archive PATH`
 selects a specific backup folder or archive. `--backup-dir PATH` selects the
-newest backup for the deployment in that directory. A selected backup
-supplies its saved deployment version. Only `source`, `installers` and
+newest backup for the deployment in that directory; without one, restore
+names a backup of another deployment version to select with `--archive`.
+A selected backup supplies its saved deployment version. Only `source`, `installers` and
 `models` restore into another `--version`. [Restore behavior](transfer.md#restore-behavior)
 
 - `--delete` mirrors the archived models by removing destination-only blobs, manifests and Modelfiles.

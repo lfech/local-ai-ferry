@@ -25,8 +25,8 @@ from typing import Callable
 from . import assets, config, locks
 from .progress import Progress, TrackedStream
 from .setup import (
-    INSTALL_CACHE, PYTHON_PACKAGE_DIR, PYTHON_WHEEL_DIR, TEST_WHEEL_RECORD, TOOLKIT_DIR, WHEEL_CACHE_RECORD,
-    docker_installer_files, file_digest, prepare_python_wheels, toolkit_files,
+    INSTALL_CACHE, PYTHON_PACKAGE_DIR, PYTHON_WHEEL_DIR, SYSTEM_GROUP, TEST_WHEEL_RECORD, TOOLKIT_DIR,
+    WHEEL_CACHE_RECORD, docker_installer_files, file_digest, prepare_python_wheels, protect_terminal_key, toolkit_files,
 )
 
 
@@ -194,6 +194,32 @@ def find_bundle(directory: Path, selection: Path | None) -> Path | None:
     if executable and is_bundle(folder := Path(executable).parent):
         return folder
     return None
+
+
+def adopt_bundle(folder: Path) -> Path:
+    """Make a backup folder a project: move the backup to backup/<name>/ and keep a launcher copy at the root."""
+    sums = read_checksums(folder)
+    archive = next(name for name in sums if name != LAUNCHER)
+    # The archive keeps the folder's original name, which later restores find in the default backup directory.
+    target = folder / "backup" / archive.removesuffix(".tar.gz")
+    if target.exists() or target.is_symlink():
+        raise TransferError(f"Cannot move the backup to {target}, which already exists.")
+    target.parent.mkdir(exist_ok=True)
+    launcher = folder / LAUNCHER
+    with ExitStack() as rollback:
+        target.mkdir()
+        rollback.callback(target.rmdir)
+        copy = folder / f".loaf-launcher-{os.getpid()}"
+        rollback.callback(copy.unlink, missing_ok=True)
+        shutil.copyfile(launcher, copy)
+        copy.chmod(file_modes(folder)[1])
+        # The moved backup stays complete: its checksums list the original launcher and archive.
+        for name in (archive, LAUNCHER, CHECKSUMS):
+            (folder / name).rename(target / name)
+            rollback.callback((target / name).rename, folder / name)
+        copy.rename(launcher)
+        rollback.pop_all()
+    return target
 
 
 def standalone_executable(path: Path) -> bool:
@@ -535,28 +561,48 @@ def project_file_targets(source: Path, target: Path) -> list[tuple[Path, Path]]:
     return files
 
 
-def publish_project_files(files: list[tuple[Path, Path]]) -> None:
+def publish_project_files(files: list[tuple[Path, Path]], group: int | None = None) -> None:
+    """Publish restored files owner-only, or readable by the group that shares the system deployment."""
     for source, destination in files:
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        missing, parent = [], destination.parent
+        while not parent.exists():
+            missing.append(parent)
+            parent = parent.parent
+        for directory in reversed(missing):
+            directory.mkdir()
+            if group is not None:
+                os.chown(directory, -1, group)
+                directory.chmod(0o750)
         with TemporaryDirectory(dir=destination.parent, prefix=".loaf-restore-") as directory:
             replacement = Path(directory) / destination.name
             shutil.copyfile(source, replacement)
-            replacement.chmod(0o600)
+            if group is not None:
+                os.chown(replacement, -1, group)
+            replacement.chmod(0o600 if group is None else 0o640)
             replacement.replace(destination)
 
 
-def stage_configuration(recovered: Path, lower: tuple[Path, ...], destination: Path, version: str) -> config.Settings:
-    """Load recovered settings over the lower configuration layers and keep the backup's version."""
+def stage_configuration(recovered: Path, lower: tuple[Path, ...], destination: Path, version: str,
+                        terminal_key: Path | None = None) -> config.Settings:
+    """Load recovered settings over the lower configuration layers and keep the backup's version.
+
+    A given terminal key path stays configured: the system deployment's key does not move with its settings.
+    """
     target = recovered / config.CONFIG_NAME
     current = recovered if target.is_file() else destination
     settings = config.load(*lower, current)
-    if settings.version == version:
+    keep_key = terminal_key is not None and settings.terminal_server_secret_file != terminal_key
+    if settings.version == version and not keep_key:
         return settings
     parser = ConfigParser(interpolation=None)
     parser.read(current / config.CONFIG_NAME, encoding="utf-8-sig")
-    if not parser.has_section("launcher"):
-        parser.add_section("launcher")
-    parser.set("launcher", "version", version)
+    pinned = {("launcher", "version"): version}
+    if keep_key:
+        pinned[("terminal_server", "secret_file")] = str(terminal_key)
+    for (section, key), value in pinned.items():
+        if not parser.has_section(section):
+            parser.add_section(section)
+        parser.set(section, key, value)
     recovered.mkdir(parents=True, exist_ok=True)
     with target.open("w", encoding="utf-8") as output:
         parser.write(output)
@@ -593,22 +639,33 @@ def stage_checkout(source: Path, checkout: Path) -> None:
 
 
 def checkout_targets(checkout: Path, project: Path) -> list[tuple[Path, Path]]:
-    """Map the checkout onto the project. Only directories may already exist; no file is replaced."""
+    """Map the checkout onto the project. Directories merge; archived files and links replace existing ones."""
     def collect(source: Path, target: Path):
-        if not target.exists() and not target.is_symlink():
-            yield source, target
-        elif source.is_dir() and not source.is_symlink() and target.is_dir() and not target.is_symlink():
+        source_dir = source.is_dir() and not source.is_symlink()
+        target_dir = target.is_dir() and not target.is_symlink()
+        if source_dir and target_dir:
             for entry in source.iterdir():
                 yield from collect(entry, target / entry.name)
+        elif source_dir and (target.exists() or target.is_symlink()):
+            # Never write a directory through a link or over a file.
+            raise TransferError(f"Cannot restore the source directory {target} over a file or link.")
+        elif target_dir:
+            raise TransferError(f"Cannot restore the source file {target} over a directory.")
         else:
-            raise TransferError(f"Cannot restore the source checkout over {target}.")
+            yield source, target
 
     return [target for entry in checkout.iterdir() for target in collect(entry, project / entry.name)]
 
 
-def publish_checkout(entries: list[tuple[Path, Path]]) -> None:
+def publish_checkout(entries: list[tuple[Path, Path]], replaced: Path) -> None:
+    """Move the checkout into place. A failure puts back every file moved or replaced so far."""
+    replaced.mkdir()
     with ExitStack() as rollback:
-        for source, target in entries:
+        for index, (source, target) in enumerate(entries):
+            if target.exists() or target.is_symlink():
+                previous = replaced / str(index)
+                target.rename(previous)
+                rollback.callback(previous.rename, target)
             source.rename(target)
             rollback.callback(target.rename, source)
         rollback.pop_all()
@@ -1111,7 +1168,7 @@ def matching_terminal_key(path: Path, key: bytes) -> bool:
 
 
 @contextmanager
-def restore_terminal_key(path: Path, key: bytes):
+def restore_terminal_key(path: Path, key: bytes, *, group: str | None = None):
     if matching_terminal_key(path, key):
         yield
         return
@@ -1119,8 +1176,9 @@ def restore_terminal_key(path: Path, key: bytes):
     with NamedTemporaryFile(dir=path.parent, prefix=TERMINAL_KEY_STAGING) as pending:
         pending.write(key)
         pending.flush()
+        protect_terminal_key(pending.name, group)
         try:
-            # Publish a complete owner-only file without replacing an existing credential.
+            # Publish a complete key file without replacing an existing credential.
             os.link(pending.name, path)
         except FileExistsError:
             if not matching_terminal_key(path, key):
@@ -1338,8 +1396,12 @@ def setup_from_archive(archive: Archive, project: Path, *, installers: bool) -> 
 
 def restore(project: Path, archive: Archive, types: tuple[str, ...] | None = None, *, namespace: str = "",
             settings: config.Settings | None = None, configuration: tuple[tuple[Path, ...], Path, str] | None = None,
-            delete: bool = False) -> RestoredBackup:
-    """Verify the whole archive, then restore the selected types in order."""
+            delete: bool = False, system: bool = False) -> RestoredBackup:
+    """Verify the whole archive, then restore the selected types in order.
+
+    The system deployment shares restored settings and installers with its directories' group,
+    keeps its terminal key path and lets that group read a restored key.
+    """
     items = archive.items
     requested = expand_types(types) if types else tuple(kind for kind in TYPES if kind in items)
     missing = [kind for kind in requested if kind not in items]
@@ -1371,16 +1433,19 @@ def restore(project: Path, archive: Archive, types: tuple[str, ...] | None = Non
             stage_files(staging / "config.tar", files, "config")
             if configuration is not None:
                 lower, _, version = configuration
-                settings = restored_settings = stage_configuration(files / "config", lower, config_dir, version)
+                system_key = config.terminal_secret_path(project, settings.terminal_server_secret_file) if system else None
+                settings = restored_settings = stage_configuration(files / "config", lower, config_dir, version,
+                                                                   system_key)
         if "installers" in requested:
             stage_files(staging / "installers.tar", files, INSTALL_CACHE.as_posix())
         checkout_entries = checkout_targets(checkout, project) if "source" in requested else []
-        file_targets = (project_file_targets(files / "config", config_dir)
-                        + project_file_targets(files / INSTALL_CACHE, project / INSTALL_CACHE))
+        config_targets = project_file_targets(files / "config", config_dir)
+        installer_targets = project_file_targets(files / INSTALL_CACHE, project / INSTALL_CACHE)
         terminal_key = config.terminal_secret_path(project, settings.terminal_server_secret_file)
+        # The key keeps its own content and mode; a restored settings file never replaces it.
+        if any(path == terminal_key for _, path in config_targets + installer_targets):
+            raise TransferError("The backup uses the terminal key path for a configuration file.")
         if chats is not None:
-            if any(path == terminal_key for _, path in file_targets):
-                raise TransferError("The backup uses the terminal key path for a configuration file.")
             matching_terminal_key(terminal_key, chats.key)
         if {"models", "webui", "chats"} & set(requested) and "images" not in requested:
             require_helper_image(project, namespace)
@@ -1392,8 +1457,9 @@ def restore(project: Path, archive: Archive, types: tuple[str, ...] | None = Non
             require_inactive_volume(project, volume)
         model_command = model_volume_command(project, namespace, restore=True, delete=delete) if "models" in requested else None
 
-        publish_checkout(checkout_entries)
-        publish_project_files(file_targets)
+        publish_checkout(checkout_entries, staging / "replaced")
+        publish_project_files(config_targets, config_dir.stat().st_gid if system else None)
+        publish_project_files(installer_targets, project.stat().st_gid if system else None)
         if "images" in requested:
             docker_archive(project, ["docker", "image", "load"], staging / "images.tar", "Load images.tar", send=True)
         if model_command is not None:
@@ -1408,7 +1474,7 @@ def restore(project: Path, archive: Archive, types: tuple[str, ...] | None = Non
             if chats.images:
                 docker_archive(project, ["docker", "image", "load"], staging / CHAT_IMAGES, f"Load {CHAT_IMAGES}",
                                send=True)
-            with restore_terminal_key(terminal_key, chats.key):
+            with restore_terminal_key(terminal_key, chats.key, group=SYSTEM_GROUP if system else None):
                 if chat_volumes:
                     docker_archive(project, volume_command(restore=True, namespace=namespace,
                                                            volumes={name: name for name in chat_volumes}),

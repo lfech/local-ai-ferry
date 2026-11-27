@@ -11,8 +11,10 @@ and later layers override earlier ones:
 
 Root, members of the docker group and the loaf systemd service can operate the
 system deployment. Backups in /var/lib/loaf/backup are readable by that group,
-so any member can restore them. The terminal server key is
-/etc/loaf/terminal-server.key.
+so any member can restore them. Restoring settings into /etc/loaf needs root:
+'sudo loaf restore --archive PATH'. Restored settings, installers and the
+terminal server key stay readable by the docker group. The terminal server key
+is /etc/loaf/terminal-server.key.
 
 Start the offline deployment at boot after building or restoring its images:
 
