@@ -6,12 +6,14 @@ Run commands from the project directory unless a step says otherwise.
 
 Use Debian 12 or 13, amd64, with Python 3.10 or newer. The default serving
 mode requires a compatible NVIDIA GPU. A preparation host can serve on CPU
-with `loaf run online --cpu` or `loaf run offline --cpu`. [CPU serving](launcher.md#serve-on-cpu)
+with `loaf run online --cpu` or `loaf run offline --cpu`.
 These steps use the native, system-wide Docker Engine. Use `sudo` for package
 installation, runtime configuration and service administration. Debian 12
 ships Docker 20.10 and Compose 1.29, so it needs Docker's repository. The
 `loaf` Debian package is an alternative to the source and standalone
-installations. [Debian package](installation.md#debian-package)
+installations.
+
+[CPU serving](launcher.md#serve-on-cpu) · [Debian package](installation.md#debian-package)
 
 ## Debian in WSL2
 
@@ -20,7 +22,10 @@ inference, install an NVIDIA Windows driver from the 580 branch or newer with
 WSL2 support, then run
 `nvidia-smi` inside Debian to check GPU passthrough. Install Docker Engine
 inside that distribution. The native Debian GPU driver installation below
-applies to a bare-metal Debian host. [Microsoft WSL systemd guide](https://learn.microsoft.com/en-us/windows/wsl/systemd) · [NVIDIA CUDA on WSL](https://docs.nvidia.com/cuda/wsl-user-guide/index.html)
+applies to a bare-metal Debian host.
+
+[Microsoft WSL systemd guide](https://learn.microsoft.com/en-us/windows/wsl/systemd) ·
+[NVIDIA CUDA on WSL](https://docs.nvidia.com/cuda/wsl-user-guide/index.html)
 
 ## Prepare Debian before disconnecting it
 
@@ -28,7 +33,6 @@ The default CUDA 13 Ollama build needs NVIDIA driver 580 or newer, and the
 CUDA 12 build needs 550 or newer. Debian 13's own driver package, version
 550, works with the CUDA 12 build. Debian 12's package, version 535, is older
 than Ollama supports, so use NVIDIA's repository there.
-[Ollama build selection](configuration.md#select-an-ollama-build-recipe)
 
 For GPU inference on native Debian, first install the driver using the
 [NVIDIA Debian driver guide](https://docs.nvidia.com/datacenter/tesla/driver-installation-guide/latest/debian.html),
@@ -39,6 +43,8 @@ nvidia-smi
 ```
 
 On Debian 12 or 13, [install Docker with loaf](#install-docker-and-cache-its-packages).
+
+[Ollama build selection](configuration.md#select-an-ollama-build-recipe)
 
 ### Install Docker from Docker's repository
 
@@ -70,7 +76,10 @@ Compose **2.30.0 or newer** supports the `gpus: all` setting. Compose
 **2.26.1 through 2.29.x** can use the NVIDIA device reservation and produces a
 compatibility warning in `loaf status`. The documented Compose 2.40.3 build
 run used Buildx 0.20.1. Complete Docker and driver setup before disconnecting.
-[Compose GPU setting](https://docs.docker.com/reference/compose-file/container-spec/#gpus) · [Compose GPU reservations](https://docs.docker.com/compose/how-tos/gpu-support/) · [Verification record](verification-record.md)
+
+[Compose GPU setting](https://docs.docker.com/reference/compose-file/container-spec/#gpus) ·
+[Compose GPU reservations](https://docs.docker.com/compose/how-tos/gpu-support/) ·
+[Verification record](verification-record.md)
 
 ## Docker access
 
@@ -78,7 +87,6 @@ The project commands below assume that your login can access the Docker Engine
 socket. If your account was just added to the `docker` group, log out and back
 in so the next shell inherits the membership. Check the current shell with
 `id -nG`. The group grants root-level control of the host.
-[Docker Engine post-installation guide](https://docs.docker.com/engine/install/linux-postinstall/#manage-docker-as-a-non-root-user)
 
 Once your session has Docker access, check the client, daemon and Compose versions:
 
@@ -86,6 +94,8 @@ Once your session has Docker access, check the client, daemon and Compose versio
 docker version
 docker compose version
 ```
+
+[Docker Engine post-installation guide](https://docs.docker.com/engine/install/linux-postinstall/#manage-docker-as-a-non-root-user)
 
 ## Install the loaf command
 
@@ -107,7 +117,6 @@ shell, and `./loaf` from the checkout root works in any shell. Setup uses a comp
 architecture or fetches the missing installers on a connected host. Set up the
 runtime on a GPU serving host if its Docker daemon has never been configured
 for the toolkit.
-[Python wheel preparation](launcher.md#prepare-python-installation-offline)
 
 ```bash
 sudo nvidia-ctk runtime configure --runtime=docker
@@ -117,6 +126,8 @@ sudo systemctl restart docker
 Restart Docker when no containers need to remain running. Run ordinary
 launcher commands as your regular user with [Docker access](#docker-access).
 For offline recovery, see [Disconnected installation](installation.md#disconnected-debian-installation).
+
+[Python wheel preparation](installation.md#prepare-python-installation-offline) ·
 [NVIDIA installation guide](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
 
 ### Install Docker and cache its packages
@@ -139,15 +150,10 @@ Buildx is missing. Use the same Debian release and package architecture on
 the target. The download needs `ca-certificates`.
 After installation, enable Docker with `sudo systemctl enable --now docker`
 and give your login [Docker access](#docker-access).
+
 [Debian Docker packages](https://packages.debian.org/trixie/docker.io) ·
 [Docker's Debian repository](https://docs.docker.com/engine/install/debian/) ·
 [Offline installation](installation.md#disconnected-debian-installation)
-
-## Use a prepared archive
-
-Restore a backup folder as [Debian restore](transfer.md#debian-restore)
-shows, or add only its models to an existing deployment with
-[model transfer](transfer.md#transfer-models-between-existing-deployments).
 
 ## Verify and open WebUI
 
@@ -167,15 +173,3 @@ ssh -N -L 3001:127.0.0.1:3000 user@debian-host
 
 Keep that terminal open and browse to **http://localhost:3001**. Use a free local port for the forward.
 To publish WebUI directly to the LAN, follow the [local network guide](local-network.md).
-
-## Prepare models directly on online Debian
-
-A connected host that also serves follows the [Quick Setup](../README.md#quick-setup)
-and needs no backup. [Model selection](launcher.md#select-models) ·
-[Debian backup](transfer.md#debian-backup)
-
-## Stop and inspect
-
-The [Debian smoke checks](verification.md#debian-smoke-checks) inspect the
-running services. [`loaf stop`](cli-help.md#stop) stops them; the data stays
-in the volumes.

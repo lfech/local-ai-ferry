@@ -48,12 +48,15 @@ All relevant test runs shall be recorded into `docs/verification-record.md`.
 | Commands and options | [CLI reference](docs/cli-help.md) |
 | Design, profiles, networking and storage | [Architecture](docs/instructions/architecture.md) |
 | Settings, defaults and override order | [Configuration](docs/configuration.md), [working](config/config.ini) and [packaged](python-package/src/loaf/data/config/config.ini) `config.ini` |
-| Package installation, model selection and direct Compose use | [Launcher](docs/launcher.md) |
+| Model selection, serving modes and failure handling | [Serving and model selection](docs/launcher.md) |
 | Model choices and context estimates | [Models](docs/models.md), [working](config/models.ini) and [packaged](python-package/src/loaf/data/config/models.ini) `models.ini` |
-| Host setup, offline installation and the Debian package | [Debian](docs/debian.md), [Installation](docs/installation.md), [package sources](packaging/debian/) |
+| Host preparation: NVIDIA driver, Docker, Docker access and WSL2 | [Debian](docs/debian.md) |
+| Installation channels, offline Python installation and the Debian package | [Installation](docs/installation.md), [package sources](packaging/debian/) |
+| Upgrades of each channel, the terminal server and old deployment names | [Upgrade](docs/upgrade.md) |
+| systemd, Continue and Tether | [Host integrations](docs/integrations.md) |
 | Open Terminal workspaces | [Terminal server](docs/terminal-server.md) |
 | Archives, backup and restore | [Transfer](docs/transfer.md) |
-| Release builds and the standalone executable | [Releases](docs/releases.md) |
+| Release builds and the standalone executable's build | [Releases](docs/releases.md) |
 | Operational problems | [Troubleshooting](docs/troubleshooting.md) |
 | Test suites and coverage; dated results | [Verification](docs/verification.md), [verification record](docs/verification-record.md) |
 | Open tasks; dated milestones | [Development](docs/instructions/development.md), [development record](docs/development-record.md) |

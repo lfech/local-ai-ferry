@@ -659,8 +659,11 @@ class CliTests(unittest.TestCase):
 
     def test_offline_with_a_connected_terminal_network_notes_the_access(self):
         with tempfile.TemporaryDirectory() as folder:
-            Path(folder, 'config.ini').write_text('[terminal_server]\nenabled = true\nnetwork = connected\n',
-                                                  encoding='utf-8')
+            # Its own key: run refuses a missing one, and a fresh checkout such as CI's has none.
+            key = Path(folder, 'terminal-server.key')
+            key.write_text('k' * 32, encoding='ascii')
+            Path(folder, 'config.ini').write_text(
+                f'[terminal_server]\nenabled = true\nnetwork = connected\nsecret_file = {key}\n', encoding='utf-8')
             for mode, noted in (('offline', True), ('online', False)):
                 with self.subTest(mode=mode), patch('loaf.cli.execute_plan'), \
                         redirect_stdout(io.StringIO()) as output, redirect_stderr(io.StringIO()):

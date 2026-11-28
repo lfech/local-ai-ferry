@@ -10,7 +10,6 @@ through Open WebUI on connected or disconnected hosts. The documented hosts
 are native Debian and Debian in WSL2 with Docker Engine and Compose 2.26.1 or
 newer. The launcher uses the Python 3.10+ standard library. The standalone
 Linux amd64 executable supplies its own Python and deployment files.
-[Installation](../installation.md) · [Release executable](../releases.md#run-the-executable)
 
 Three channels deliver the same launcher: the repository for development,
 the standalone executable for portable deployment directories, and the
@@ -23,7 +22,10 @@ Settings layer as packaged defaults, then `/etc/loaf`, then a project's
 `config/config.ini`, and later layers override earlier ones. Only a project
 can move or skip the system layer. Every channel carries the guides of its
 release for `loaf docs`.
-[Settings layers](../configuration.md#project-configuration) · [Debian package](../installation.md#debian-package)
+
+[Installation](../installation.md) · [Release executable](../installation.md#standalone-executable) ·
+[Settings layers](../configuration.md#project-configuration) ·
+[Debian package](../installation.md#debian-package)
 
 ## CLI and Compose profiles
 
@@ -33,13 +35,10 @@ terminal server context and the default configuration. Both Ollama images
 build from one context with a multi-stage Dockerfile for registry bases and
 the bundled CPU, CUDA 12 and CUDA 13 recipes. Each Dockerfile and default build secret
 stays inside its context, which Compose always allows Buildx to read.
-[Ollama build selection](../configuration.md#select-an-ollama-build-recipe) ·
-[Terminal server](../terminal-server.md)
 `loaf setup` runs selectable parts like the types of `loaf backup`; `all`,
 the default, holds the parts that the installation needs, and the others run
 when named. A part keeps what exists unless `--force` replaces it, the flag
 that also confirms removals in `clean --full` and `docker rm`.
-[Setup parts](../cli-help.md#setup)
 
 The [command reference](../cli-help.md) explains every command and option.
 `loaf run offline` and `loaf run online` start a serving profile, `loaf stop`
@@ -52,13 +51,13 @@ with its own deployment files: the source checkout's, the standalone
 executable's runtime, the wheel's or the Debian package's. A project holds
 only settings and data: a source checkout is one, and elsewhere the settings
 that `setup` creates make one. Users reach the containers by their fixed
-names with plain Docker commands. [Inspect the containers](../launcher.md#inspect-the-containers)
+names with plain Docker commands.
 Local configuration overrides individual packaged keys. A local model INI
 supplies the entire selected list. Use `--config-dir` to select a different
 override directory.
 Download and `backup --export` use the selected model INI. Named sections
 replace `[models.default]`. An optional `name` creates an Ollama alias, and download then removes the long
-source name unless another entry selects the source without a name. [Model selection](../launcher.md#select-models)
+source name unless another entry selects the source without a name.
 
 The launcher holds a per-directory OS lock across Compose transitions and
 transfers. The serving and build plans validate Compose configuration before
@@ -71,6 +70,11 @@ completed downloads and exports.
 `--attach` follows Compose logs after the workflow releases the lock.
 `--wait-timeout` controls the Compose readiness wait and defaults to 300
 seconds; `0` waits without a limit. Option names are not abbreviated.
+
+[Ollama build selection](../configuration.md#select-an-ollama-build-recipe) ·
+[Terminal server](../terminal-server.md) · [Setup parts](../cli-help.md#setup) ·
+[Inspect the containers](../launcher.md#inspect-the-containers) ·
+[Model selection](../launcher.md#select-models) ·
 [Launcher options and failure handling](../launcher.md)
 
 ## Model storage and serving
@@ -87,7 +91,6 @@ shared volumes to the next profile. Startup uses local images with
 `--no-build --pull never`. Each Compose service has `scale: 1`. The serving
 services and the terminal server restart with Docker unless loaf stopped
 them; the downloader never starts by itself.
-[Compose definition](../../python-package/src/loaf/data/compose.yml)
 
 Every Docker resource name starts with the deployment namespace, which is
 also the Compose project: `loaf` by default and `loaf-NAME` for a deployment
@@ -101,8 +104,6 @@ provisioner names its chat containers, bridges and user volume
 commands use the namespace name when naming backup folders and checking
 restored images. Volumes that loaf creates carry Compose's labels, so Compose uses
 them without a warning.
-[Separate namespaces](../launcher.md#run-a-separate-namespace) ·
-[Docker resources](../cli-help.md#docker)
 
 All three Ollama services mount the Compose volume `ollama`, named
 `loaf-ollama` by default, at `/ollama`. Its
@@ -112,7 +113,6 @@ where tags can link to content-addressed manifest blobs.
 The export helper atomically writes complete Modelfiles under
 `config/`, preserving model names, tags, templates and blob references.
 Changing the selection leaves existing exports and registrations in place.
-[Storage layout](../configuration.md#services-and-storage)
 
 Both serving profiles use the same Ollama image and startup wrapper.
 NVIDIA GPU inference is the default and requires a compatible host driver
@@ -121,14 +121,13 @@ and the CUDA 12 recipe needs 550 or newer. The Compose service definition suppli
 for Compose 2.30 and newer and a device reservation for 2.26.1 through 2.29.x.
 With `--cpu`, the launcher applies `compose.cpu.yml` to remove the GPU
 requests and hide GPU devices from Ollama. CPU serving uses the same image,
-volumes and startup wrapper. [Docker and Compose requirements](../debian.md#prepare-debian-before-disconnecting-it) ·
-[CPU serving](../launcher.md#serve-on-cpu)
+volumes and startup wrapper.
 
 The startup wrapper waits for the local API, then recursively imports saved
 `.model` files from `/ollama/config`. With no exports, Ollama serves existing
 registrations. An import failure blocks backend readiness, and WebUI waits
 for a healthy backend. Ollama defaults to a 16,384-token context and a
-60-second API startup wait. [Startup and configuration](../configuration.md#applying-changes)
+60-second API startup wait.
 
 Both serving profiles use the same WebUI image and persist accounts, chats and
 settings in the `open-webui` volume. WebUI reaches Ollama at
@@ -142,7 +141,16 @@ downloads by default. Offline settings disable Ollama cloud features and
 suppress automatic WebUI downloads. Both WebUI profiles opt out of telemetry.
 Offline WebUI's regular bridge can still provide outbound access while the
 host is connected. Physical disconnection isolates the host from external
-networks. [Networking and offline operation](../configuration.md#networking-and-offline-operation)
+networks.
+
+[Compose definition](../../python-package/src/loaf/data/compose.yml) ·
+[Separate namespaces](../launcher.md#run-a-separate-namespace) ·
+[Docker resources](../cli-help.md#docker) ·
+[Storage layout](../configuration.md#services-and-storage) ·
+[Docker and Compose requirements](../debian.md#prepare-debian-before-disconnecting-it) ·
+[CPU serving](../launcher.md#serve-on-cpu) ·
+[Startup and configuration](../configuration.md#applying-changes) ·
+[Networking and offline operation](../configuration.md#networking-and-offline-operation)
 
 ## Open Terminal workspaces
 
@@ -160,7 +168,7 @@ stores it while it has no terminal connections, for administrators or, with
 WebUI supplies the authenticated account and, when available, the chat
 session. The provisioner authenticates the connection with the terminal bearer
 key and routes file requests, model commands and terminal streams to the
-corresponding runner. [Terminal connection](../terminal-server.md#enable-and-connect)
+corresponding runner.
 
 Compose mounts the Docker socket in the provisioner so it can create a
 container and internal bridge for each chat. Draft requests use one container
@@ -177,7 +185,6 @@ network` decides further access: `isolated` keeps containers on their bridge
 alone, and `connected` also attaches them to a shared bridge with outbound
 access and inter-container traffic disabled. `loaf run offline` prints a
 note, not a warning, about that access.
-[Workspace isolation and limits](../terminal-server.md#workspace-policy)
 
 A configured `apt_source_file` replaces inherited sources during an image
 build, and in chat containers at runtime. At startup, the launcher copies its
@@ -189,8 +196,6 @@ read-only at `/run/loaf-apt/repository`. A container records the paths of
 its runtime mounts, the repository and the network setting it was created
 with; a change replaces it on the next start. Changed contents at the same
 paths apply on its next start, so a new loaf release keeps chat containers.
-[Package mirror](../terminal-server.md#package-mirror-for-image-builds) ·
-[Install packages in a chat](../terminal-server.md#install-packages-in-a-chat)
 
 | Folder | Storage and lifetime |
 | --- | --- |
@@ -202,7 +207,7 @@ The file browser root is `/home`. `HOME` is `/home/user`, so dotfiles persist
 with the account. The default working directory is `/home/chat` in a chat and
 `/home/user` in a draft. The provisioner supplies `user` and `chat` as direct
 entries in Open WebUI's **Working Directory** menu alongside the account's
-folder history. [Files and working directory](../terminal-server.md#use-the-terminal-from-a-model)
+folder history.
 
 The bundled deployment mounts the existing `open-webui` volume read-only in
 the provisioner. It checks saved chat ownership and existence in the WebUI
@@ -213,6 +218,12 @@ Terminal's `/api/terminals`, which would otherwise keep it busy. At shutdown,
 the provisioner stops the containers of saved chats and drafts and removes
 those of temporary chats.
 Releases before v1.0.0 migrate no terminal data from earlier layouts.
+
+[Terminal connection](../terminal-server.md#enable-and-connect) ·
+[Workspace isolation and limits](../terminal-server.md#workspace-policy) ·
+[Package mirror](../terminal-server.md#package-mirror-for-image-builds) ·
+[Install packages in a chat](../terminal-server.md#install-packages-in-a-chat) ·
+[Files and working directory](../terminal-server.md#use-the-terminal-from-a-model) ·
 [Workspace lifecycle](../terminal-server.md#workspace-policy)
 
 ## Backup and restore
@@ -253,7 +264,6 @@ capturing `webui` or `terminal`, and only the downloader for `models`. Model
 snapshots tolerate the selected deployment's serving backend. All Docker
 operations use disposable, network-disabled containers from the local
 downloader image; neither direction copies the model store first.
-[Model transfer](../transfer.md#transfer-models-between-existing-deployments)
 
 Restore reads `loaf.json`, refuses formats outside `[transfer]
 backup_version_min` to the release's format and named types missing from the
@@ -273,7 +283,7 @@ offline Ollama alone and applies saved Modelfiles. Add `--cpu` to run the
 replay on CPU. The optional backup `--export` step refreshes selected cached
 Modelfiles before capturing `models`. Both options run under the transfer's
 project lock. A prepared compatible host can restore and start offline
-without network access. [Backup and restore](../transfer.md)
+without network access.
 
 Restored settings and installers are owner-only. In the system deployment
 they are readable by the group of `/etc/loaf` and `/var/lib/loaf`, the
@@ -282,7 +292,6 @@ group. The terminal key never takes its mode from a directory: it is
 owner-only in a project and readable by root and the `docker` group in the
 system deployment, like the key that the package creates. Compose, run by
 that group, reads it. A settings file is never restored at the key's path.
-[Restore behavior](../transfer.md#restore-behavior)
 
 Setup and restore run in a backup folder make it the project. They move the
 archive and its launcher unchanged to
@@ -302,7 +311,6 @@ Restoring `source` replaces existing files with the archived ones and puts
 them back if publishing fails; guides that standalone setup exported give way
 to the checkout's `docs/` as a whole. Standalone setup exports guides only
 outside a source checkout.
-[Backup recovery](../transfer.md#debian-restore)
 
 Source setup caches Python wheels in `install-cache/wheels/` and matching
 NVIDIA Toolkit installers in `install-cache/deb/nvidia/`. On Debian 12 or 13,
@@ -311,4 +319,9 @@ required packages with a local APT index under `install-cache/deb/docker/`.
 Debian 13 uses its own Docker packages. Debian 12 uses Docker's repository,
 trusted through a pinned key, with a private APT state. Each Docker cache targets one Debian release and
 package architecture. Standalone setup can install matching packages from
-the backup with the same parts. [Debian installation](../installation.md#disconnected-debian-installation)
+the backup with the same parts.
+
+[Model transfer](../transfer.md#transfer-models-between-existing-deployments) ·
+[Backup and restore](../transfer.md) · [Restore behavior](../transfer.md#restore-behavior) ·
+[Backup recovery](../transfer.md#debian-restore) ·
+[Debian installation](../installation.md#disconnected-debian-installation)

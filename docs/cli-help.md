@@ -31,7 +31,9 @@ loaf integration systemd --help
 | `-v`, `--verbose` | Show external commands where available. With `test`, show individual test names. |
 
 The standalone executable also accepts `./loaf --license` to print its
-bundled license notices and source locations. [Standalone license](releases.md#standalone-license)
+bundled license notices and source locations.
+
+[Standalone license](releases.md#standalone-license)
 
 ## Shared options
 
@@ -77,12 +79,12 @@ are updated in place.
 Every installation uses its own deployment files: the Compose file, the build
 contexts and the packaged defaults that `loaf version` locates. A project holds
 only settings and data. A source checkout is a project; elsewhere, the settings
-that `setup config` creates make one. [Inspect the containers](launcher.md#inspect-the-containers)
+that `setup config` creates make one.
 
 - Run in a backup folder, setup makes the folder the project, moves the
   backup to `backup/`, copies the backup's launcher into the project and
   prints the restore command to run next. There, `docker-deps` and `toolkit`
-  install from the backup's `installers`. [Debian restore](transfer.md#debian-restore)
+  install from the backup's `installers`.
 - When the terminal server is enabled but its key is missing, setup prints
   the command that creates it.
 - `--archive PATH` selects the backup folder or archive for setup outside the
@@ -104,7 +106,9 @@ former options `--with-docker-deps`, `--terminal-server-key` and
 `loaf setup tests` caches the pinned test packages as wheels and installs
 them into the virtualenv that runs `loaf`. It needs Python 3.11 or newer and
 a source checkout, and accepts only `--dry-run` and the global options.
-[Test packages](launcher.md#test-packages)
+
+[Inspect the containers](launcher.md#inspect-the-containers) ·
+[Debian restore](transfer.md#debian-restore) · [Test packages](installation.md#test-packages)
 
 ### install
 
@@ -115,10 +119,11 @@ Alias for [`setup`](#setup) with the same options.
 Build release files from the working source checkout into `dist/`. Name one
 or both targets; they run in the given order and stop at the first failure.
 Both run `scripts/build-release.sh` and need Linux on amd64. Uses `--dry-run`.
-[Local builds](releases.md#build-and-check-locally)
 
 - `binary` builds or replaces the standalone executable `dist/loaf` and its `dist/LICENSE.txt`.
 - `debian` builds `dist/loaf_<version>_all.deb` with the standalone executable that system backups carry. It needs `dpkg-deb`.
+
+[Local builds](releases.md#build-and-check-locally)
 
 ### clean
 
@@ -127,7 +132,7 @@ Remove loaf's runtime cache under `~/.local/share/loaf/`, or
 the selected project. Uses `--dry-run`.
 
 - `--full` also removes the project virtualenv, generated build and release
-  files and the packaged Docker link. It asks before it removes
+  files and the `docker-project` link of an earlier release. It asks before it removes
   `install-cache/`, whose installers an offline host cannot download again,
   and keeps it without a terminal.
 - `-f`, `--force` with `--full` removes `install-cache/` without asking. The former `--yes` names it.
@@ -161,6 +166,7 @@ Manage Bash completion for `loaf`. It completes commands, subcommands,
 archive and resource types, guide names and options. Option values complete
 as directories for `--project-dir`, `--config-dir` and `--backup-dir`, and as
 files for `--models-file` and `--archive`. Takes the global options.
+
 [Bash completion setup](launcher.md#bash-completion)
 
 #### completion install
@@ -185,7 +191,9 @@ Print the completion script to standard output.
 
 Build the local Ollama and WebUI images and the terminal image when enabled.
 Uses `--config-dir PATH`, `--namespace NAME`, `--dry-run`, and `-a` or
-`--attach`. [Image recipes](configuration.md#select-an-ollama-build-recipe)
+`--attach`.
+
+[Image recipes](configuration.md#select-an-ollama-build-recipe)
 
 ### upgrade
 
@@ -200,6 +208,7 @@ into the shared Ollama store. A model with a `name` gets that name, and its
 long `hf.co/…` name is removed. Prints the command that starts offline serving
 next. Uses `--models-file PATH`, `--config-dir PATH`, `--namespace NAME`,
 `--dry-run`, `--wait-timeout SECONDS`, and `-a` or `--attach`.
+
 [Model selection](launcher.md#select-models)
 
 ### run
@@ -211,14 +220,16 @@ stops the other, because both use the same volumes.
 - `offline` puts Ollama on an internal network and gives WebUI its offline
   settings. With `[terminal_server] network = connected`, it notes that chat
   containers that models drive can reach every address the Docker host reaches.
-  [Offline operation](configuration.md#networking-and-offline-operation)
 - `online` gives Ollama and WebUI internet access.
 
 Uses `--config-dir PATH`, `--namespace NAME`, `--dry-run`,
 `--wait-timeout SECONDS`, and `-a` or `--attach`. The former commands
 `loaf offline` and `loaf online` point to this one.
 
-- `--cpu` selects CPU inference. The default uses NVIDIA GPU acceleration. [CPU serving](launcher.md#serve-on-cpu)
+- `--cpu` selects CPU inference. The default uses NVIDIA GPU acceleration.
+
+[Offline operation](configuration.md#networking-and-offline-operation) ·
+[CPU serving](launcher.md#serve-on-cpu)
 
 ### restart
 
@@ -234,7 +245,9 @@ Docker and needs the profile.
 Uses `--config-dir PATH`, `--namespace NAME`, `--dry-run`,
 `--wait-timeout SECONDS`, and `-a` or `--attach`.
 
-- `--cpu` starts the profile with CPU inference. [CPU serving](launcher.md#serve-on-cpu)
+- `--cpu` starts the profile with CPU inference.
+
+[CPU serving](launcher.md#serve-on-cpu)
 
 ### status
 
@@ -269,9 +282,10 @@ terminal server included. Named volumes, bind-mounted files, images and
 networks stay; container logs and files only in a container's writable layer
 go. Uses `--config-dir PATH`, `--namespace NAME`, `--dry-run`, and `-a` or
 `--attach`. A dry run cannot ask Docker and says how a real run decides.
-[Compose container removal](https://docs.docker.com/reference/cli/docker/compose/rm/)
 
 - `--no-remove-containers` keeps the stopped containers and their logs.
+
+[Compose container removal](https://docs.docker.com/reference/cli/docker/compose/rm/)
 
 ### docker
 
@@ -314,15 +328,14 @@ Create a dated backup folder with the archive and the standalone `loaf`
 executable that can restore it. The archive's first member, `loaf.json`,
 records the hash of every member and of the executable. At the end, backup
 prints the SHA-256 of the archive and the executable to record apart from the
-transfer media. [Archive contents](transfer.md#archive-contents) ·
-[Check a copied backup](transfer.md#check-a-copied-backup)
+transfer media.
 
 Name the types `source`, `config`, `installers`, `images`, `models`, `webui`
 and `terminal`, or the aliases `project` and `volumes`, or omit them to save
 every available type. `source` is available in a source checkout; `terminal`
 adds `webui`. Without type names, `terminal` is included when the terminal
 server is enabled and `[terminal_server] include_in_backup` is true, the
-default. [Archive types](transfer.md#select-archive-types)
+default.
 
 A source checkout builds the executable from its working files first. Other
 installations include the running standalone executable, or the one that the
@@ -352,6 +365,10 @@ and `-a` or `--attach`.
   from `[transfer] export_models`.
 - `--models-file PATH`, `--wait-timeout SECONDS` apply when refreshing Modelfiles.
 
+[Archive contents](transfer.md#archive-contents) ·
+[Check a copied backup](transfer.md#check-a-copied-backup) ·
+[Archive types](transfer.md#select-archive-types)
+
 ### restore
 
 Check a backup and restore its types. All members are checked against the
@@ -359,7 +376,7 @@ hashes in `loaf.json` before the first change, and Docker preconditions, such
 as empty target volumes, before the archive is read. Name the types as for
 `backup`, or omit them to restore everything in the archive. A named type
 must be in the archive; an alias selects the types of its group that the
-archive contains. [Restore behavior](transfer.md#restore-behavior)
+archive contains.
 
 - `models` merge into the Ollama store; `--delete` mirrors them.
 - `webui` and `terminal` need new or empty volumes; `terminal` adds `webui`.
@@ -386,6 +403,8 @@ with `--archive`.
 - `--cpu` uses CPU inference when starting Ollama to apply Modelfiles.
 - `--wait-timeout SECONDS` applies when starting Ollama to import Modelfiles.
 
+[Restore behavior](transfer.md#restore-behavior)
+
 ### integration
 
 Choose an integration to print. `loaf integration --help` lists the names.
@@ -393,24 +412,31 @@ Choose an integration to print. `loaf integration --help` lists the names.
 #### integration systemd
 
 Print a systemd unit that starts offline serving and stops the deployment.
-Uses `--config-dir PATH` and `--namespace NAME`. [Systemd setup](installation.md#systemd)
+Uses `--config-dir PATH` and `--namespace NAME`.
 
 - `--cpu` makes the unit serve with CPU inference.
+
+[Systemd setup](integrations.md#systemd)
 
 #### integration continue
 
 Print Continue YAML for the selected models. Uses `--config-dir PATH` and
-`--models-file PATH`. [Continue setup](installation.md#continue-for-vs-code)
+`--models-file PATH`.
+
+[Continue setup](integrations.md#continue-for-vs-code)
 
 #### integration tether
 
 Print Open WebUI Tether installation instructions. Takes the global options.
-[Tether setup](tether.md)
+
+[Tether setup](integrations.md#open-webui-tether)
 
 ### test
 
 Run the checkout's unittest suite. Uses `--config-dir PATH` to select the
-test settings. Use `-v` for individual case names. [Verification guide](verification.md)
+test settings. Use `-v` for individual case names.
 
 - `--badges` records the run and refreshes badges for the groups that ran.
 - `--cpu` enables Docker checks and runs the model workflows with CPU inference.
+
+[Verification guide](verification.md)

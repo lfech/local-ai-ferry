@@ -3,11 +3,13 @@
 [Project overview](../README.md)
 
 Run the tests in Debian or Debian in WSL2, from the project directory with the
-[editable package installed in `.venv`](launcher.md#install-the-package).
+[editable package installed in `.venv`](installation.md#source-checkout).
 The suite uses Python's standard `unittest` runner.
 See the [verification record](verification-record.md) for dated results.
 Run `./loaf setup tests` once to install the packages for the
-terminal server API tests. [Test packages](launcher.md#test-packages)
+terminal server API tests.
+
+[Test packages](installation.md#test-packages)
 
 ## Run the fast suite
 
@@ -36,85 +38,6 @@ Run documentation checks separately when editing a guide.
 (cd python-package && ../.venv/bin/python -m unittest tests.test_documentation)
 ```
 
-## README test badges
-
-The README badges show each group's latest recorded local date and time
-and its pass count. Each badge links to the environment and results.
-Run `loaf test --badges` to record the run, generate the SVGs in `docs/badges/`,
-and update the README links. Use `-v` to display individual results as usual.
-The [GitHub Verify workflow](../.github/workflows/verify.yml) runs
-the baseline on Python 3.10, 3.11 and 3.13 and smoke-tests a wheel on each. On
-Python 3.13 it runs `loaf setup tests` first, so the provisioner and runner
-tests run too, and builds the Debian package and installs it on Debian 12 and
-13.
-
-The badge total counts the test cases that executed in that run. For
-example, a run that passes four Open Terminal cases shows `4/4 passed` when
-the other Open Terminal cases are skipped. Failures count toward the total
-and make the badge red. Groups with zero executed cases retain their
-previous badge and link. Plain `loaf test` and `loaf test -v` report to the terminal.
-
-| Badge | What counts |
-| --- | --- |
-| CLI baseline | Core tests with the `RUN_*_TESTS` opt-ins disabled, including CLI, configuration, setup, transfers, and documentation. The local rsync check needs `rsync` on `PATH`. |
-| Docker | Compose configuration, image contracts, shell helpers, volume transfer, container lifecycle, and model workflows run on CPU. |
-| Open Terminal | The provisioner and runner API tests and the opt-in Open WebUI workspace tests. |
-| GPU inference | The real Ollama GPU workflows, including inference and model transfer. |
-| Model catalog | One test with subtests for each distinct Hugging Face model reference. |
-
-Run the CLI baseline from the checkout root. Open Terminal API cases depend
-on optional packages and count toward the Open Terminal badge if they run.
-
-```bash
-RUN_DOCKER_TESTS=0 RUN_GPU_TESTS=0 RUN_TERMINAL_SERVER_TESTS=0 \
-    RUN_CPU_TESTS=0 RUN_CATALOG_TESTS=0 ./loaf test --badges
-```
-
-Use the following selectors from `python-package/` to count each advanced
-group independently. See the prerequisites for [Docker](#docker-configuration-and-real-shell-scripts),
-[GPU](#full-isolated-gpu-workflow), [Open Terminal](#terminal-server-checks), and
-[catalog](#check-the-model-example-specifiers) below.
-
-```bash
-RUN_DOCKER_TESTS=1 ../.venv/bin/python -m unittest -bv \
-    tests.test_docker.ComposeContractTests tests.test_docker.BuiltImageTests \
-    tests.test_docker.ShellHelperTests tests.test_docker.DockerTests
-RUN_DOCKER_TESTS=1 RUN_GPU_TESTS=1 ../.venv/bin/python -m unittest -bv tests.test_docker_gpu
-RUN_DOCKER_TESTS=1 RUN_CPU_TESTS=1 ../.venv/bin/python -m unittest -bv tests.test_docker_gpu
-RUN_TERMINAL_SERVER_TESTS=1 ../.venv/bin/python -m unittest -bv \
-    tests.test_terminal_server.TerminalServerDockerTests
-../.venv/bin/python -m unittest -bv \
-    tests.test_terminal_server.ProvisionerTests tests.test_terminal_server.RunnerTests
-RUN_CATALOG_TESTS=1 ../.venv/bin/python -m unittest -bv tests.test_catalog
-```
-
-## Verification coverage
-
-Docker, GPU and network checks are opt-in. The fast suite runs without those
-dependencies. Set opt-ins for `loaf test` under `[tests]` in `config.ini`
-or override them for a run with the flags below. Transfer tests require Git.
-
-| Group | Coverage |
-| --- | --- |
-| Launcher and package | Top-level and command help, rejected option combinations and abbreviations, model-list parsing, Compose command order, `run` with its two profiles and the pointer from the former `offline` and `online` commands, `restart` with a profile and without one, where it restarts the profile that serves and refuses when none or both serve or in a dry run, `stop` of one profile that keeps the terminal server while the other one serves, foreground log following, default container removal and its only opt-out `--no-remove-containers`, `--wait-timeout 0` without a limit and refused negative values, `run` refusing `--models-file`, the note for a connected terminal network, dry runs that report a missing backup or a missing standalone executable, the follow-up command that names `--namespace` only when the settings select another one and uses `./loaf` in a checkout with its launcher link or `loaf` in an activated virtualenv, the dry run that refuses a missing terminal key and names `setup terminal-server-key` with `--config-dir`, the pointers from the former setup options and from `link-docker-project`, `package debian` through the release build, default and verbose output, deployment links, failure handling, concurrency, shell quoting, the installed entry points and test output. |
-| Bash completion | Runs the generated script in Bash for commands, subcommands, serving profiles, types, guide names, options per command, skipped option values in both `--name value` and `--name=value` form, and directory and file values. Checks that bash-completion finds the per-user file, that install and remove leave foreign files alone, `BASH_COMPLETION_USER_DIR`, and the Debian package case. The Debian package checks complete a word with the system script and confirm that purging removes it. |
-| Docker resources | Uses a simulated Docker daemon. Checks that `loaf docker ps` lists only the selected deployment's containers, images, volumes and networks in aligned tables, including the terminal server's chat containers and networks. Checks `--namespace`, chat containers that inherit the provisioner image's Compose labels, the confirmation prompt, `--force` and the pointer from the former `--yes`, the refusal of networks, volumes and images while containers remain, the graceful stop and removal order, a network that disappears after the listing, and that a dry run calls no Docker. Also checks the Compose labels on volumes that loaf creates. |
-| Cleanup | Checks both scopes, dry-run, lock contention, symlink boundaries, the question before `--full` removes `install-cache/` with `--force` and without a terminal, the cached Python runtime downloads that do not protect it, and preservation of Git work, credentials and backup archives. |
-| Host setup | Checks APT-managed and pyenv interpreters, wheel reuse and refresh, virtualenv recovery, setup diagnostics, the refusal of source setup as root without `--allow-root`, the hint for a virtualenv owned by another user, standalone setup from a wheel installation outside a checkout, the setup parts with `all` as the default and only the named parts otherwise, the refusal of `docs` in a checkout and of `venv` outside one, the default `config.ini` and model list in the selected `--config-dir`, existing settings and keys that stay until `--force` replaces them, a key only with `terminal-server-key`, the virtualenv activation hint, and the NVIDIA toolkit cache. Also checks that Docker setup is opt-in and uses only the prepared APT source when the cache is present. |
-| Configuration | Checks packaged defaults and their Compose and Dockerfile fallbacks, local overrides, model file selection, INI validation including the renamed `[launcher] version`, single-line edits that keep comments, and resolved Compose settings. |
-| Host integrations | Checks the generated systemd unit, with its Docker dependency and stop timeout like the packaged unit and `--cpu`, and the Continue YAML with its default roles and commented capabilities, against project paths, namespace, WebUI settings and model selection. Checks that the Tether command prints installation steps and the official downloads link. |
-| Transfer | Uses real project files and archives with simulated Docker calls. Checks that `loaf.json` comes first and lists every member's size and hash and the launcher's, the restore of every type into a new project, type and alias selection with aliases limited to the archive's types, that a release download folder is no backup folder and an older folder's `SHA256SUMS` moves with it, a launcher with another hash that only warns, recompressed archives that verify and truncated ones that fail, Docker checks before the archive is read, a warning instead of a failure without NVIDIA toolkit packages, the command that resumes serving after a backup, the terminal round trip with the user volume's labels and the key, the Compose labels on restored volumes, restores into the same and another namespace, config links that stay links and links outside their scope that backup and restore refuse, `--verify` running restore's checks without temporary copies, refused populated or mislabeled target volumes before any change, `--no-terminal-server` backups that restore with the terminal disabled and its saved connection removed, single-line settings edits, dry runs that report missing backups, types and checkouts, the cached Python runtime in `installers`, the default settings after restore into a project without them, the guides that standalone setup exported giving way to a restored checkout's `docs/`, the archive and launcher hashes that backup and `--verify` print, the `setup terminal-server-key` hint for a missing key, the `--cpu` hint after a CPU replay, setup and restore inside a backup folder that becomes the project, source restores over existing files with rollback, and the rejection of changed, older, newer and unsafe archives before any change. Also checks Modelfile replay, v1 and v2 model archives, and that the model scripts stream the store and import it without a second copy. The Docker suite merges and mirrors models into another namespace through the CLI. |
-| Readiness | Checks Docker and Compose version reporting with the legacy bridge warning only for an enabled terminal server, Open Terminal image and key reporting, the `loaf build` and `loaf restore images` hint for a missing image, GPU and volume probes, the hint for a missing model volume, recognition of the deployment's WebUI port, and relative Ollama v2 manifest links. |
-| Open WebUI tool history | Checks the optional compatibility filter for interrupted Ollama tool turns, including provider selection, preserved tool results, and repeated requests. |
-| Documentation | Checks local links, heading anchors and guide navigation. Parses Bash examples. Checks that the command reference covers every command and global flag. |
-| Deployment | Checks settings layers and `system_config`, system mode and the Debian default, the collision warning, shared locks in setgid directories, the running installation's deployment files for every project, also with a Compose file or a `docker-project` link of its own, settings or a checkout as what makes a directory a project, `loaf version`, and the bundled guides that stay until `--force` replaces them, their exported links and the manual page. |
-| Debian package | With Docker, builds the `.deb` with `scripts/build-release.sh --debian-only`, checks control fields, conffiles and files including the standalone executable, then installs, runs and purges it on Debian 12 and 13. The checks include the backup preview with the packaged executable and, on amd64, that executable itself. The manual page passes `groff` with warnings enabled. [Package checks](../python-package/tests/debian_package_checks.sh) |
-| Release tagging | Uses temporary Git repositories to check version selection, annotated tags, previews, and tag-only pushes and retries. Requires Python 3.11 or newer. |
-| Docker | Checks resolved Compose profiles, the restart policy that brings back the serving services and the terminal server but not the downloader, CPU and GPU device settings, image settings, and that each Dockerfile and build secret stays inside its build context. Tests each export and startup shell scenario, verifies container removal and the stop opt-out, and runs a two-volume archive round trip. `loaf docker rm all` removes exactly the resources of a disposable deployment and keeps the shared image. |
-| CPU and GPU model workflows | Check downloaded model exports, offline Ministral inference, startup failure and recovery, explicit Modelfile replay, and model archive mirroring with the connected services running. |
-| Terminal server | Checks the WebUI connection preset from the key with `webui_access`, the key secret for both WebUI services and the Compose override that adds it, credential validation, HTTP and WebSocket proxying to the chat's container, the root container policy with only the account's folder of the user volume, network access settings, a runtime APT source that replaces the image's sources and whose replaced file a chat sees on its next start without a new container, runtime scripts at one project path with a revision from the mount paths, `apt install` without `-y` or a terminal, resuming stopped containers and replacing them after a configuration change, startup reconciliation and shutdown, closing the disconnected shells of an idle container before it stops, file browsing and chat deletion, `apt` as root, development tools through Open WebUI, and backup and restore of the image, user volume and key. Transfer tests also cover automatic image inclusion and `--no-terminal-server`. Docker-backed workflows are opt-in. |
-| Model catalog | Checks that the example/default model specifiers resolve to Ollama-compatible manifests. |
-
 ## Debian smoke checks
 
 Run these checks after [starting the offline stack on Debian](../README.md#quick-setup).
@@ -141,7 +64,9 @@ Look for `100% GPU`. An empty list means no model is currently loaded.
 On a host without NVIDIA GPU access, run `loaf status --cpu` and
 `loaf run offline --cpu` or `loaf run online --cpu`. Check WebUI health and send a chat
 message. Ollama's process list should report `100% CPU` while the model is
-loaded. [CPU serving](launcher.md#serve-on-cpu)
+loaded.
+
+[CPU serving](launcher.md#serve-on-cpu)
 
 ## Docker configuration and real shell scripts
 
@@ -162,7 +87,6 @@ archive case uses the production volume transfer commands and checks filenames
 with colons and binary data. The stop cases use the installed CLI against
 disposable projects and check container IDs, volume contents, and that a
 second deployment keeps running.
-[Shell fixtures](../python-package/tests/script_checks.sh) · [Volume fixtures](../python-package/tests/archive_checks.sh)
 
 Select one case by name from the package directory. Use `-b` with direct
 `unittest` runs to buffer test output as `loaf test` does.
@@ -171,6 +95,9 @@ Select one case by name from the package directory. Use `-b` with direct
 (cd python-package && RUN_DOCKER_TESTS=1 ../.venv/bin/python -m unittest -bv \
     tests.test_docker.DockerTests.test_stop_removes_container_and_preserves_its_named_volume)
 ```
+
+[Shell fixtures](../python-package/tests/script_checks.sh) ·
+[Volume fixtures](../python-package/tests/archive_checks.sh)
 
 ## Full isolated GPU workflow
 
@@ -197,7 +124,6 @@ to the connected profile, checks WebUI health on a temporary loopback port,
 and mirrors the model store with `--delete`. It verifies that the added
 alias disappears and both connected containers keep their IDs.
 Cleanup targets the generated projects and their disposable resources.
-[GPU cases](../python-package/tests/test_docker_gpu.py)
 
 Use `loaf test --cpu` on a host with Docker and no NVIDIA GPU. It enables
 the Docker suite and runs the same isolated model workflows with the CPU
@@ -208,6 +134,8 @@ requirements apply to both modes.
 ```bash
 RUN_TERMINAL_SERVER_TESTS=1 RUN_CATALOG_TESTS=1 ./loaf test --cpu -v
 ```
+
+[GPU cases](../python-package/tests/test_docker_gpu.py)
 
 ## Terminal server checks
 
@@ -277,7 +205,6 @@ built standalone executable. It uses SmolLM2-135M-Instruct Q2_K with one
 model discovery, a completed reply, saved chat creation, and device
 placement. Use the full [model workflow](#full-isolated-gpu-workflow) for
 the Ministral, long-context, and transfer regression checks.
-[Model and quantization](https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF)
 
 ```bash
 python3 python-package/tests/release_handoff.py dist/loaf --chat-only
@@ -290,12 +217,29 @@ and chat. The candidate runs `loaf build` with those settings. For a
 separate test deployment, select the same settings in `config.ini` and
 run `loaf build`. A compatible NVIDIA host driver and container runtime
 are required for the GPU check.
-[Ollama build selection](configuration.md#select-an-ollama-build-recipe) ·
-[Open WebUI image variants](https://docs.openwebui.com/getting-started/quick-start/#image-variants)
 
 When the Docker builder can use a cached Ollama 0.40.18 source image, pass
 its reference with `--ollama-source`. The image must contain the runtime
 files for the selected recipe.
+
+[Model and quantization](https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF) ·
+[Ollama build selection](configuration.md#select-an-ollama-build-recipe) ·
+[Open WebUI image variants](https://docs.openwebui.com/getting-started/quick-start/#image-variants)
+
+## Check the model example specifiers
+
+This network test requests small public Ollama manifests for the distinct
+specifiers in the packaged model INIs and checkout examples.
+
+```bash
+RUN_CATALOG_TESTS=1 ./loaf test -v
+```
+
+Run all opt-in checks together.
+
+```bash
+RUN_DOCKER_TESTS=1 RUN_GPU_TESTS=1 RUN_TERMINAL_SERVER_TESTS=1 RUN_CATALOG_TESTS=1 ./loaf test -v
+```
 
 ## Check a release candidate
 
@@ -306,7 +250,6 @@ local rootful Docker daemon and Compose. The destination is a disposable
 Debian container with its own Docker Engine, an empty image and volume
 store, and no external network. The outer daemon must allow the
 destination container to run its nested daemon with `--privileged`.
-[Release workflow](releases.md)
 
 ```bash
 python3 python-package/tests/release_handoff.py dist/loaf
@@ -331,20 +274,86 @@ python3 python-package/tests/release_handoff.py dist/loaf \
     --keep backup/release-handoff-fixture
 ```
 
-## Check the model example specifiers
+[Release workflow](releases.md)
 
-This network test requests small public Ollama manifests for the distinct
-specifiers in the packaged model INIs and checkout examples.
+## README test badges
+
+The README badges show each group's latest recorded local date and time
+and its pass count. Each badge links to the environment and results.
+Run `loaf test --badges` to record the run, generate the SVGs in `docs/badges/`,
+and update the README links. Use `-v` to display individual results as usual.
+The [GitHub Verify workflow](../.github/workflows/verify.yml) runs
+the baseline on Python 3.10, 3.11 and 3.13 and smoke-tests a wheel on each. On
+Python 3.13 it runs `loaf setup tests` first, so the provisioner and runner
+tests run too, and builds the Debian package and installs it on Debian 12 and
+13.
+
+The badge total counts the test cases that executed in that run. For
+example, a run that passes four Open Terminal cases shows `4/4 passed` when
+the other Open Terminal cases are skipped. Failures count toward the total
+and make the badge red. Groups with zero executed cases retain their
+previous badge and link. Plain `loaf test` and `loaf test -v` report to the terminal.
+
+| Badge | What counts |
+| --- | --- |
+| CLI baseline | Core tests with the `RUN_*_TESTS` opt-ins disabled, including CLI, configuration, setup, transfers, and documentation. The local rsync check needs `rsync` on `PATH`. |
+| Docker | Compose configuration, image contracts, shell helpers, volume transfer, container lifecycle, and model workflows run on CPU. |
+| Open Terminal | The provisioner and runner API tests and the opt-in Open WebUI workspace tests. |
+| GPU inference | The real Ollama GPU workflows, including inference and model transfer. |
+| Model catalog | One test with subtests for each distinct Hugging Face model reference. |
+
+Run the CLI baseline from the checkout root. Open Terminal API cases depend
+on optional packages and count toward the Open Terminal badge if they run.
 
 ```bash
-RUN_CATALOG_TESTS=1 ./loaf test -v
+RUN_DOCKER_TESTS=0 RUN_GPU_TESTS=0 RUN_TERMINAL_SERVER_TESTS=0 \
+    RUN_CPU_TESTS=0 RUN_CATALOG_TESTS=0 ./loaf test --badges
 ```
 
-Run all opt-in checks together.
+Use the following selectors from `python-package/` to count each advanced
+group independently. See the prerequisites for [Docker](#docker-configuration-and-real-shell-scripts),
+[GPU](#full-isolated-gpu-workflow), [Open Terminal](#terminal-server-checks), and
+[catalog](#check-the-model-example-specifiers) above.
 
 ```bash
-RUN_DOCKER_TESTS=1 RUN_GPU_TESTS=1 RUN_TERMINAL_SERVER_TESTS=1 RUN_CATALOG_TESTS=1 ./loaf test -v
+RUN_DOCKER_TESTS=1 ../.venv/bin/python -m unittest -bv \
+    tests.test_docker.ComposeContractTests tests.test_docker.BuiltImageTests \
+    tests.test_docker.ShellHelperTests tests.test_docker.DockerTests
+RUN_DOCKER_TESTS=1 RUN_GPU_TESTS=1 ../.venv/bin/python -m unittest -bv tests.test_docker_gpu
+RUN_DOCKER_TESTS=1 RUN_CPU_TESTS=1 ../.venv/bin/python -m unittest -bv tests.test_docker_gpu
+RUN_TERMINAL_SERVER_TESTS=1 ../.venv/bin/python -m unittest -bv \
+    tests.test_terminal_server.TerminalServerDockerTests
+../.venv/bin/python -m unittest -bv \
+    tests.test_terminal_server.ProvisionerTests tests.test_terminal_server.RunnerTests
+RUN_CATALOG_TESTS=1 ../.venv/bin/python -m unittest -bv tests.test_catalog
 ```
+
+## Verification coverage
+
+Docker, GPU and network checks are opt-in. The fast suite runs without those
+dependencies. Set opt-ins for `loaf test` under `[tests]` in `config.ini`
+or override them for a run with the flags below. Transfer tests require Git.
+
+| Group | Coverage |
+| --- | --- |
+| Launcher and package | Top-level and command help, rejected option combinations and abbreviations, model-list parsing, Compose command order, `run` with its two profiles and the pointer from the former `offline` and `online` commands, `restart` with a profile and without one, where it restarts the profile that serves and refuses when none or both serve or in a dry run, `stop` of one profile that keeps the terminal server while the other one serves, foreground log following, default container removal and its only opt-out `--no-remove-containers`, `--wait-timeout 0` without a limit and refused negative values, `run` refusing `--models-file`, the note for a connected terminal network, dry runs that report a missing backup or a missing standalone executable, the follow-up command that names `--namespace` only when the settings select another one and uses `./loaf` in a checkout with its launcher link or `loaf` in an activated virtualenv, the dry run that refuses a missing terminal key and names `setup terminal-server-key` with `--config-dir`, the pointers from the former setup options and from `link-docker-project`, `package debian` through the release build, default and verbose output, deployment links, failure handling, concurrency, shell quoting, the installed entry points and test output. |
+| Bash completion | Runs the generated script in Bash for commands, subcommands, serving profiles, types, guide names, options per command, skipped option values in both `--name value` and `--name=value` form, and directory and file values. Checks that bash-completion finds the per-user file, that install and remove leave foreign files alone, `BASH_COMPLETION_USER_DIR`, and the Debian package case. The Debian package checks complete a word with the system script and confirm that purging removes it. |
+| Docker resources | Uses a simulated Docker daemon. Checks that `loaf docker ps` lists only the selected deployment's containers, images, volumes and networks in aligned tables, including the terminal server's chat containers and networks. Checks `--namespace`, chat containers that inherit the provisioner image's Compose labels, the confirmation prompt, `--force` and the pointer from the former `--yes`, the refusal of networks, volumes and images while containers remain, the graceful stop and removal order, a network that disappears after the listing, and that a dry run calls no Docker. Also checks the Compose labels on volumes that loaf creates. |
+| Cleanup | Checks both scopes, dry-run, lock contention, symlink boundaries, the question before `--full` removes `install-cache/` with `--force` and without a terminal, the cached Python runtime downloads that do not protect it, and preservation of Git work, credentials and backup archives. |
+| Host setup | Checks APT-managed and pyenv interpreters, wheel reuse and refresh, virtualenv recovery, setup diagnostics, the refusal of source setup as root without `--allow-root`, the hint for a virtualenv owned by another user, standalone setup from a wheel installation outside a checkout, the setup parts with `all` as the default and only the named parts otherwise, the refusal of `docs` in a checkout and of `venv` outside one, the default `config.ini` and model list in the selected `--config-dir`, existing settings and keys that stay until `--force` replaces them, a key only with `terminal-server-key`, the virtualenv activation hint, and the NVIDIA toolkit cache. Also checks that Docker setup is opt-in and uses only the prepared APT source when the cache is present. |
+| Configuration | Checks packaged defaults and their Compose and Dockerfile fallbacks, local overrides, model file selection, INI validation including the renamed `[launcher] version`, single-line edits that keep comments, and resolved Compose settings. |
+| Host integrations | Checks the generated systemd unit, with its Docker dependency and stop timeout like the packaged unit and `--cpu`, and the Continue YAML with its default roles and commented capabilities, against project paths, namespace, WebUI settings and model selection. Checks that the Tether command prints installation steps and the official downloads link. |
+| Transfer | Uses real project files and archives with simulated Docker calls. Checks that `loaf.json` comes first and lists every member's size and hash and the launcher's, the restore of every type into a new project, type and alias selection with aliases limited to the archive's types, that a release download folder is no backup folder and an older folder's `SHA256SUMS` moves with it, a launcher with another hash that only warns, recompressed archives that verify and truncated ones that fail, Docker checks before the archive is read, a warning instead of a failure without NVIDIA toolkit packages, the command that resumes serving after a backup, the terminal round trip with the user volume's labels and the key, the Compose labels on restored volumes, restores into the same and another namespace, config links that stay links and links outside their scope that backup and restore refuse, `--verify` running restore's checks without temporary copies, refused populated or mislabeled target volumes before any change, `--no-terminal-server` backups that restore with the terminal disabled and its saved connection removed, single-line settings edits, dry runs that report missing backups, types and checkouts, the cached Python runtime in `installers`, the default settings after restore into a project without them, the guides that standalone setup exported giving way to a restored checkout's `docs/`, the archive and launcher hashes that backup and `--verify` print, the `setup terminal-server-key` hint for a missing key, the `--cpu` hint after a CPU replay, setup and restore inside a backup folder that becomes the project, source restores over existing files with rollback, and the rejection of changed, older, newer and unsafe archives before any change. Also checks Modelfile replay, v1 and v2 model archives, and that the model scripts stream the store and import it without a second copy. The Docker suite merges and mirrors models into another namespace through the CLI. |
+| Readiness | Checks Docker and Compose version reporting with the legacy bridge warning only for an enabled terminal server, Open Terminal image and key reporting, the `loaf build` and `loaf restore images` hint for a missing image, GPU and volume probes, the hint for a missing model volume, recognition of the deployment's WebUI port, and relative Ollama v2 manifest links. |
+| Open WebUI tool history | Checks the optional compatibility filter for interrupted Ollama tool turns, including provider selection, preserved tool results, and repeated requests. |
+| Documentation | Checks local links, heading anchors and guide navigation. Parses Bash examples. Checks that the command reference covers every command and global flag. |
+| Deployment | Checks settings layers and `system_config`, system mode and the Debian default, the collision warning, shared locks in setgid directories, the running installation's deployment files for every project, also with a Compose file or a `docker-project` link of its own, settings or a checkout as what makes a directory a project, `loaf version`, and the bundled guides that stay until `--force` replaces them, their exported links and the manual page. |
+| Debian package | With Docker, builds the `.deb` with `scripts/build-release.sh --debian-only`, checks control fields, conffiles and files including the standalone executable, then installs, runs and purges it on Debian 12 and 13. The checks include the backup preview with the packaged executable and, on amd64, that executable itself. The manual page passes `groff` with warnings enabled. [Package checks](../python-package/tests/debian_package_checks.sh) |
+| Release tagging | Uses temporary Git repositories to check version selection, annotated tags, previews, and tag-only pushes and retries. Requires Python 3.11 or newer. |
+| Docker | Checks resolved Compose profiles, the restart policy that brings back the serving services and the terminal server but not the downloader, CPU and GPU device settings, image settings, and that each Dockerfile and build secret stays inside its build context. Tests each export and startup shell scenario, verifies container removal and the stop opt-out, and runs a two-volume archive round trip. `loaf docker rm all` removes exactly the resources of a disposable deployment and keeps the shared image. |
+| CPU and GPU model workflows | Check downloaded model exports, offline Ministral inference, startup failure and recovery, explicit Modelfile replay, and model archive mirroring with the connected services running. |
+| Terminal server | Checks the WebUI connection preset from the key with `webui_access`, the key secret for both WebUI services and the Compose override that adds it, credential validation, HTTP and WebSocket proxying to the chat's container, the root container policy with only the account's folder of the user volume, network access settings, a runtime APT source that replaces the image's sources and whose replaced file a chat sees on its next start without a new container, runtime scripts at one project path with a revision from the mount paths, `apt install` without `-y` or a terminal, resuming stopped containers and replacing them after a configuration change, startup reconciliation and shutdown, closing the disconnected shells of an idle container before it stops, file browsing and chat deletion, `apt` as root, development tools through Open WebUI, and backup and restore of the image, user volume and key. Transfer tests also cover automatic image inclusion and `--no-terminal-server`. Docker-backed workflows are opt-in. |
+| Model catalog | Checks that the example/default model specifiers resolve to Ollama-compatible manifests. |
 
 ## Coverage limits
 

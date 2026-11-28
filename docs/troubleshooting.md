@@ -4,7 +4,9 @@
 
 Run commands from the project directory unless a step says otherwise. The
 Docker examples use the container names of the default namespace `loaf`;
-`loaf docker ps` lists those of yours. [Inspect the containers](launcher.md#inspect-the-containers)
+`loaf docker ps` lists those of yours.
+
+[Inspect the containers](launcher.md#inspect-the-containers)
 
 ## Context limits
 
@@ -40,14 +42,11 @@ assistant reply before the next user turn. A reply can end on a tool result
 when Open WebUI stops it to answer a queued follow-up. The strict template
 then rejects a new user message before inference. The same failure has been
 reported with larger models.
-[Open WebUI message queue](https://docs.openwebui.com/features/chat-conversations/chat-features/message-queue/) ·
-[Mistral Vibe issue](https://github.com/mistralai/mistral-vibe/issues/1006)
 
 Use the optional Ollama Tool History Compatibility filter for an affected
 model. It adds an empty assistant turn to the request when a user follows
 tool results from an unfinished turn. It preserves the tool calls and results
 and applies the change only to the outgoing request.
-[Filter source](examples/ollama_tool_history.py)
 
 1. As an Open WebUI admin, open **Admin Panel → Functions** and create a
    function. Enter the ID **ollama_tool_history** and the name **Ollama Tool
@@ -62,21 +61,25 @@ and applies the change only to the outgoing request.
 
 The filter uses the Open WebUI v0.13.4 request hook. You can copy the Python
 file to a disconnected host and set it up there.
+
+[Open WebUI message queue](https://docs.openwebui.com/features/chat-conversations/chat-features/message-queue/) ·
+[Mistral Vibe issue](https://github.com/mistralai/mistral-vibe/issues/1006) ·
+[Filter source](examples/ollama_tool_history.py) ·
 [Manage Open WebUI filters](https://docs.openwebui.com/features/extensibility/plugin/functions/filter/)
 
 ## GPU access
 
 On a preparation host without NVIDIA GPU access, run `loaf status --cpu` and
-start with `loaf run offline --cpu` or `loaf run online --cpu`. [CPU serving](launcher.md#serve-on-cpu)
+start with `loaf run offline --cpu` or `loaf run online --cpu`.
 
 In WSL2, use a Windows NVIDIA driver with WSL2 support. For both native Debian
 and Debian in WSL2, configure the NVIDIA Container Toolkit on the Docker Engine
-host. [Debian setup](debian.md)
+host.
 
 The default `loaf-ollama-cuda13` build needs NVIDIA driver 580 or newer.
 `nvidia-smi` on the host shows the driver version. For driver 550 to 579, set
 `[images] ollama_image = loaf-ollama-cuda12` and run `loaf build` while
-connected. [Ollama build selection](configuration.md#select-an-ollama-build-recipe)
+connected.
 
 ```bash
 docker exec loaf-ollama-offline-1 nvidia-smi
@@ -87,6 +90,9 @@ docker exec loaf-ollama-offline-1 ollama ps
 mean it is idle/unloaded. CPU offload can occur when weights, KV cache, buffers
 and other GPU applications exceed VRAM. Reduce context or use a smaller model;
 see [the hardware estimates](models.md).
+
+[CPU serving](launcher.md#serve-on-cpu) · [Debian setup](debian.md) ·
+[Ollama build selection](configuration.md#select-an-ollama-build-recipe)
 
 ## Imports and startup
 
@@ -103,17 +109,19 @@ missing blobs, then retry `loaf run offline`. Startup timeout values must
 be positive integers. [Configuration](configuration.md#applying-changes)
 explains the separate API-startup and Compose-health timeouts.
 
-If saved Modelfiles changed while Ollama was running, run `loaf stop` and start
-the desired serving mode again. Restarting interrupts active inference and
-applies saved definitions. Use `loaf stop --no-remove-containers` to keep
-containers and their logs for inspection before starting again.
+If saved Modelfiles changed while Ollama was running, run `loaf restart`.
+Restarting interrupts active inference and applies saved definitions. To keep
+the containers and their logs for inspection, run
+`loaf stop --no-remove-containers` and then `loaf run PROFILE` instead.
 
 If `loaf status` reports that no local model data was found, check the project
 and namespace in the report against the ones you used to download or restore
 the models. The probe checks both Ollama manifest layouts and also recognizes
 saved Modelfiles with model blobs. For a fresh store, use `loaf download` on a
 connected host or restore the models of a backup with `loaf restore models`.
-[Separate namespaces](launcher.md#run-a-separate-namespace) · [Model transfer](transfer.md#transfer-models-between-existing-deployments)
+
+[Separate namespaces](launcher.md#run-a-separate-namespace) ·
+[Model transfer](transfer.md#transfer-models-between-existing-deployments)
 
 ## Downloads and selection files
 
@@ -124,7 +132,9 @@ The launcher validates the entire list before stopping anything.
 
 If `backup --export` reports a missing model, use `loaf download` with the same
 `--models-file`, then retry the backup. Existing exports and registrations persist
-after removing an entry from the selection. [Model selection](launcher.md#select-models)
+after removing an entry from the selection.
+
+[Model selection](launcher.md#select-models)
 
 ## Browser connection
 
@@ -144,11 +154,10 @@ runtime health in the container list. In Open WebUI, verify the direct connectio
 `http://terminal-server:8000` and check the user's access grant. Open WebUI
 starts with this connection only if it had none stored; a WebUI that first
 ran without the terminal server needs it added in its admin settings.
-[Enable and connect](terminal-server.md#enable-and-connect) If the
+If the
 terminal works in the Files tab but the model answers with instructions,
 check the model's Terminal capability, function calling mode and selected
-terminal. [Terminal setup](terminal-server.md#enable-and-connect) ·
-[Model settings](terminal-server.md#use-the-terminal-from-a-model)
+terminal.
 
 If the Files tab shows dotfiles such as `.bashrc` but you are looking for a
 generated file, ask the model for its absolute path and open its directory
@@ -156,6 +165,10 @@ with the Files breadcrumb. The **home** breadcrumb in a chat with the bundled
 terminal lets you switch between `/home/user` and `/home/chat`.
 To set the working directory for the model, use the **Working Directory**
 folder button next to the terminal selector below the chat input.
+
+[Enable and connect](terminal-server.md#enable-and-connect) ·
+[Terminal setup](terminal-server.md#enable-and-connect) ·
+[Model settings](terminal-server.md#use-the-terminal-from-a-model) ·
 [Terminal workspace folders](terminal-server.md#use-the-terminal-from-a-model)
 
 ## Packages in the terminal
@@ -167,7 +180,6 @@ and `apt_repository_dir` for a repository on the Docker host. With
 `network = connected`, check that the Docker host reaches the mirror. Then run
 `loaf run offline` or `loaf run online`. Packages installed in a chat stay in its
 container only; a new chat starts without them.
-[Install packages in a chat](terminal-server.md#install-packages-in-a-chat)
 
 A new chat container has no package lists, so `Unable to locate package`
 right after the chat starts means that `apt update` has not run yet.
@@ -178,6 +190,8 @@ unsigned repository as trusted in the source file, for example
 with `signed-by=`. After an update, `Unable to locate package` means that the configured
 source does not provide that name for the image's Debian release and
 architecture.
+
+[Install packages in a chat](terminal-server.md#install-packages-in-a-chat)
 
 ## Build requests additional privileges
 
@@ -191,6 +205,7 @@ A terminal `apt_source_file` outside the project directory can still stop
 `loaf build` with `additional privileges requested`, or with a prompt for
 read access in a terminal. Move the file into the project, for example under
 `config/`, or update Docker Compose to 5.7.0 or newer.
+
 [Package mirror](terminal-server.md#package-mirror-for-image-builds) ·
 [Compose build inputs](https://github.com/docker/compose/commit/43a5d5a253)
 
@@ -201,7 +216,8 @@ the volumes `ollama` and `open-webui`. The new names start with `loaf`, so
 the upgraded deployment starts with empty volumes while the old data stays
 in place. `loaf docker ps` shows the new resources and `docker volume ls`
 the old ones. Move the data with backup and restore.
-[Upgrade from the local-inference names](launcher.md#upgrade-from-the-local-inference-names)
+
+[Upgrade from the local-inference names](upgrade.md#upgrade-from-the-local-inference-names)
 
 ## Volume already exists but was not created by Docker Compose
 

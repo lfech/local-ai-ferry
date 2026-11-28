@@ -4,6 +4,59 @@
 
 Older entries use the current command and project names in examples.
 
+## 2026-11-28 12:22:07 +0100 — Independent audit of commit efc1df5
+
+- Environment: Debian 13 in WSL2, Docker Engine 26.1.5, Compose 2.26.1-4,
+  RTX 4070 Ti SUPER (driver 610.88), Python 3.13.5. A fresh clone of commit
+  efc1df5 in a scratch directory on the 7.6 GB `/tmp` tmpfs, with its own
+  virtualenv, the checkout's `install-cache/` copied in and `loaf setup tests`.
+  Images built from the BuildKit cache with the checkout's settings and the
+  terminal server enabled in a scratch configuration directory. Docker held
+  nothing at the start and holds no containers, volumes or networks
+  afterwards; the four `loaf/*:latest` images, the `python:3.10-slim-bookworm`
+  and `python:3.11-slim-bookworm` images and the BuildKit cache stay.
+- Docker-free suite in the checkout's `.venv` at 12:00: **336 tests, all
+  passed**, 64 skipped. In the fresh clone the CI failure
+  `test_offline_with_a_connected_terminal_network_notes_the_access` (1 != 0)
+  reproduced: the checkout passed only because of its Git-ignored terminal
+  key. After the fix, the clone passed **336 tests** on Python 3.13 (64
+  skipped) and in `python:3.10-slim-bookworm` (73 skipped) and
+  `python:3.11-slim-bookworm` (65 skipped) containers with an editable install.
+  Python 3.12 was not available.
+- Verify workflow's wheel steps in the clone: the license file test, `loaf
+  setup` in an empty directory, the packaged provisioner check, `download
+  --dry-run`, `run offline --cpu --dry-run` and `integration tether` passed.
+  The failed CI run had skipped them and the Debian package job.
+- Full suite in the clone with `RUN_DOCKER_TESTS=1 RUN_GPU_TESTS=1
+  RUN_TERMINAL_SERVER_TESTS=1 RUN_CATALOG_TESTS=1`, 12:05:03 to 12:16:09:
+  **336 ran, all passed, none skipped**, 666 s, including the Debian package
+  build and installation on Debian 12 and 13. The GPU transfer test peaked at
+  about 5.8 GB of the tmpfs.
+- The author's failure of
+  `test_restore_inside_a_backup_folder_restores_into_it_or_changes_nothing`
+  reproduced with `VIRTUAL_ENV` set to the checkout's `.venv`. After the fix,
+  the suite passed **336 tests** with and without `VIRTUAL_ENV`, also through
+  `loaf test`.
+- After the documentation changes, `tests.test_documentation` passed. A
+  script check confirmed that moving link lines kept every link and left the
+  text otherwise unchanged.
+- Observed problems, reported to the author:
+  - `loaf restart` without a profile and with an unreachable Docker daemon
+    ended with "No serving profile of loaf runs", exit status 2.
+  - In a deployment from the wheel, `loaf setup --force` without part names
+    replaced `config.ini`, so `namespace = prod` and `backup_dir` were gone,
+    and deleted a `docs/notes.txt` that the user had created. A dry run in a
+    checkout announced the replacement of its tracked `config/config.ini`.
+  - A project `.env` with `OLLAMA_IMAGE` changed the resolved Compose
+    configuration; neither `status` nor `-v` showed it.
+  - `restore --project-dir` with a missing directory created it before it
+    reported that no backup exists.
+- Not run: `release_handoff.py`, the CPU model workflows, upgrades of the
+  Debian package, setup steps that use APT and a Docker daemon restart. A real
+  check of `restart` after `run offline --cpu` was stopped by the author after
+  it had started offline serving; its containers, volumes and networks were
+  removed.
+
 ## 2026-11-28 11:55:19 +0100 — Own deployment files and loaf restart
 
 - Environment: as in the entry below; images built from the cache with the

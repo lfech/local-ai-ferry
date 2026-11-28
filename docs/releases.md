@@ -8,13 +8,14 @@ Each draft gets the `loaf` executable for Linux amd64, a separate
 wheel, the `loaf_<version>_all.deb` Debian package, the standalone
 `LICENSE.txt`, and `SHA256SUMS`. The wheel and the Debian package carry the
 same standalone executable, which backups from them include.
+
 [GitHub releases](https://docs.github.com/en/repositories/releasing-projects-on-github)
 
 ## Quick release
 
 Run from the checkout root on `main` to release `v0.1.0` to the `github` remote.
 For email privacy, update the current commit's author and committer email before
-the first push. [GitHub commit email guidance](https://docs.github.com/en/account-and-profile/how-tos/email-preferences/setting-your-commit-email-address)
+the first push.
 
 1. Review and stage tracked changes. Untracked installer caches stay out.
 
@@ -42,36 +43,15 @@ the first push. [GitHub commit email guidance](https://docs.github.com/en/accoun
 
 4. After **Release** succeeds, review the draft and its attachments in GitHub
    **Releases** and click **Publish release**. You can also review and publish
-   it with the GitHub CLI. [GitHub CLI reference](https://cli.github.com/manual/gh_release_edit)
+   it with the GitHub CLI.
 
    ```bash
    gh release view v0.1.0 --repo lfech/local-ai-ferry
    gh release edit v0.1.0 --repo lfech/local-ai-ferry --draft=false
    ```
 
-## Run the executable
-
-Download `loaf`, `LICENSE.txt`, and `SHA256SUMS` from Releases. From the
-download directory, verify the downloads and set up a project.
-
-```bash
-sha256sum --check --ignore-missing SHA256SUMS
-chmod +x loaf
-mkdir loaf-project
-cd loaf-project
-../loaf setup
-```
-
-The executable supplies CPython, the launcher, deployment assets, and
-the Python build requirements. It unpacks its runtime on first use under
-`${XDG_DATA_HOME:-$HOME/.local/share}/loaf/runtime/`. The executable
-recreates the runtime after `loaf clean` and uses `flock` to coordinate
-cleanup with other invocations. Generated systemd units refer to the
-original executable. [Python Build Standalone release](https://github.com/astral-sh/python-build-standalone/releases/tag/20261110)
-
-Continue with the [Quick Setup](../README.md#quick-setup) for a fresh
-deployment, or restore a backup as [Debian restore](transfer.md#debian-restore)
-shows. [What setup prepares](cli-help.md#setup) · [Debian setup](debian.md)
+[GitHub commit email guidance](https://docs.github.com/en/account-and-profile/how-tos/email-preferences/setting-your-commit-email-address) ·
+[GitHub CLI reference](https://cli.github.com/manual/gh_release_edit)
 
 ## Executable size
 
@@ -111,6 +91,7 @@ Berkeley DB, CPython, and the patches and build scripts used by Python Build
 Standalone. Keep the file with the executable when redistributing it. The
 executable also embeds the same file for offline reading with `./loaf --license`.
 The matching source must remain available while the binary is distributed.
+
 [Berkeley DB license](https://github.com/astral-sh/python-build-standalone/blob/20261110/LICENSE.bdb.txt)
 
 ## Push a version tag
@@ -140,10 +121,11 @@ such as `git tag -a v0.1.0` and `git push origin refs/tags/v0.1.0`.
 
 Both release jobs run the small disconnected handoff with the executable
 they just built before attaching it to a draft.
-[Release handoff check](verification.md#check-a-release-candidate)
 
 Rerunning a release job refreshes its build attachments in an existing
 draft. Use a new version and tag for changes after publication.
+
+[Release handoff check](verification.md#check-a-release-candidate) ·
 [GitHub workflow](../.github/workflows/release.yml) ·
 [Gitea workflow](../.gitea/workflows/release.yaml)
 
@@ -157,7 +139,9 @@ registries used by the handoff check. Its local Docker daemon must support
 starting the disconnected Debian fixture with its own daemon.
 Enable Releases and release attachments in Gitea. Allow the built-in job
 token to write releases. If you use a reverse proxy, allow upload bodies
-large enough for the executable. [Gitea Actions setup](https://docs.gitea.com/usage/actions/quickstart/) ·
+large enough for the executable.
+
+[Gitea Actions setup](https://docs.gitea.com/usage/actions/quickstart/) ·
 [Job token permissions](https://docs.gitea.com/usage/actions/token-permissions/) ·
 [Release attachment settings](https://docs.gitea.com/administration/config-cheat-sheet/#repository---release-repositoryrelease)
 
@@ -203,7 +187,7 @@ which carries the standalone executable, as `loaf package debian` does. It
 runs `lintian` when available; the package's lintian overrides explain the
 expected tags. Set `LOAF_DEB_MAINTAINER` to the name and address for the
 package's `Maintainer` field. The release workflows install the package in
-the disconnected handoff destination. [Debian package](installation.md#debian-package)
+the disconnected handoff destination.
 
 ```bash
 bash scripts/build-deb.sh dist/release/local_ai_ferry-0.1.0-py3-none-any.whl dist/release
@@ -226,4 +210,5 @@ tar -xzf loaf-v0.1.0-source.tar.gz
 cd loaf-v0.1.0
 ```
 
-[Source setup](launcher.md) · [Installation guide](installation.md)
+[Debian package](installation.md#debian-package) · [Source setup](launcher.md) ·
+[Installation guide](installation.md)

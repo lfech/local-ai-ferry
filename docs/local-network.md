@@ -7,14 +7,15 @@
 > Source-code review is not planned.
 > The documentation was mostly generated with AI.
 
-[Verification coverage and results](verification.md#verification-coverage)
-
 Create the first admin account locally and keep Open WebUI sign-in enabled.
 The examples use HTTP and are intended for a trusted local network.
 
 Edit the `config/config.ini` for your deployment. To apply changes, rerun the
 serving command you normally use, `loaf run offline` or `loaf run online`, with your
-usual flags such as `--cpu`. [Configuration](configuration.md#applying-changes)
+usual flags such as `--cpu`.
+
+[Verification coverage and results](verification.md#verification-coverage) ·
+[Configuration](configuration.md#applying-changes)
 
 ## Native Debian
 
@@ -38,6 +39,7 @@ auth = true
 Apply the settings and open `http://192.168.1.20:3000` from another LAN device.
 If you manage access with a host firewall, permit the published TCP port
 from your LAN using rules that apply to Docker traffic.
+
 [Docker port publishing](https://docs.docker.com/engine/network/port-publishing/) ·
 [Docker firewall rules](https://docs.docker.com/engine/network/packet-filtering-firewalls/)
 
@@ -85,8 +87,6 @@ $WslIP = $Match.Groups[1].Value
 In the same elevated session, forward the Windows TCP port to Debian.
 The firewall rule applies to the Private profile and local subnets. Use
 `Get-NetConnectionProfile` to check the profile of your trusted LAN.
-[WSL NAT networking](https://learn.microsoft.com/en-us/windows/wsl/networking#default-networking-mode-nat) ·
-[Windows Firewall rule reference](https://learn.microsoft.com/en-us/powershell/module/netsecurity/new-netfirewallrule)
 
 ```powershell
 netsh.exe interface portproxy add v4tov4 `
@@ -105,7 +105,6 @@ New-NetFirewallRule -Name 'LocalAIFerry-WebUI-NAT' `
 Open `http://192.168.1.50:3000` from another LAN device. The WSL IPv4
 address can change after WSL restarts. Rerun the address lookup above and
 update the proxy from the same elevated PowerShell session.
-[Windows portproxy reference](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/netsh-interface#portproxy)
 
 ```powershell
 netsh.exe interface portproxy set v4tov4 `
@@ -113,18 +112,19 @@ netsh.exe interface portproxy set v4tov4 `
     "connectaddress=$WslIP" "connectport=$WebUIPort"
 ```
 
+[WSL NAT networking](https://learn.microsoft.com/en-us/windows/wsl/networking#default-networking-mode-nat) ·
+[Windows Firewall rule reference](https://learn.microsoft.com/en-us/powershell/module/netsecurity/new-netfirewallrule) ·
+[Windows portproxy reference](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/netsh-interface#portproxy)
+
 ### Mirrored networking
 
 Mirrored networking is available on Windows 11 22H2 or later. Use WSL
 2.0.9 or later for the Hyper-V firewall setup below. If you previously
 configured the NAT proxy, remove it before switching modes.
-[Remove the WSL NAT proxy](#remove-the-wsl-nat-proxy) ·
-[WSL mirrored networking](https://learn.microsoft.com/en-us/windows/wsl/networking#mirrored-mode-networking)
 
 Open your Windows user's `.wslconfig` in PowerShell. Set `networkingMode=mirrored`
 under `[wsl2]`, creating the section if needed.
 This setting applies to all WSL 2 distributions.
-[WSL configuration settings](https://learn.microsoft.com/en-us/windows/wsl/wsl-config#wslconfig)
 
 ```powershell
 notepad.exe (Join-Path $env:USERPROFILE '.wslconfig')
@@ -146,8 +146,6 @@ wsl.exe --distribution Debian
 In elevated PowerShell, allow the WebUI TCP port from your LAN's subnet
 through the Hyper-V firewall. Replace `192.168.1.0/24` with your LAN's
 actual subnet. Open `http://192.168.1.50:3000` from another LAN device.
-[Hyper-V firewall for WSL](https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/hyper-v-firewall) ·
-[Hyper-V firewall rule reference](https://learn.microsoft.com/en-us/powershell/module/netsecurity/new-netfirewallhypervrule)
 
 ```powershell
 $WebUIPort = 3000
@@ -159,6 +157,12 @@ New-NetFirewallHyperVRule -Name 'LocalAIFerry-WebUI-Mirrored' `
     -LocalPorts $WebUIPort -RemoteAddresses $LanSubnet
 ```
 
+[Remove the WSL NAT proxy](#remove-the-wsl-nat-proxy) ·
+[WSL mirrored networking](https://learn.microsoft.com/en-us/windows/wsl/networking#mirrored-mode-networking) ·
+[WSL configuration settings](https://learn.microsoft.com/en-us/windows/wsl/wsl-config#wslconfig) ·
+[Hyper-V firewall for WSL](https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/hyper-v-firewall) ·
+[Hyper-V firewall rule reference](https://learn.microsoft.com/en-us/powershell/module/netsecurity/new-netfirewallhypervrule)
+
 ## Remove local network publishing
 
 Under `[webui]` in your deployment's `config/config.ini`, set
@@ -169,6 +173,7 @@ locally, using your configured port.
 
 On Docker Engine releases before 28.0.0, devices on the same network segment
 may still reach a port published to loopback.
+
 [Docker port publishing](https://docs.docker.com/engine/network/port-publishing/)
 
 ### Remove the WSL NAT proxy
@@ -187,7 +192,6 @@ Remove-NetFirewallRule -Name 'LocalAIFerry-WebUI-NAT'
 ### Remove mirrored access and return to NAT
 
 Remove the Hyper-V rule in elevated PowerShell.
-[Remove a Hyper-V firewall rule](https://learn.microsoft.com/en-us/powershell/module/netsecurity/remove-netfirewallhypervrule)
 
 ```powershell
 Remove-NetFirewallHyperVRule -Name 'LocalAIFerry-WebUI-Mirrored'
@@ -208,3 +212,5 @@ if ($NatSettings -ceq $Settings) {
 wsl.exe --shutdown
 wsl.exe --distribution Debian
 ```
+
+[Remove a Hyper-V firewall rule](https://learn.microsoft.com/en-us/powershell/module/netsecurity/remove-netfirewallhypervrule)

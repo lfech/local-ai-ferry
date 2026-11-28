@@ -8,8 +8,6 @@ The default `config/models.ini` selects IBM's Granite 4.0 H 350M in Q4_K_M,
 a 223 MB chat model that can call tools. It is the smallest well-known model
 whose tool calls Ollama recognizes and returns reliably. Qwen3 0.6B in
 Q4_K_M, at 397 MB, is the next size, with more precise tool arguments.
-[Published GGUF](https://huggingface.co/ibm-granite/granite-4.0-h-350m-GGUF) ·
-[Qwen3 0.6B GGUF](https://huggingface.co/unsloth/Qwen3-0.6B-GGUF)
 
 The [16 GB VRAM selection](../config/model-examples/models.16gb.ini),
 [8 GB VRAM selection](../config/model-examples/models.8gb.ini) and
@@ -35,6 +33,9 @@ Edit `config/models.ini` to change the default selection. Switching
 selection files changes future downloads. The models already in
 the shared Ollama volume remain available. Select the configured Ollama aliases
 in WebUI. The Coder entries use exact merged GGUF filename tags.
+
+[Published GGUF](https://huggingface.co/ibm-granite/granite-4.0-h-350m-GGUF) ·
+[Qwen3 0.6B GGUF](https://huggingface.co/unsloth/Qwen3-0.6B-GGUF) ·
 [Selection syntax](launcher.md#select-models)
 
 ## 16 GB VRAM hardware profile
@@ -88,7 +89,9 @@ the packaged configuration directory. Start with temperature `0.7`.
 Ministral's weights and vision projector total about 3 GB. For one
 request at 16,384 tokens, the default 16-bit KV cache adds about 1.7 GB
 before compute buffers. The 6 GB VRAM profile is an estimate for one
-active model. [Published weights](https://huggingface.co/mistralai/Ministral-3-3B-Reasoning-2512-GGUF/tree/main) ·
+active model.
+
+[Published weights](https://huggingface.co/mistralai/Ministral-3-3B-Reasoning-2512-GGUF/tree/main) ·
 [Model dimensions](https://huggingface.co/mistralai/Ministral-3-3B-Reasoning-2512/raw/main/config.json) ·
 [Ollama KV cache](https://docs.ollama.com/faq#how-can-i-set-the-quantization-type-for-the-kv-cache)
 
@@ -106,8 +109,9 @@ RAM. The choices trade model capacity, quantization quality and response speed.
 The download sizes cover the model files. Budget additional VRAM for the
 runtime, including the KV cache and compute buffers. Under WSL2, `docker info`
 reports the system memory available to the Docker Engine.
-[Ollama GPU placement and context memory](https://docs.ollama.com/faq)
 
 Hardware fits are estimates based on published sizes, architecture and a 16K
 context. See the [catalog check](verification.md#check-the-model-example-specifiers)
 and [recorded inference results](verification-record.md).
+
+[Ollama GPU placement and context memory](https://docs.ollama.com/faq)

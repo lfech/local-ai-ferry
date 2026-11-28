@@ -7,6 +7,51 @@ Git milestones use commit timestamps. Working-tree milestones use the
 associated verification time where it was recorded.
 Earlier entries use the current names for commands, paths and artifacts.
 
+## 2026-11-28 12:22 CET — Audit of commit efc1df5: test isolation and documentation layout
+
+An independent audit of commit efc1df5. The author asked for two test
+failures to be fixed, for guides that read without detours, and approved the
+documentation layout that the audit proposed in
+[Development](instructions/development.md).
+
+- **CI failure.** `test_offline_with_a_connected_terminal_network_notes_the_access`
+  enabled the terminal server without a key. Since dry runs refuse a missing
+  key, it passed only in a checkout with the Git-ignored
+  `config/terminal-server.key`, and failed in the Verify workflow. The test now
+  writes its own key into its configuration directory.
+- **Activated virtualenv.** In a shell with the checkout's virtualenv
+  activated, follow-up commands use the short `loaf` form, so
+  `test_restore_inside_a_backup_folder_restores_into_it_or_changes_nothing`
+  failed. `tests/__init__.py` removes `VIRTUAL_ENV` like the host's `/etc/loaf`;
+  the test of the short form sets it itself.
+- **Reading order.** Each guide starts with the task that a reader comes for,
+  and rare tasks and reference material come last. `installation.md` covers
+  the source checkout, the standalone executable, the Debian package and the
+  disconnected installation, with the source sections of `launcher.md` and
+  *Run the executable* from `releases.md`. The new `upgrade.md` takes the
+  upgrade sections of `launcher.md` and `terminal-server.md` and adds the
+  upgrade of a source checkout and of the Debian package. The new
+  `integrations.md` takes the host integrations from `installation.md` and
+  replaces `tether.md`. `launcher.md` became "Serving and model selection".
+  `debian.md` lost the three sections that only pointed elsewhere.
+  `transfer.md`, `configuration.md`, `terminal-server.md` and
+  `verification.md` put their everyday sections first.
+- **Links.** Links that stood between sentences moved to one line at the end of
+  their section, in the guides, the README and the architecture; links that
+  a sentence needs stayed. The README's development disclosure moved before
+  *Support and licensing*, its 17 command links became one link to the command
+  reference, and its guide table follows the reading order. The documentation
+  map in `AGENTS.md` names the new owners, and older record entries link to
+  the current locations.
+- **Corrections.** The configuration guide said that the checkout's
+  `config.ini` enables the terminal server; it leaves it disabled. Changed
+  Modelfiles apply with `loaf restart`. The `clean --full` reference names the
+  `docker-project` link of an earlier release instead of a "packaged Docker
+  link". Two remarks about direct Compose use, which loaf no longer offers,
+  are gone. The `[terminal_server]` paragraph of the configuration guide
+  repeated the terminal server guide and became a pointer to it. Examples name
+  version 0.5.0, and the wheel cache error names `docs/installation.md`.
+
 ## 2026-11-28 11:55 CET — Own deployment files and loaf restart
 
 The author asked whether users need access to the Docker project at all, and
@@ -409,7 +454,7 @@ Compose warning about volumes it did not create.
 - **Upgrade.** Docker cannot rename volumes or images. The launcher guide
   describes the move with the old release's backup, the new restore, image
   tags for offline hosts and the removal of the old resources.
-  [Upgrade](launcher.md#upgrade-from-the-local-inference-names)
+  [Upgrade](upgrade.md#upgrade-from-the-local-inference-names)
 - **`loaf docker ps` and `loaf docker rm`.** The new `resources` module finds
   Compose containers and networks by project label, the provisioner's
   resources by label and name prefix, and volumes and images by exact name.
@@ -656,7 +701,7 @@ The author's decisions D1 to D5 replace the terminal design.
 - Upgrades: a `docker-project` link to another loaf release no longer
   supplies Compose files. The launcher uses its own deployment files, and
   `setup` and `link-docker-project` update such links in place. Added
-  `loaf version`. [Upgrade the standalone executable](launcher.md#upgrade-the-standalone-executable)
+  `loaf version`. [Upgrade the standalone executable](upgrade.md#upgrade-the-standalone-executable)
 - Settings layers: packaged defaults, then `/etc/loaf`, then the project's
   `config/config.ini`. Only a project can move or skip the system layer
   with `[launcher] system_config`. The model list comes from the highest
@@ -699,7 +744,7 @@ The author's decisions D1 to D5 replace the terminal design.
   with their requirements as wheels in `install-cache/wheels/`. It then
   installs them from that directory into the virtualenv that runs
   `loaf test`. A separate cache record holds the inputs and wheel digests.
-  Repeat and recovered runs install offline. [Test packages](launcher.md#test-packages)
+  Repeat and recovered runs install offline. [Test packages](installation.md#test-packages)
 - Backups carry the test wheels and their record. The Python 3.13 Verify job
   uses the command, so the provisioner and runner tests run in CI.
 - The command requires Python 3.11 or newer, like Open Terminal, and
@@ -866,7 +911,7 @@ The author's decisions D1 to D5 replace the terminal design.
 
 - Adopted `loaf.*` Docker ownership labels and `loaf-tools-` resource names in
   the provisioner and backup tooling. Documented the effect on workspaces
-  from earlier prerelease builds. [Terminal deployment](terminal-server.md#upgrade-an-existing-terminal-deployment)
+  from earlier prerelease builds. [Terminal deployment](upgrade.md#upgrade-an-existing-terminal-deployment)
 - The connected and offline fixtures use the backup volume inventory to check
   that both account volumes are discoverable before and after restart.
 
@@ -1183,14 +1228,14 @@ The author's decisions D1 to D5 replace the terminal design.
 ## 2026-11-22 11:32 CET — Tether installation command
 
 - Added `loaf integration tether` to print desktop installation and sign-in steps
-  with the official releases URL. [Tether guide](tether.md)
+  with the official releases URL. [Tether guide](integrations.md#open-webui-tether)
 
 ## 2026-11-22 11:18 CET — Host integration commands and Tether
 
 - Grouped the existing configuration generators under `loaf integration systemd`
   and `loaf integration continue`. Updated the launcher examples and added a
-  desktop installation and connection guide. [Host integrations](installation.md#host-integrations)
-  · [Open WebUI Tether](tether.md)
+  desktop installation and connection guide. [Host integrations](integrations.md)
+  · [Open WebUI Tether](integrations.md#open-webui-tether)
 
 ## 2026-11-22 01:27 CET — Terminal backup and package mirrors
 
@@ -1210,7 +1255,7 @@ The author's decisions D1 to D5 replace the terminal design.
   profile to `terminal`, and the INI section to `[terminal_server]`.
   The launcher stops the former service during a transition. Existing
   workspace volumes, legacy key paths, and saved terminal URLs can be
-  reused. [Terminal server upgrade](terminal-server.md#upgrade-an-existing-terminal-deployment)
+  reused. [Terminal server upgrade](upgrade.md#upgrade-an-existing-terminal-deployment)
 - Added bearer key format checks to serving startup and readiness. A new
   account can reclaim an eligible idle slot immediately when the runner
   limit is reached. Active requests and processes keep their runners.
@@ -1346,7 +1391,7 @@ The author's decisions D1 to D5 replace the terminal design.
 
 - Replaced static examples with `loaf systemd-service` and `loaf continue-config`.
   The unit uses the active Python environment and deployment. Continue YAML
-  uses the configured WebUI address and selected models. [Host integrations](installation.md#host-integrations)
+  uses the configured WebUI address and selected models. [Host integrations](integrations.md)
 
 ## 2026-11-21 17:59 CET — Local configuration overrides
 
@@ -1383,7 +1428,7 @@ The author's decisions D1 to D5 replace the terminal design.
 - Reused the wheel cache across bootstrap, setup and backup when its inputs
   and artifacts match. Setup reuses a current editable install and prints pip
   output when a Python preparation step fails.
-  [Python wheel preparation](launcher.md#prepare-python-installation-offline)
+  [Python wheel preparation](installation.md#prepare-python-installation-offline)
 
 ## 2026-11-21 17:00 CET — Command output and progress
 
@@ -1421,7 +1466,7 @@ The author's decisions D1 to D5 replace the terminal design.
 - `loaf install` resolves the package's declared build and runtime requirements,
   writes wheels to `python-package/wheels`, and installs from the local cache.
   Backup rebuilds the launcher wheel from the checkout and includes the wheels
-  in `project.tar`. [Python wheel preparation](launcher.md#prepare-python-installation-offline)
+  in `project.tar`. [Python wheel preparation](installation.md#prepare-python-installation-offline)
 - A virtualenv with an unavailable base Python is detected before packaging.
   The installer can rebuild it using the host's Python.
 
@@ -1480,7 +1525,7 @@ The author's decisions D1 to D5 replace the terminal design.
   Backup now checks the checkout and saves images before switching profiles.
 - Updated the systemd unit to use `loaf`, refreshed the Continue model
   configuration, and removed the CI checkout step that disabled TLS
-  verification. [Host integrations](installation.md#host-integrations)
+  verification. [Host integrations](integrations.md)
 
 ## 2026-11-21 11:39 CET — Transfer and first-run fixes
 
@@ -1489,7 +1534,7 @@ The author's decisions D1 to D5 replace the terminal design.
   transfer lock.
 - Clarified how to invoke `loaf` after an editable install, including direct
   calls to the virtualenv executable and shell activation.
-  [Backup and transfer](transfer.md) · [Launcher installation](launcher.md#install-the-package)
+  [Backup and transfer](transfer.md) · [Launcher installation](installation.md#source-checkout)
 
 ## 2026-11-21 11:28 CET — Documentation consolidation
 

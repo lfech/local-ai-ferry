@@ -686,7 +686,7 @@ def prepare_python_wheels(project: Path, python: Path | None = None, *, allow_do
             if not allow_downloads:
                 raise SetupError(
                     "Cannot export Python wheels from the local cache. "
-                    "Prepare them while connected as described in docs/launcher.md.\n"
+                    "Prepare them while connected as described in docs/installation.md.\n"
                     + result.stdout.rstrip()
                 )
             print("Fetch missing Python requirements…", file=sys.stderr, flush=True)

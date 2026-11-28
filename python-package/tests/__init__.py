@@ -7,6 +7,8 @@ from pathlib import Path
 
 # Keep a host's /etc/loaf out of the fixtures. Layering tests set their own directory.
 os.environ["LOAF_SYSTEM_CONFIG_DIR"] = ""
+# An activated virtualenv shortens follow-up commands to loaf; the tests of that form set it themselves.
+os.environ.pop("VIRTUAL_ENV", None)
 
 # --- Fixture paths belong to the checkout, independently of the CLI's cwd ---
 TESTS_DIR = Path(__file__).resolve().parent
