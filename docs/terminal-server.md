@@ -547,3 +547,21 @@ and ask a local model with tool support to run a build and open the terminal
 or download an artifact.
 
 [Docker bridge gateway modes](https://docs.docker.com/engine/network/port-publishing/#gateway-modes)
+
+## Apt file repository test
+You can create the local file repository with
+```bash
+loaf setup create-file-repository
+```
+
+You need to set the correct configuration in [Configuration](/config/config.ini)
+The following packages can then be accessed after an `apt-get update`
+
+```txt
+dnsutils
+vim
+fzf
+python3-venv
+python3-setuptools
+python3-pip
+```
