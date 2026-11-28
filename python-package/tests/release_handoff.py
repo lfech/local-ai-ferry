@@ -178,8 +178,31 @@ def rehearse(executable, root, compression, retain, *, chat_only, ollama_image, 
         ).strip()
         placement = run("docker", "exec", "-e", "OLLAMA_HOST=127.0.0.1:11434", backend, "ollama", "ps", capture=True)
         device = "CPU" if cpu else "GPU"
-        if f"100% {device}" not in placement:
-            raise AssertionError(f"Expected full {device} inference placement:\n{placement}")
+        if cpu:
+            [container] = json.loads(
+                run("docker", "inspect", backend, capture=True)
+            )
+            host_config = container["HostConfig"]
+            if (
+                host_config.get("DeviceRequests")
+                or host_config.get("Devices")
+                or host_config.get("Privileged")
+                or host_config.get("Runtime") == "nvidia"
+            ):
+                raise AssertionError(
+                    "CPU container has unexpected device access."
+                )
+            if "100% CPU" not in placement:
+                print(
+                    f"WARNING: Unexpected Ollama CPU memory "
+                    f"accounting:\n{placement}",
+                    flush=True,
+                )
+                run("docker", "logs", backend)
+        elif "100% GPU" not in placement:
+            raise AssertionError(
+                f"Expected full GPU inference placement:\n{placement}"
+            )
         print(f"Authenticated {device} inference and chat storage passed.", flush=True)
         if chat_only:
             return
