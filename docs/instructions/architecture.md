@@ -189,8 +189,10 @@ corresponding runner.
 Compose mounts the Docker socket in the provisioner so it can create a
 container and internal bridge for each chat. Draft requests use one container
 per account. The account's own requests and the model's tool calls reach the
-same container, and the provisioner publishes Open Terminal's tools at their
-own paths. It answers Open WebUI's request for the terminal's system prompt
+same container. The provisioner publishes command execution and status, file
+display, and shared interactive terminal input and output as model tools at
+their upstream paths. The WebUI continues using the workspace APIs. It answers
+Open WebUI's request for the terminal's system prompt
 itself, without a container, with short instructions to act with the tools,
 and describes `run_command` for this container. It adds a wait of
 `[terminal_server] command_wait_seconds` to command calls that name none, so
@@ -200,22 +202,30 @@ with only the capabilities that `apt`, `dpkg` and `sudo` need and with
 root filesystem, a bounded temporary filesystem at `/tmp`, CPU and memory
 limits and an unpublished API on its own internal bridge. Docker Engine 26 and
 27 use `inhibit_ipv4` to keep an IPv4 address off the host bridge. Docker
-Engine 28 and newer use the `isolated` gateway mode. `[terminal_server]
-network` decides further access: `isolated` keeps containers on their bridge
-alone, and `connected` also attaches them to a shared bridge with outbound
-access and inter-container traffic disabled. `loaf run offline` prints a
-note, not a warning, about that access.
+Engine 28 and newer use the `isolated` gateway mode. The `[terminal_server]`
+`network` setting defaults to `internet`. `isolated` keeps chat containers on
+their internal bridge. `host` adds a shared internal bridge with a host-facing
+IPv4 address and the name `host.docker.internal` in chat containers. Both
+`host` and `isolated` have no default route. `local` and `internet` attach a
+shared bridge with outbound access. Both shared bridges disable direct traffic
+between chat containers. Offline serving notes host or outbound access.
 
-A configured `apt_source_file` replaces inherited sources during an image
-build, and in chat containers at runtime. At startup, the launcher copies its
-provisioner and runner scripts to `.loaf-terminal-runtime/` in the project,
-a path that stays the same across loaf releases, and a Compose override
-mounts them and the source file read-only. The provisioner mounts the source
-file and the runner in every chat container, and an `apt_repository_dir`
-read-only at `/run/loaf-apt/repository`. A container records the paths of
-its runtime mounts, the repository and the network setting it was created
-with; a change replaces it on the next start. Changed contents at the same
-paths apply on its next start, so a new loaf release keeps chat containers.
+A configured `apt_source_file` replaces inherited sources during a build
+with `--with-apt-repos` and in chat containers at runtime. Among the four
+modes, `internet` keeps the image's default sources when the source file is
+blank. `local` uses explicitly configured sources. `host` accepts an explicit
+HTTP(S) source at `host.docker.internal` or a mounted file source. `isolated`
+accepts mounted file repositories. The launcher uses `apt-get` to check
+source syntax and enabled targets without downloading indexes.
+At startup, the launcher copies the current provisioner and runner to
+`.loaf-terminal-runtime/` in the project, and Compose mounts them read-only.
+The provisioner digest in the Compose service configuration causes a new
+script to take effect on `loaf run` or `loaf restart`.
+Chat containers bind the runner from that directory when the launcher
+overrides APT. The provisioner mounts an `apt_repository_dir` read-only at
+`/run/loaf-apt/repository`. A container records its runtime mount paths,
+repository and network policy. A policy or mount change replaces it on the
+next start. Updated contents at the same paths apply when it starts again.
 
 | Folder | Storage and lifetime |
 | --- | --- |

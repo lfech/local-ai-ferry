@@ -149,15 +149,15 @@ async def check_access(webui, accounts):
     metadata = await webui.request("GET", WORKSPACE + "/api/config", alice)
     assert metadata["features"]["terminal"] and metadata["features"]["system"], metadata
     schema = await webui.request("GET", WORKSPACE + "/openapi.json", alice)
-    assert "/execute" in schema["paths"] and not any(path.startswith("/agent/") for path in schema["paths"]), \
-        sorted(schema["paths"])
+    tools = {operation["operationId"] for methods in schema["paths"].values() for operation in methods.values()}
+    assert tools == {"run_command", "get_process_status", "display_file", "read_user_terminal", "send_user_terminal_input"}, tools
     description = schema["paths"]["/execute"]["post"]["description"]
     assert "return its output and exit code" in description and "background" not in description, description
     # The terminal server answers the system prompt, which Open WebUI adds to every chat with the terminal.
     prompt = await webui.request("GET", WORKSPACE + "/system", alice)
     assert "run_command runs shell commands" in prompt["prompt"], prompt
     # A command without a wait returns its output in the same call, as a model's tool call does.
-    result = await webui.request("POST", WORKSPACE + "/execute", alice, json={"command": "sleep 2; echo inline"})
+    result = await webui.request("POST", WORKSPACE + "/execute", alice, json={"command": "sleep 0.25; echo inline"})
     assert result["status"] == "done" and result["exit_code"] == 0, result
     assert "inline" in "".join(entry.get("data", "") for entry in result.get("output", [])), result
 
@@ -278,11 +278,42 @@ printf first > project/model.txt
     return ids[1]
 
 
-async def seed_workspaces(webui, alice, bob):
-    await asyncio.gather(
-        webui.run(alice, "printf 'alice' > identity"),
-        webui.run(bob, "test ! -e identity && printf 'bob' > identity"),
-    )
+async def check_live_command_output(webui, account):
+    """The Terminal pane follows a model's command while it runs: its output arrives before the command ends."""
+    url = webui.url.replace("http://", "ws://", 1) + WORKSPACE
+    auth = {"type": "auth", "token": account["token"], "chat_id": ""}
+    gate = ".release-live-output-test"
+    script = f"""
+trap 'rm -f {gate}' EXIT
+echo live-stdout
+echo live-stderr >&2
+while [ ! -e {gate} ]; do sleep 0.1; done
+echo live-finished
+"""
+    output = ""
+    async with webui.session.ws_connect(url + "/execute") as processes:
+        await processes.send_json(auth)
+        # Like a model's tool call, the command names no wait, so the call returns only when the command ends.
+        command = asyncio.create_task(
+            webui.request("POST", WORKSPACE + "/execute", account, json={"command": script}))
+        process = None
+        while process is None:
+            listing = await asyncio.wait_for(processes.receive_json(), 30)
+            process = next((entry for entry in listing if entry["command"] == script), None)
+        async with webui.session.ws_connect(f"{url}/execute/{process['id']}/status") as stream:
+            await stream.send_json(auth)
+            while not ("live-stdout" in output and "live-stderr" in output):
+                update = await asyncio.wait_for(stream.receive_json(), 30)
+                output += "".join(entry.get("data", "") for entry in update.get("output", []))
+            assert not command.done(), "The command's output arrived only after the command ended."
+            await webui.run(account, f"touch {gate}")
+    result = await command
+    assert result["status"] == "done" and result["exit_code"] == 0, result
+    assert "live-finished" in "".join(entry.get("data", "") for entry in result["output"]), result
+
+
+async def seed_build_workspace(webui, alice):
+    await webui.run(alice, "printf 'alice' > identity")
     await webui.run(alice, BUILD_SOFTWARE)
     await webui.run(alice, "./build/check_arithmetic", exit_code=1)
     await webui.run(alice, FIX_SOFTWARE)
@@ -291,7 +322,11 @@ async def seed_workspaces(webui, alice, bob):
     await webui.upload_docs(alice, "Arithmetic\n==========\n\nOriginal offline example.\n")
     await webui.run(alice, BUILD_DOCS)
     await webui.check_docs(alice, "Original offline example.")
-    await webui.run(alice, "sleep 120", exit_code=None)
+
+
+async def seed_timeout_workspace(webui, bob):
+    await webui.run(bob, "test ! -e identity && printf 'bob' > identity")
+    await webui.run(bob, "sleep 120", exit_code=None)
 
 
 async def reopen_workspaces(webui, alice, bob):
@@ -316,10 +351,12 @@ async def main(service, phase, saved_chat=None):
         if phase == "seed":
             accounts = await configure(webui, Path("/test.key").read_text().strip())
             await check_access(webui, accounts)
+            await check_live_command_output(webui, accounts[0])
             await asyncio.gather(*(check_draft_directories(webui, account) for account in accounts[:2]))
             await check_picker_choices(webui, *accounts[:2])
             retained = await check_chat_directories(webui, *accounts[:2])
-            await seed_workspaces(webui, *accounts[:2])
+            alice, bob = accounts[:2]
+            await asyncio.gather(seed_build_workspace(webui, alice), seed_timeout_workspace(webui, bob))
             print(json.dumps(retained))
         else:
             accounts = [

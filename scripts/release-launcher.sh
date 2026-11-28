@@ -31,5 +31,6 @@ if [[ $# == 1 && $1 == --license ]]; then
 fi
 export LOAF_RELEASE_EXECUTABLE
 LOAF_RELEASE_EXECUTABLE=$(readlink -f -- "$0")
-exec "$runtime/python/bin/python3" -IB -m loaf "$@"
+# Python writes the bytecode of the modules it imports into this runtime cache, once.
+exec "$runtime/python/bin/python3" -I -m loaf "$@"
 __LOAF_PAYLOAD__

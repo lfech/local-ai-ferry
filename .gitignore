@@ -21,6 +21,7 @@ __pycache__/
 # Environment overrides and terminal credentials
 .env
 .env.*
+.test-*
 !.env.example
 terminal-server.key
 /config/**/*.key

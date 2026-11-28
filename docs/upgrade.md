@@ -41,6 +41,13 @@ Rebuild with `loaf build`, then run `loaf run online` or `loaf run offline`.
 Use `[terminal_server]` in the INI and `http://terminal-server:8000` for the
 saved connection in Open WebUI.
 
+Choose `isolated`, `host`, `local` or `internet` for `[terminal_server] network`
+before starting this pre-1.0 release. Change a saved `connected` value to
+`internet` to select outbound access with the image's default Debian sources.
+A change to mounts or network policy can replace a chat's
+container and its `/home/chat` files and installed packages.
+[Terminal network modes](terminal-server.md#network-access)
+
 Releases before v1.0.0 do not migrate terminal data. This release ignores the
 per-account volumes, per-chat volumes and chat package images of earlier
 releases. Copy the files you need from them, then remove them. Move the user

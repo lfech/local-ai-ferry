@@ -10,7 +10,7 @@ The Python package ships [default settings](../python-package/src/loaf/data/conf
 and the [default model list](../python-package/src/loaf/data/config/models.ini).
 The checkout has editable copies in [config/](../config/). Both leave the
 terminal server disabled. The checkout's `config.ini` selects the CUDA 12
-recipe and, for when the terminal server is enabled, `network = connected`.
+recipe.
 
 Settings come in three layers. Later layers override individual keys of
 earlier ones, so the project has the final say:

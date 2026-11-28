@@ -34,20 +34,26 @@ REVISION = "loaf.terminal.revision"
 USERS = "loaf.terminal.users"
 CONNECTED = "loaf.terminal.connected"
 HELPER = "loaf.terminal.helper"
-NETWORK_MODES = ("isolated", "connected")
+NETWORK_MODES = ("isolated", "host", "local", "internet")
+HOST_ALIAS = "host.docker.internal"
 APT_REPOSITORY = "/run/loaf-apt/repository"
 # Commands run as root so that apt, dpkg and sudo work. These are the capabilities they need.
 ROOT_CAPABILITIES = ("CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "KILL", "SETGID", "SETUID", "SETFCAP", "AUDIT_WRITE")
 GATEWAY = "com.docker.network.bridge.gateway_mode_ipv4"
 INHIBIT_IPV4 = "com.docker.network.bridge.inhibit_ipv4"
 BRIDGE_NAME = "com.docker.network.bridge.name"
-# Chat containers on the shared connected network cannot reach each other.
+# Chat containers on a shared access bridge cannot reach each other.
 INTER_CONTAINER = "com.docker.network.bridge.enable_icc"
 KEY_FILE = Path("/run/secrets/terminal-server-key")
 CHAT_DB = Path("/var/lib/loaf-webui/webui.db")
 RUNTIME_RUNNER = "/run/loaf-terminal/runner.py"
-# An empty source that hides each inherited APT source when the runtime source replaces them.
+# An empty source that hides each inherited APT source when [terminal_server] apt_source_file replaces them.
 NO_APT_SOURCE = "/run/loaf-terminal/no-apt-source.list"
+# The APT files of the [terminal_server] settings, each named after its setting: the configured source as
+# apt_source_file.list or apt_source_file.sources, and the source that the launcher writes for apt_repository_dir.
+APT_SOURCES = "/etc/apt/sources.list.d"
+SETTING_SOURCES = ("apt_source_file.", "apt_repository_dir.")
+REPOSITORY_SOURCE = APT_SOURCES + "/apt_repository_dir.list"
 WORKSPACE_ROOT = "/home"
 WORKSPACE_HOME = "/home/user"
 CHAT_HOME = "/home/chat"
@@ -59,6 +65,8 @@ FOLDER_HISTORY_MAX_BYTES = 1024 * 1024
 NON_SAVED_PREFIXES = ("temporary:", "local:", "channel:")
 PORT = 8000
 PROXY_ROOTS = {"api", "events", "execute", "files", "git", "info", "skills", "system"}
+MODEL_TOOLS = {"/execute": "post", "/execute/{process_id}/status": "get", "/files/display": "get",
+               "/api/terminals/user/output": "get", "/api/terminals/user/input": "post"}
 REQUEST_HEADERS = ("Accept", "Content-Type", "If-Modified-Since", "If-None-Match", "Range", "X-Session-Id")
 RESPONSE_HEADERS = (
     "Accept-Ranges", "Cache-Control", "Content-Disposition", "Content-Encoding", "Content-Length",
@@ -150,7 +158,7 @@ class Policy:
     command_seconds: int
     volume_driver: str
     volume_options: dict
-    network: str = "isolated"
+    network: str = "internet"
     bridge_options: dict[str, str] = field(default_factory=lambda: {GATEWAY: "isolated"})
     # Seconds that run_command and get_process_status wait for a command when the call names no wait.
     command_wait: int = 0
@@ -169,11 +177,15 @@ class Policy:
         options = json.loads(env.get("LOAF_TERMINAL_VOLUME_OPTIONS") or "{}")
         if not isinstance(options, dict) or any(not isinstance(value, str) for value in options.values()):
             raise ValueError("Terminal server volume options must be an object of strings.")
-        network = env.get("LOAF_TERMINAL_NETWORK") or "isolated"
+        network = env.get("LOAF_TERMINAL_NETWORK") or "internet"
         if network not in NETWORK_MODES:
-            raise ValueError("The terminal server network must be isolated or connected.")
+            raise ValueError("The terminal server network must be isolated, host, local or internet.")
         return cls(project, *numbers, env["LOAF_TERMINAL_VOLUME_DRIVER"], options, network, bridge_options,
                    command_wait)
+
+    @property
+    def outbound(self):
+        return self.network in ("local", "internet")
 
     def asset_name(self, key):
         """Containers, networks and the user volume start with the deployment's Compose project."""
@@ -191,11 +203,13 @@ class Policy:
         return {PROJECT: self.project, USERS: "true"}
 
     @property
-    def connected_network(self):
-        return self.asset_name("connected")
+    def access_network(self):
+        if self.network == "host":
+            return self.asset_name("host")
+        return self.asset_name("connected") if self.outbound else None
 
     @property
-    def connected_labels(self):
+    def access_labels(self):
         return {PROJECT: self.project, CONNECTED: "true"}
 
     def container_labels(self, key, owner_key, session, revision):
@@ -252,7 +266,7 @@ class Workspaces:
     """
 
     def __init__(self, policy, docker, client, provisioner, image_id, chats, *, runtime_mounts=(), runtime_revision=None,
-                 repository=None):
+                 repository=None, configured_apt_source=False):
         self.policy = policy
         self.docker = docker
         self.client = client
@@ -260,11 +274,12 @@ class Workspaces:
         self.image_id = image_id
         self.chats = chats
         self.runtime_mounts = runtime_mounts
+        self.runtime_revision = runtime_revision
         self.repository = repository
-        # Isolated containers reach only the mounted local repository.
-        self.package_source = policy.network == "connected" or repository is not None
+        self.host_gateway = None
+        self.package_source = (repository is not None or policy.network == "internet"
+                               or (policy.network != "isolated" and configured_apt_source))
         self.command_wait = policy.command_wait
-        self.revision = hashlib.sha256(json.dumps([runtime_revision, repository, policy.network]).encode()).hexdigest()
         # Running containers by workspace key. Each occupies one of the policy's slots.
         self.active = {}
         # Temporary chats by key with their last use. Their containers end when idle and at shutdown.
@@ -274,6 +289,13 @@ class Workspaces:
         # Accounts whose folder exists in the user volume.
         self.user_folders = set()
         self.lock = asyncio.Lock()
+
+    @property
+    def revision(self):
+        mounted = [self.runtime_revision, self.repository, self.policy.network]
+        if self.host_gateway:
+            mounted.append(self.host_gateway)
+        return hashlib.sha256(json.dumps(mounted).encode()).hexdigest()
 
     def has_slot(self, key):
         return key in self.active or len(self.active) < self.policy.maximum
@@ -290,8 +312,8 @@ class Workspaces:
 
     async def initialize(self):
         await self.ensure_users_volume()
-        if self.policy.network == "connected":
-            await self.ensure_connected_network()
+        if self.policy.access_network:
+            await self.ensure_access_network()
         helpers = json.dumps({"label": [f"{HELPER}={self.policy.project}"]})
         for record in await self.docker.call("GET", "/containers/json", params={"all": "true", "filters": helpers}):
             await self.docker.call("DELETE", f"/containers/{record['Id']}", params={"force": "true"}, missing=True)
@@ -320,17 +342,25 @@ class Workspaces:
                 or (volume["Options"] or {}) != self.policy.volume_options):
             raise RuntimeError("Terminal user volume ownership or storage policy mismatch")
 
-    async def ensure_connected_network(self):
-        name, labels = self.policy.connected_network, self.policy.connected_labels
+    async def ensure_access_network(self):
+        name, labels = self.policy.access_network, self.policy.access_labels
+        internal = self.policy.network == "host"
         network = await self.docker.call("GET", f"/networks/{name}", missing=True)
         if network is None:
             await self.docker.call("POST", "/networks/create", body={
-                "Name": name, "Driver": "bridge", "Internal": False, "EnableIPv6": False, "Labels": labels,
+                "Name": name, "Driver": "bridge", "Internal": internal, "EnableIPv6": False, "Labels": labels,
                 "Options": {INTER_CONTAINER: "false"},
             })
-        elif (network["Labels"] != labels or network["Driver"] != "bridge" or network["Internal"]
-              or (network["Options"] or {}).get(INTER_CONTAINER) != "false"):
-            raise RuntimeError("Terminal connected network ownership or isolation mismatch")
+            network = await self.docker.call("GET", f"/networks/{name}")
+        options = network["Options"] or {}
+        if (network["Labels"] != labels or network["Driver"] != "bridge" or network["Internal"] != internal
+                or network["EnableIPv6"] or options.get(INTER_CONTAINER) != "false"):
+            raise RuntimeError("Terminal access network ownership or isolation mismatch")
+        if internal:
+            if options.get(GATEWAY, "nat") != "nat" or options.get(INHIBIT_IPV4) == "true":
+                raise RuntimeError("The terminal host network needs an IPv4 gateway on the Docker host.")
+            gateway = next((entry.get("Gateway") for entry in network["IPAM"]["Config"] if entry.get("Gateway")), None)
+            self.host_gateway = str(ipaddress.IPv4Address(gateway))
 
     async def ensure_user_folder(self, owner_key):
         if owner_key in self.user_folders:
@@ -388,7 +418,7 @@ class Workspaces:
         return name
 
     def expected_networks(self, network):
-        return {network, self.policy.connected_network} if self.policy.network == "connected" else {network}
+        return {network, self.policy.access_network} if self.policy.access_network else {network}
 
     def workspace(self, key, container):
         network = self.policy.asset_name(key)
@@ -436,8 +466,8 @@ class Workspaces:
                 body=self.container_spec(network, labels, secrets.token_urlsafe(32), owner_key, session),
             )
             container = created["Id"]
-            if self.policy.network == "connected":
-                await self.docker.call("POST", f"/networks/{self.policy.connected_network}/connect",
+            if self.policy.access_network:
+                await self.docker.call("POST", f"/networks/{self.policy.access_network}/connect",
                                        body={"Container": container})
             await self.docker.call("POST", f"/containers/{container}/start")
             return self.workspace(key, await self.docker.call("GET", f"/containers/{container}/json"))
@@ -468,8 +498,10 @@ class Workspaces:
             "Tmpfs": {"/tmp": "rw,nosuid,nodev,mode=1777,size=256m"}, "Mounts": mounts,
             "LogConfig": {"Type": "local", "Config": {"max-size": "5m", "max-file": "2"}},
         }
-        if self.policy.network == "isolated":
+        if not self.policy.outbound:
             host["Dns"] = ["127.0.0.1"]
+        if self.policy.network == "host":
+            host["ExtraHosts"] = [f"{HOST_ALIAS}:{self.host_gateway}"]
         return {
             # Open Terminal uses the process working directory as its single-user home. The account's folder keeps
             # dotfiles across chats; lease() starts a chat in /home/chat.
@@ -711,9 +743,10 @@ def system_prompt(package_source):
     return ("You have a Linux terminal: this chat's own Debian container, where you are root. "
             "When the user asks you to run, check, install, build, create, read or change something on the "
             "computer, do it yourself with the terminal tools instead of describing it or asking the user to do it: "
-            "run_command runs shell commands, read_file, write_file and list_files work with files, and "
-            "display_file shows a file to the user. Answer from the tool results. "
-            f"{install} /home/chat is deleted with the chat; keep lasting files in /home/user.")
+            "run_command runs shell commands for file work, searches and checks. Use get_process_status for a "
+            "running command and display_file to show an artifact. Answer from the tool results. "
+            f"{install} /home/chat is deleted with the chat; keep lasting files in /home/user. "
+            "Answer general questions directly.")
 
 
 def command_description(wait):
@@ -728,8 +761,9 @@ def command_description(wait):
 
 
 def tool_schema(paths, wait):
-    """Publish Open Terminal's tools at its own paths, which the chat's container serves."""
-    tools = {path: operations for path, operations in paths.items() if permitted_path(path)}
+    """Publish the model tools while leaving the authenticated workspace APIs available to Open WebUI."""
+    tools = {path: {method: paths[path][method]} for path, method in MODEL_TOOLS.items()
+             if method in paths.get(path, {})}
     run = tools.get("/execute", {}).get("post")
     if isinstance(run, dict):
         run["description"] = command_description(wait)
@@ -921,33 +955,43 @@ def application(workspaces, secret, metadata, control_network=None):
     return app
 
 
-def inherited_apt_sources(runtime_source, etc=Path("/etc/apt")):
-    """The image's own APT sources. The chat containers run this image, too."""
+def inherited_apt_sources(etc=Path("/etc/apt")):
+    """The image's own APT sources, without the files of the [terminal_server] settings. Chat containers run this
+    image, too."""
     candidates = [etc / "sources.list", *sorted((etc / "sources.list.d").glob("*.list")),
                   *sorted((etc / "sources.list.d").glob("*.sources"))]
-    return [str(path) for path in candidates if path.is_file() and str(path) != runtime_source]
+    return [str(path) for path in candidates if path.is_file() and not path.name.startswith(SETTING_SOURCES)]
 
 
-def workspace_runtime_mounts(container, source_format):
-    if source_format not in ("list", "sources"):
+def workspace_runtime_mounts(container, source_format, *, hide_inherited=False):
+    """The runner and APT files that a chat binds from the terminal server's mounts when it overrides APT.
+
+    source_format is the suffix of apt_source_file, or None without one. The source for apt_repository_dir comes
+    with the terminal server's mount of it. A local network also hides inherited sources without a custom source.
+    """
+    if source_format not in (None, "list", "sources"):
         raise ValueError("Use a .list or .sources file for the runtime APT source.")
-    apt_source = f"/etc/apt/sources.list.d/loaf-terminal.{source_format}"
     actual = {mount["Destination"]: mount for mount in container["Mounts"]}
+    source_file = f"{APT_SOURCES}/apt_source_file.{source_format}" if source_format else None
+    targets = [source_file] if source_file else []
+    if REPOSITORY_SOURCE in actual:
+        targets.append(REPOSITORY_SOURCE)
+    if not targets and not hide_inherited:
+        return (), None
     sources = {}
     # The launcher keeps these sources at paths that stay the same across loaf releases. A container binds them
     # when it starts, so changed contents apply on its next start; only changed mounts replace it.
     revision = hashlib.sha256()
-    for target in (apt_source, RUNTIME_RUNNER, NO_APT_SOURCE):
+    for target in (*targets, RUNTIME_RUNNER, NO_APT_SOURCE):
         mount = actual.get(target, {})
         source = sources[target] = mount.get("Source", "")
         if mount.get("Type") != "bind" or mount.get("RW") is not False or not Path(source).is_absolute():
             raise ValueError(f"Expected a read-only runtime bind mount at {target}.")
         revision.update(os.fsencode(source) + b"\0" + os.fsencode(target) + b"\0")
-    # The runtime source replaces the image's own sources, as an image build with it does.
-    hidden = inherited_apt_sources(apt_source)
+    hidden = inherited_apt_sources() if source_file or hide_inherited else []
     revision.update(json.dumps(hidden).encode())
     mounts = [{"Type": "bind", "Source": sources[target], "Target": target, "ReadOnly": True}
-              for target in (apt_source, RUNTIME_RUNNER)]
+              for target in (*targets, RUNTIME_RUNNER)]
     mounts += [{"Type": "bind", "Source": sources[NO_APT_SOURCE], "Target": target, "ReadOnly": True} for target in hidden]
     return tuple(mounts), revision.hexdigest()
 
@@ -986,8 +1030,9 @@ def read_terminal_key(path):
 
 async def serve(*, allow_legacy_bridge=False):
     secret = read_terminal_key(KEY_FILE)
-    source_format = os.environ.get("LOAF_TERMINAL_RUNTIME_APT_SOURCE_FORMAT")
-    metadata = read_metadata(runtime=bool(source_format))
+    runtime = os.environ.get("LOAF_TERMINAL_RUNTIME") == "1"
+    source_format = os.environ.get("LOAF_TERMINAL_RUNTIME_APT_SOURCE_FORMAT") or None
+    metadata = read_metadata(runtime=runtime)
 
     async def reject_redirect(*_):
         raise ClientError("Workspace redirects are disabled")
@@ -1019,10 +1064,15 @@ async def serve(*, allow_legacy_bridge=False):
         address = ipaddress.IPv4Address(endpoint["IPAddress"])
         network = ipaddress.IPv4Network((address, endpoint["IPPrefixLen"]), strict=False)
         policy = Policy.load(project, os.environ, bridge_options=bridge_options)
-        mounts, revision = workspace_runtime_mounts(control, source_format) if source_format else ((), None)
+        hide_inherited = policy.network != "internet"
+        if policy.network in ("host", "local") and not runtime:
+            raise ValueError(f"Start the terminal server with loaf to use network = {policy.network}.")
+        mounts, revision = (workspace_runtime_mounts(control, source_format, hide_inherited=hide_inherited)
+                            if runtime else ((), None))
         repository = os.environ.get("LOAF_TERMINAL_APT_REPOSITORY_DIR") or None
         workspaces = Workspaces(policy, docker, runners, control["Id"], control["Image"], Chats(CHAT_DB),
-                                runtime_mounts=mounts, runtime_revision=revision, repository=repository)
+                                runtime_mounts=mounts, runtime_revision=revision, repository=repository,
+                                configured_apt_source=source_format is not None)
         await workspaces.initialize()
         runner = web.AppRunner(application(workspaces, secret, metadata, network), access_log=None, shutdown_timeout=5)
         stop = asyncio.Event()

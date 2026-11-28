@@ -1,20 +1,14 @@
+# The launcher's terminal scripts and the empty file that hides inherited APT sources when needed.
 services:
   terminal-server:
     entrypoint: ["/usr/bin/python3", "/run/loaf-terminal/provisioner.py"]
     tmpfs:
       - "/tmp:rw,nosuid,nodev,mode=1777,size=32m"
     environment:
-      LOAF_TERMINAL_RUNTIME_APT_SOURCE_FORMAT: ${LOAF_TERMINAL_APT_SOURCE_FORMAT:?}
-      LOAF_TERMINAL_APT_REPOSITORY_DIR: ${LOAF_TERMINAL_APT_REPOSITORY_DIR:-}
+      LOAF_TERMINAL_RUNTIME: "1"
     labels:
-      loaf.terminal.runtime-apt-source: ${LOAF_TERMINAL_APT_SOURCE_HASH:?}
+      loaf.terminal.provisioner: ${LOAF_TERMINAL_PROVISIONER_HASH:?}
     volumes:
-      - type: bind
-        source: ${LOAF_TERMINAL_APT_SOURCE_FILE:?}
-        target: /etc/apt/sources.list.d/loaf-terminal.${LOAF_TERMINAL_APT_SOURCE_FORMAT:?}
-        read_only: true
-        bind:
-          create_host_path: false
       - type: bind
         source: ${LOAF_TERMINAL_RUNTIME_DIR:?}/provisioner.py
         target: /run/loaf-terminal/provisioner.py

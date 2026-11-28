@@ -137,9 +137,14 @@ services:
       context: ${LOAF_DOCKER_DIR:-./docker}/terminal-server
       args:
         OPEN_TERMINAL_IMAGE: ${LOAF_TERMINAL_BASE_IMAGE:-ghcr.io/open-webui/open-terminal:0.17.20-slim}
-        TERMINAL_APT_SOURCE_FORMAT: ${LOAF_TERMINAL_APT_SOURCE_FORMAT:-}
-        TERMINAL_APT_SOURCE_HASH: ${LOAF_TERMINAL_APT_SOURCE_HASH:-}
-      secrets: [terminal-apt-source]
+        # loaf build --with-apt-repos sets these; otherwise the build uses the base image's APT sources.
+        TERMINAL_APT_SOURCE_FORMAT: ${LOAF_TERMINAL_BUILD_APT_SOURCE_FORMAT:-}
+        TERMINAL_APT_SOURCE_HASH: ${LOAF_TERMINAL_BUILD_APT_SOURCE_HASH:-}
+        TERMINAL_APT_REPOSITORY_SOURCE_HASH: ${LOAF_TERMINAL_BUILD_APT_REPOSITORY_SOURCE_HASH:-}
+      # The build mounts it at the path of chat containers' repository; unused without --with-apt-repos.
+      additional_contexts:
+        apt-repository: ${LOAF_TERMINAL_BUILD_APT_REPOSITORY_DIR:-${LOAF_DOCKER_DIR:-./docker}/terminal-server}
+      secrets: [terminal-apt-source, terminal-apt-repository-source]
     entrypoint: ["/usr/bin/python3", "/opt/loaf-terminal/provisioner.py"]
     command: []
     init: true
@@ -159,7 +164,9 @@ services:
       LOAF_TERMINAL_COMMAND_WAIT_SECONDS: ${LOAF_TERMINAL_COMMAND_WAIT_SECONDS:-120}
       LOAF_TERMINAL_VOLUME_DRIVER: ${LOAF_TERMINAL_VOLUME_DRIVER:-local}
       LOAF_TERMINAL_VOLUME_OPTIONS: ${LOAF_TERMINAL_VOLUME_OPTIONS:-}
-      LOAF_TERMINAL_NETWORK: ${LOAF_TERMINAL_NETWORK:-isolated}
+      LOAF_TERMINAL_NETWORK: ${LOAF_TERMINAL_NETWORK:-internet}
+      # [terminal_server] apt_repository_dir, which the provisioner mounts read-only in chat containers.
+      LOAF_TERMINAL_APT_REPOSITORY_DIR: ${LOAF_TERMINAL_APT_REPOSITORY_DIR:-}
     secrets: [terminal-server-key]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -177,8 +184,12 @@ services:
 secrets:
   terminal-server-key:
     file: ${LOAF_TERMINAL_SECRET_FILE:-./config/terminal-server.key}
+  # The text of apt_source_file for loaf build --with-apt-repos. Buildx reads no file outside the build context.
   terminal-apt-source:
-    file: ${LOAF_TERMINAL_APT_SOURCE_FILE:-${LOAF_DOCKER_DIR:-./docker}/terminal-server/default-apt-source.list}
+    environment: LOAF_TERMINAL_BUILD_APT_SOURCE
+  # The source that the launcher writes for apt_repository_dir, for the same builds.
+  terminal-apt-repository-source:
+    environment: LOAF_TERMINAL_BUILD_APT_REPOSITORY_SOURCE
 
 # --- Durable data: these literal names are also used by backup/restore commands ---
 volumes:

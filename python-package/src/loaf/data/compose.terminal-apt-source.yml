@@ -1,0 +1,14 @@
+# [terminal_server] apt_source_file, which replaces the APT sources of chat containers.
+services:
+  terminal-server:
+    environment:
+      LOAF_TERMINAL_RUNTIME_APT_SOURCE_FORMAT: ${LOAF_TERMINAL_APT_SOURCE_FORMAT:?}
+    labels:
+      loaf.terminal.runtime-apt-source: ${LOAF_TERMINAL_APT_SOURCE_HASH:?}
+    volumes:
+      - type: bind
+        source: ${LOAF_TERMINAL_APT_SOURCE_FILE:?}
+        target: /etc/apt/sources.list.d/apt_source_file.${LOAF_TERMINAL_APT_SOURCE_FORMAT:?}
+        read_only: true
+        bind:
+          create_host_path: false

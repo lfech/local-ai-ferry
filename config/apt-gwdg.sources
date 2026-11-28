@@ -1,0 +1,13 @@
+# For testing purposes with Local AI Ferry.
+
+Types: deb
+URIs: https://ftp.gwdg.de/debian/
+Suites: trixie trixie-updates trixie-backports
+Components: main contrib non-free non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+
+Types: deb
+URIs: https://ftp.gwdg.de/pub/linux/debian/debian-security/
+Suites: trixie-security
+Components: main contrib non-free non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg

@@ -63,7 +63,7 @@ class Settings:
     terminal_server_apt_source_file: Path | None = None
     terminal_server_apt_repository_dir: Path | None = None
     # isolated: chat containers reach only the provisioner; connected: also every address the host reaches.
-    terminal_server_network: str = "isolated"
+    terminal_server_network: str = "internet"
     # Open WebUI accounts that may use the preset terminal connection: admins, or users for every account.
     terminal_server_webui_access: str = "admins"
     terminal_server_cpus: int = 2
@@ -236,8 +236,8 @@ def terminal_webui_access_value(value: str) -> str:
 
 
 def terminal_network_value(value: str) -> str:
-    if value not in ("isolated", "connected"):
-        raise ValueError("expected isolated or connected")
+    if value not in ("isolated", "host", "local", "internet"):
+        raise ValueError("expected isolated, host, local or internet")
     return value
 
 

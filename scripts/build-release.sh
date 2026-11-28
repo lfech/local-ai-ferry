@@ -234,9 +234,15 @@ cp -- "$bundle/LICENSE.txt" "$dist/LICENSE.txt"
         lib/python3.*/lib-dynload/_tkinter.*
     # Only virtualenvs with pip need ensurepip; the launcher creates none with this runtime.
     rm -rf -- lib/python3.*/ensurepip
+    # The symbol table serves debuggers only; extension modules and ctypes use the dynamic symbols that stay.
+    if command -v strip >/dev/null; then
+        strip --strip-all -- "$(readlink -f bin/python3)"
+    fi
 )
-run_logged "$python" -I -c 'import loaf.cli, unittest, sqlite3, ssl, venv, urllib.request, pydoc'
-run_logged "$python" -I -m pip --version
+# -B: the runtime writes the bytecode of what it imports into its own cache, so the payload carries none.
+run_logged "$python" -IB -c 'import loaf.cli, unittest, sqlite3, ssl, venv, urllib.request, pydoc, dbm.ndbm, ctypes'
+run_logged "$python" -IB -m pip --version
+find "$bundle/python" -name __pycache__ -prune -exec rm -rf -- {} +
 printf '%s\n' "$version_tag" > "$bundle/.loaf-release"
 tar -cf - -C "$bundle" .loaf-release LICENSE.txt python python-licenses wheels | gzip -9n > "$stage/payload.tar.gz"
 bundle_id=$(sha256sum "$stage/payload.tar.gz" | cut -d ' ' -f 1)

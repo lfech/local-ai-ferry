@@ -62,7 +62,7 @@ def cold_handoff(bundle, name, namespace, port, fixture, deb=None):
         ).returncode:
             if monotonic() >= deadline:
                 raise RuntimeError("The destination Docker daemon failed to start.")
-            sleep(1)
+            sleep(0.25)
 
         [container] = json.loads(run("docker", "inspect", name, capture=True))
         [mount] = [entry for entry in container["Mounts"] if entry["Destination"] == "/handoff"]
@@ -152,8 +152,7 @@ def rehearse(executable, root, compression, retain, *, chat_only, ollama_image, 
         f"[images]\nollama_image = {ollama_image}\nwebui_image = {WEBUI_IMAGE}\n"
         f"[webui]\nport = {port}\n[ollama]\ncontext_length = 1024\n"
     )
-    if compression is not None:
-        settings += f"[transfer]\ncompression_level = {compression}\n"
+    settings += f"[transfer]\ncompression_level = {compression}\n"
     (source / "config/config.ini").write_text(settings, encoding="utf-8")
     (source / "config/models.ini").write_text(f"[models.default]\nmodel = {MODEL}\n", encoding="utf-8")
 
@@ -235,8 +234,8 @@ def main():
     mode.add_argument("--keep", type=Path, help="Retain the backup and fixture login in a new directory")
     mode.add_argument("--chat-only", action="store_true", help="Run the short authenticated chat without a handoff")
     parser.add_argument("--gpu", action="store_true", help="Use the CUDA 13 fixture for --chat-only")
-    parser.add_argument("--compression", type=int, choices=range(10),
-                        help="Override the release executable's backup gzip level")
+    parser.add_argument("--compression", type=int, choices=range(10), default=1,
+                        help="Backup gzip level for the handoff fixture (default: %(default)s)")
     parser.add_argument("--deb", type=Path, help="Install this loaf Debian package in the disconnected destination")
     parser.add_argument("--ollama-source",
                         help="Use a matching Ollama v0.40.18 image as the source of compact runtime files")

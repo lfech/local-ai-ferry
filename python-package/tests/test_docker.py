@@ -104,8 +104,14 @@ class ComposeContractTests(unittest.TestCase):
                 self.assertTrue(dockerfile.is_file())
                 self.assertTrue(dockerfile.is_relative_to(context), dockerfile)
                 for secret in build.get("secrets", ()):
-                    source = Path(rendered["secrets"][secret["source"]]["file"]).resolve()
-                    self.assertTrue(source.is_relative_to(context), source)
+                    definition = rendered["secrets"][secret["source"]]
+                    # A secret from an environment variable reads no file.
+                    if "file" in definition:
+                        self.assertTrue(Path(definition["file"]).resolve().is_relative_to(context), definition)
+                    else:
+                        self.assertEqual(set(definition), {"name", "environment"}, definition)
+                for name, extra in build.get("additional_contexts", {}).items():
+                    self.assertTrue(Path(extra).resolve().is_relative_to(DOCKER_DIR.resolve()), (name, extra))
 
     def test_ollama_profiles_share_model_storage(self):
         self.assertEqual(self.rendered["volumes"]["ollama"]["name"], "loaf-ollama")

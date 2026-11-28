@@ -1,5 +1,6 @@
 """Check local links and parse shell examples without executing them."""
 
+from functools import cache
 import os
 from pathlib import Path
 import re
@@ -77,8 +78,10 @@ def link_target(path, link_path, root=ROOT):
     return root / link_path.lstrip("/") if link_path.startswith("/") else path.parent / link_path
 
 
-def local_link_problems(path, root=ROOT):
+def local_link_problems(path, root=ROOT, *, anchors_for=None):
     problems = []
+    if anchors_for is None:
+        anchors_for = lambda target: heading_anchors(target.read_text(encoding="utf-8"))
     for link in markdown_links(path):
         if link.scheme or link.netloc:
             continue
@@ -91,16 +94,20 @@ def local_link_problems(path, root=ROOT):
             if not target.is_file() or int(lines[1]) > last or last > len(target.read_bytes().splitlines()):
                 problems.append(f"Missing line: {link.geturl()}")
         elif link.fragment and target.suffix.lower() == ".md":
-            if unquote(link.fragment) not in heading_anchors(target.read_text(encoding="utf-8")):
+            if unquote(link.fragment) not in anchors_for(target.resolve()):
                 problems.append(f"Missing heading: {link.geturl()}")
     return problems
 
 
 class DocumentationTests(unittest.TestCase):
     def test_fences_and_local_links(self):
+        @cache
+        def anchors_for(target):
+            return heading_anchors(target.read_text(encoding="utf-8"))
+
         for path in documents():
             with self.subTest(path=path):
-                self.assertEqual(local_link_problems(path), [])
+                self.assertEqual(local_link_problems(path, anchors_for=anchors_for), [])
 
     def test_command_reference_covers_every_command_and_global_flag(self):
         from loaf import cli

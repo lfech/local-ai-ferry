@@ -4,6 +4,203 @@
 
 Older entries use the current command and project names in examples.
 
+## 2026-11-28 18:18:19 +0100 — Reconcile the audit backlog
+
+- Scope covered the ToDo list, problems register, and their links to the
+  implementation and verification records. The expected result was one open
+  follow-up, item 4, with the original audit numbering intact.
+- `../.venv/bin/python -m unittest tests.test_documentation` from
+  `python-package/` passed **6 tests**. `git diff HEAD --check` passed.
+  Verification was limited to the documentation and working-tree diff.
+
+## 2026-11-28 18:10:55 +0100 — Verify terminal network and audit fixes
+
+- Scope. Debian 13 in WSL2, Python 3.13.5, Docker Engine 26.1.5 and Compose
+  2.26.1-4. Tests used the checkout with repaired artifact ownership and
+  disposable Docker projects. The expected changes were host-only mirror
+  access, syntax checks before service changes, and a smaller model tool
+  list with the WebUI workspace operations available.
+- The final default suite passed **302 tests**, with 52 opt-in skips. The
+  Docker, Open Terminal and Debian package sweep passed **347 tests** in
+  387.1 s, with six GPU cases skipped and one catalog failure for an interim
+  sharded model tag. The final opt-in example uses the Ministral model from
+  the existing catalog. The catalog rerun and a download dry run verified
+  the selection and its new alias.
+- The targeted checkout GPU inference test passed in 360.1 s. The test
+  created its working directory under the repaired `.test-artifacts/` and
+  checked placement and context through WebUI.
+- APT validation passed on Debian 12 and 13 with networking disabled.
+  The real BuildKit check built with an empty source and a disposable
+  flat repository. The host fixture installed a package through
+  `host.docker.internal` and had no default route.
+- All **32 Open Terminal tests** passed after the APT and provisioner
+  changes. They covered the reduced tool schema through Open WebUI, the
+  workspace file browser and command streams, provisioner recreation with
+  the chat retained, and the host-only mirror. The default suite verified
+  the final prompt sentence separately.
+- `run`, `build`, `stop`, `stop offline` and `restart offline` pointed to
+  Docker access guidance with an intentionally unavailable socket. The
+  trace test verified that preview and execution kept a synthetic secret
+  out of their output and that BuildKit still received the source.
+- A first-call Ollama probe used simplified tool schemas, 8192 context
+  tokens, temperature zero, 24 ordinary questions and eight terminal
+  tasks. Ministral used a tool for **8/24** ordinary questions with both
+  the old and the reduced tool lists. The added direct-answer guidance
+  lowered that to **3/24**. Every variant called a tool for **8/8** terminal
+  tasks. The probe counted tool selections without executing commands.
+  Qwen3 used a tool for **0/24** ordinary questions and **1/8** terminal
+  requests with the same reduced schemas and a 250-token generation limit.
+  The terminal example selects Ministral based on this probe. Two earlier
+  attempts hit a sharded model tag and an HTTP 500 from Ollama.
+- Documentation checks passed **6 tests**. The offline wheel build included
+  the final Ministral model list and the APT parser. `git diff HEAD --check`
+  passed.
+
+## 2026-11-28 17:10:32 +0100 — Deep verification of the working tree
+
+- Scope from 17:02 CET. Audit of the working tree over `557d58a`, following
+  the development verification prompt. Tests used a fresh copy, an isolated
+  runtime cache, Debian 13 in WSL2, Python 3.13.5, Docker Engine 26.1.5,
+  Compose 2.26.1-4, Buildx 0.13.1 and an RTX 4070 Ti SUPER. The existing
+  deployments remained up during the tests.
+- Expected behavior. The published workflows should serve, transfer and
+  restore using disposable data. `local` should keep explicit APT inputs,
+  and the `connected` alias should preserve existing workspace data.
+- `loaf test -v` with Docker, Open Terminal and model-catalog checks enabled
+  passed **344 tests** in 373.6 s. That includes both Debian package tests,
+  the online and offline Open WebUI terminal workflows, and the public
+  manifest check. The six separately scheduled GPU tests were skipped in
+  this run. The terminal fixture used the current provisioner and runner
+  in a disposable image based on the loaded terminal image.
+- `tests.test_docker_gpu` passed **6 tests** in 431.8 s, including offline
+  GPU inference, Modelfile replay, failure recovery and archive mirroring.
+  The copy supplied a writable artifact directory. The checkout's original
+  `.test-artifacts/` still belongs to UID 65534 and has mode `0755`.
+- The actual terminal Dockerfile built with default sources, a custom
+  deb822 source, and a custom source plus a flat repository. All three
+  images kept the base APT defaults for serving. A tiny signed `dists/`
+  repository with a scoped `Signed-By` key installed a package in an
+  `isolated` chat. Repository testing drew on Aptly's signed snapshot
+  layout. Open WebUI's offline guide also confirmed the distinction between
+  application offline settings and network isolation.
+  [Aptly snapshot layout](https://www.aptly.info/doc/aptly/publish/snapshot/) ·
+  [Open WebUI offline mode](https://docs.openwebui.com/tutorials/maintenance/offline-mode/)
+- The **17,718,955-byte** standalone executable passed a cold handoff in
+  120.0 s. The disconnected destination used Docker 28.5.2 and Compose
+  2.40.3. It restored into a fresh daemon, ran an authenticated chat on CPU
+  and rejected corrupted model weights during inference.
+- Supplemental observations. An explicit legacy `connected` setting kept
+  the same workspace container and file. An old isolated draft using an INI
+  with no `network` setting was replaced on upgrade, and its fixture file
+  disappeared. A same-configuration terminal start left the running
+  provisioner bound to its earlier script. Source-only and `Enabled: false`
+  APT entries suppressed the generated binary source. Verbose build preview
+  printed a dummy mirror credential, and a non-UTF-8 source produced a
+  traceback. The unavailable-socket probe confirmed the difference in CLI
+  diagnostics. [Open problems and resolutions](instructions/problems.md)
+- Documentation tests passed **6 tests**. Release scripts passed `bash -n`
+  and `git diff HEAD --check` passed. This audit skipped a new large-model
+  tool-call comparison, a separate CPU run of the full model-workflow
+  matrix, and browser interaction with the Terminal pane.
+
+## 2026-11-28 17:01:30 +0100 — Terminal network modes and APT defaults
+
+- Scope: Python 3.13.5, Docker Engine 26.1.5, Compose 2.26.1-4 and existing
+  local images in disposable namespaces. The checks left the running
+  deployments alone.
+- Expected: `internet` and `local` have the same outbound reach. Only
+  `internet` keeps the image's default Debian sources when no custom source
+  is set. Configured APT sources and repositories still apply in `local`.
+- Observed: both modes attached to the same outbound bridge with a gateway.
+  APT printed the image's Debian URLs in `internet` and no URLs in `local`.
+  The first check used `indextargets`, which returned nothing with a fresh
+  image's empty package lists. The rerun used `apt-get --print-uris update`.
+  It and the two existing APT source and package-persistence cases passed
+  in 70.7 s. The separate CLI restart case passed after switching from
+  `isolated` to `local` and updating both APT paths. A fresh chat updated its
+  package lists from the new configured repository.
+- Default suite: **299 passed**, 51 opt-in checks skipped. Documentation:
+  **6 passed**. An offline wheel build included the runtime Compose override
+  and the packaged `internet` default.
+- Skipped: the rest of the opt-in Docker, GPU and model catalog suites.
+
+## 2026-11-28 16:52:15 +0100 — Chat APT settings after restart
+
+- Environment: Python 3.13.5, Docker Engine 26.1.5 and Compose 2.26.1-4.
+  Docker checks used local images and disposable projects. The author's
+  running deployments stayed up.
+- Implementation: runtime APT mounts use the configured paths, and only an
+  active local repository URI suppresses the generated source. Expected:
+  after restarting, a fresh chat mounts both current paths read-only and
+  can update package lists from the new repository.
+- Observed: **3 Docker APT tests passed** in 125.3 s. The CLI case changed
+  both paths, switched from `.list` to `.sources` and ran `loaf restart`
+  without a profile. The two other cases checked same-path source edits
+  and package installation and persistence. The CLI case passed again in
+  74.7 s with extra assertions for the source contents and the local URI in
+  `apt-get update` output. The checkout's restart dry run also rendered the
+  repository-only configuration.
+- Docker-free suite with loopback available: **298 passed**, 50 opt-in tests
+  skipped. The earlier sandboxed runs stalled and were canceled. Configuration
+  and documentation checks: **24 passed**. The full opt-in Docker, GPU and
+  model-catalog suites were outside this run.
+
+## 2026-11-28 16:13:11 +0100 — Smaller standalone executable
+
+- Environment: Debian 13 in WSL2, Docker Engine 26.1.5, Compose 2.26.1-4,
+  Python 3.13.5, binutils `strip`; the pinned Python Build Standalone
+  20261110 runtime from `install-cache/python/`. The author's offline
+  deployment ran during the checks and stayed untouched. The fixture image
+  `loaf/cold-test:28.5.2` that the handoff built was removed afterwards.
+- Implementation: the build leaves bytecode out of the payload and strips
+  the interpreter's symbol table; the launcher lets Python write bytecode
+  into the runtime cache. Expected: a smaller executable with unchanged
+  behavior and, after the first start, unchanged start time.
+- Size: the executable built from the working tree before the change
+  measured **22,554,355 bytes**, after it **17,716,015 bytes**. On the new
+  payload, xz -9e gave 12,361,764 bytes and Zopfli with five iterations
+  17,084,555 bytes, against 17,714,058 with gzip -9.
+- Start time of `loaf version`, averaged over five runs: with the old payload
+  0.056 s; with bytecode removed and `-B` kept, 0.296 s; with the new
+  executable, 0.562 s for the first start including unpacking, then 0.058 s,
+  with 134 bytecode files written into the runtime cache.
+- The stripped interpreter imported `ssl`, `sqlite3`, `ctypes`, `lzma`,
+  `bz2`, `dbm.ndbm`, `readline`, `curses`, `_decimal`, `venv`, `unittest`,
+  `pydoc`, `urllib.request` and `loaf.cli`, loaded the `_dbm` extension,
+  resolved `Py_GetVersion` through `ctypes`, ran pip and created a virtualenv.
+- `scripts/build-release.sh --binary-only` passed its own checks.
+  `release_handoff.py` ran the cold handoff with the new executable, from a
+  connected source through backup to a disconnected Debian 13 host with
+  restore, chat and the corrupt-weight check: **passed** in 112.6 s.
+  `tests.test_debian` with `RUN_DOCKER_TESTS=1`, which builds the package
+  with the new script and runs its executable on Debian 12 and 13: **2
+  passed**. Docker-free suite: **343 passed**, 49 skipped.
+- Not run: a build on a host without `strip`, where the symbol table stays.
+
+## 2026-11-28 16:01:06 +0100 — Live command output in the Terminal pane
+
+- Environment: as in the entry below. The author's deployment ran its online
+  profile during this check and stayed untouched; the image
+  `loaf/open-terminal:live-check`, built from the working tree for the check,
+  was removed afterwards.
+- Implementation: no change to loaf's code; a new live check in
+  `terminal_server_checks.py`. Expected: the output of a command that a model
+  starts reaches Open WebUI's command stream for the Terminal pane while the
+  command runs, and the chat entry gets the output when the call returns.
+- Upstream claims checked in the Open WebUI v0.13.4 image: the chat entry of
+  `run_command` reads its output only from the tool result, the backend adds
+  that result after the call has returned, and Open WebUI proxies the
+  command list and output streams of Open Terminal 0.17.20 with the chat's
+  session. The Terminal pane's behavior follows Open WebUI's documentation.
+- `test_offline_and_connected_workspaces_survive_a_cold_restart` with
+  `RUN_TERMINAL_SERVER_TESTS=1`, 15:58:36 to 16:00:27: **passed**, 110 s, for
+  both profiles. Through Open WebUI and the terminal server, a four-second
+  command without a wait appeared in the command list, and its second stdout
+  and stderr lines arrived on its output stream while the call was still
+  open; the call then returned `done` with all output.
+- Docker-free suite at 16:01:06: **343 passed**, 49 skipped.
+- Not run: the Terminal pane in a browser.
+
 ## 2026-11-28 15:28:56 +0100 — Audit of the fixes and core tasks
 
 - Environment: Debian 13 in WSL2, Docker Engine 26.1.5, Compose 2.26.1-4,

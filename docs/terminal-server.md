@@ -98,10 +98,12 @@ connection there: a direct connection to `http://terminal-server:8000` with
 
 ## Use the terminal from a model
 
-In **Workspace → Models**, enable **Terminal** for the model and keep
-**Function Calling** at its default, native tool calling; Open WebUI v0.13.4
-treats the **Legacy** mode as unsupported. Select **Open Terminal** in the chat,
-or choose it as the model's **Default terminal**.
+In **Workspace → Models**, enable **Terminal** on the model and keep
+**Function Calling** at its native default. Select **Open Terminal** in the
+chat, or choose it as that model's **Default terminal**. Clear the default
+to attach it manually per chat. To disable terminal access for that model,
+turn off its **Terminal** capability. The settings belong to that model.
+[Open WebUI model settings](https://docs.openwebui.com/features/workspace/models/)
 
 Open WebUI adds the terminal server's instructions to the system prompt of
 every chat that uses the terminal. The bundled terminal server answers this
@@ -109,12 +111,25 @@ request itself, without a chat container, so the instructions also arrive
 with a chat's first message, while its container still starts:
 
 ```text
-You have a Linux terminal: this chat's own Debian container, where you are root. When the user asks you to run, check, install, build, create, read or change something on the computer, do it yourself with the terminal tools instead of describing it or asking the user to do it: run_command runs shell commands, read_file, write_file and list_files work with files, and display_file shows a file to the user. Answer from the tool results. Install packages with apt update, then apt install PACKAGE. /home/chat is deleted with the chat; keep lasting files in /home/user.
+You have a Linux terminal: this chat's own Debian container, where you are root. When the user asks you to run, check, install, build, create, read or change something on the computer, do it yourself with the terminal tools instead of describing it or asking the user to do it: run_command runs shell commands for file work, searches and checks. Use get_process_status for a running command and display_file to show an artifact. Answer from the tool results. Install packages with apt update, then apt install PACKAGE. /home/chat is deleted with the chat; keep lasting files in /home/user. Answer general questions directly.
 ```
 
-With `network = isolated` and no `apt_repository_dir`, no package source is
-reachable. The apt sentence then reads `No package source is reachable; use
-the installed programs.`
+The provisioner adjusts the APT guidance to the workspace's package sources.
+When there is no reachable configured source, it tells the model to use the
+installed programs. [Network access](#network-access)
+
+### Terminal tools
+
+| Tool | Use |
+| --- | --- |
+| `run_command` | Run shell commands for builds, tests and file operations. Use `ls` or `find` to list files, `grep` to search, and `sed` or `cat` to read text. |
+| `get_process_status` | Read output from a running command by its ID and wait for completion. |
+| `display_file` | Present an artifact from the workspace in the chat. |
+| `read_user_terminal` | Read the output of the user's shared interactive terminal when Open WebUI makes it available. |
+| `send_user_terminal_input` | Send input to that interactive terminal. |
+
+The Files tab, interactive terminal and command streams keep their workspace
+APIs. The reduced tool list applies to all models using this connection.
 
 `run_command` waits up to `command_wait_seconds`, 120 by default, for the
 command to finish and returns its output and exit code, so the chat shows a
@@ -126,6 +141,15 @@ Terminal's own `execute_timeout` setting does, and its description of
 `run_command` names it. A change applies to existing chat containers with
 `loaf restart`. `command_wait_seconds = 0` returns at once with the command's
 ID, Open Terminal's default.
+
+Open WebUI v0.13.4 builds the **Ran command** entry from the finished tool
+result, so the entry shows a spinner and its output appears when the command
+ends. To follow a command while it runs, open the chat's **Files** tab: once
+the model has run a command, a **Sessions** strip appears below the file
+browser. Open it and select the tab labelled with the command; a green dot
+marks a running command, and its stdout and stderr arrive as the command
+writes them. Collapsing the strip or dismissing a finished tab does not affect
+the command.
 
 If a follow-up after a terminal tool result fails with a role-order error,
 enable the optional filter for that model.
@@ -170,6 +194,7 @@ dir=$(mktemp -d "$HOME/hello-check.XXXXXX") && cd "$dir" && printf '%s\n' '#incl
 ```
 
 [Help small models call the tools](#help-small-models-call-the-tools) ·
+[Open WebUI terminal pane](https://docs.openwebui.com/features/open-terminal/terminal-pane) ·
 [Open WebUI model settings](https://docs.openwebui.com/features/workspace/models/) ·
 [Open Terminal execute timeout](https://docs.openwebui.com/features/open-terminal/advanced/configuration) ·
 [Conversation roles must alternate](troubleshooting.md#conversation-roles-must-alternate) ·
@@ -191,10 +216,8 @@ do the rest:
 2. **One call per command.** With `command_wait_seconds`, `run_command`
    returns the output instead of a command ID, so no second call is needed
    for a usual command.
-3. **Upstream tool names.** Open WebUI shows `run_command`, `read_file` and
-   the other Open Terminal tools in their own chat form by these names, and
-   its own instructions name `run_command`. Renamed tools would lose both, so
-   the descriptions carry the guidance instead.
+3. **Shell operations.** The model can use `run_command` for file reads,
+   writes, searches and build commands. [Terminal tools](#terminal-tools)
 4. **Fewer tool definitions.** Every enabled tool adds a definition to each
    request, and studies of tool selection report that small models choose
    better among fewer tools. In the model's settings, turn off the built-in
@@ -203,18 +226,19 @@ do the rest:
 5. **A model trained for tool calls.** Prefer instruction-tuned models with
    tool support, such as Qwen2.5 Instruct, Qwen3, Ministral or Granite 4.0.
    In a check, Qwen2.5-Coder 7B wrote its calls as JSON text, which Ollama
-   does not turn into tool calls, so use the chat models of the example lists
-   with the terminal. Open WebUI's documentation expects models under about 30B
-   parameters to fail multi-step tool chains more often, so give small models
+   does not turn into tool calls. Use the optional terminal model or an
+   existing chat model with tool support. Small models can struggle with
+   multi-step tool chains, so give them
    one task per message. Keep `context_length` large enough for the tool
-   definitions and the command output; the default is 16384 tokens.
+   definitions and the command output. The default is 16384 tokens.
+   [Optional terminal model](models.md#opt-in-terminal-model)
 6. **Your own instructions.** Open WebUI adds the account's
    `/home/user/AGENTS.md` to every message, so lasting instructions for your
    work belong there. A skill in `/home/user/.agents/skills` needs a
    `view_skill` call before it helps, which small models rarely make, so the
    basic instructions are in the system prompt instead.
 
-A check with these tool definitions and eight terminal requests, without
+A previous check with the full tool list and eight terminal requests, without
 Open WebUI in between, measured the first call: Qwen2.5 7B Instruct and Qwen3
 4B called a tool for every request with or without the system prompt.
 Ministral 3B Reasoning called one for 20 of 24 requests without it and for
@@ -248,19 +272,16 @@ The packages stay in the chat's container while the chat exists, also while
 the container is stopped. Other chats and new chats start from the shared
 terminal image. Backups do not include installed packages; install them again
 after a restore. Moving `apt_source_file` or `apt_repository_dir` to another
-path, switching between `.list` and `.sources`, or changing `network`
-replaces existing chat containers on the next start, without their packages.
+path, switching between `.list` and `.sources`, or switching network modes
+replaces existing chat containers and their packages on the next start.
 
-The container must reach a package source. With `network = connected`, it
-uses the image's APT sources or a configured `apt_source_file` over the
-Docker host's network. With `network = isolated`, set `apt_repository_dir` to
-a repository stored on the Docker host and use a source URI rooted at
-`file:/run/loaf-apt/repository`. Relative paths in `config.ini` start at the
-project directory. `loaf run online`, `loaf run offline` and `loaf status` refuse a
-directory without an APT index: `Packages` or one of its compressed forms,
-`Release` or `InRelease` at the root, or `dists/`. For example, after loading
-the terminal image, use the following settings and a flat repository's
-`.list` source.
+Set `apt_repository_dir` to a repository on the Docker host. Loaf generates
+the binary `deb` entries for `file:/run/loaf-apt/repository` that an enabled
+binary source in `apt_source_file` has yet to cover. Relative paths in
+`config.ini` start at the project directory. Loaf requires an APT index, such as `Packages` or one
+of its compressed forms for a flat repository, or a suite under `dists/`.
+The following example uses a flat repository as the only source.
+See which sources each mode keeps enabled under [Network access](#network-access).
 
 ```ini
 [terminal_server]
@@ -296,9 +317,9 @@ All settings below belong to `[terminal_server]` in `config/config.ini`.
 | `enabled` | `false` | Start the provisioner with `loaf run online` and `loaf run offline`. |
 | `include_in_backup` | `true` | Include the `terminal` type in `loaf backup` without type names while the terminal server is enabled: the user volume and the bearer key that Open WebUI's saved connection uses. |
 | `secret_file` | `config/terminal-server.key` | Source for the Compose bearer secret. |
-| `apt_source_file` | blank | Use this APT source for terminal image builds and for `apt` in chat containers. [Package mirror](#package-mirror-for-image-builds) |
+| `apt_source_file` | blank | Replace the terminal image's APT sources in chat containers. [Apply changes to chat containers](#edit-an-apt-source-on-the-offline-host) |
 | `apt_repository_dir` | blank | Host directory for a `file:` repository, mounted read-only in chat containers. [Install packages in a chat](#install-packages-in-a-chat) |
-| `network` | `isolated` | `isolated` lets chat containers reach only the provisioner. `connected` also lets them reach every address the Docker host reaches. [Network access](#network-access) |
+| `network` | `internet` | Choose `isolated`, `host`, `local` or `internet`. [Network access](#network-access) |
 | `webui_access` | `admins` | Accounts that may use the connection that Open WebUI starts with: `admins`, or `users` for every account. [Enable and connect](#enable-and-connect) |
 | `cpus` | `2` | CPU limit per container. |
 | `memory_mib` | `2048` | Memory limit per container. |
@@ -339,31 +360,52 @@ closes its container's streams.
 
 ### Network access
 
-With `network = isolated`, a container reaches only the provisioner over its
-own internal bridge. The bridge uses IPv4 with no default route, and IPv6 is
-disabled. `apt` can then install only from a local repository.
+| Mode | Container access | APT sources |
+| --- | --- | --- |
+| `internet` (default) | The provisioner and every address the Docker host can reach. | The image's sources or `apt_source_file`, plus any configured `apt_repository_dir`. |
+| `local` | The provisioner and every address the Docker host can reach, including the internet when available. | The configured `apt_source_file` and `apt_repository_dir`. The image's default Debian sources are disabled. |
+| `host` | The provisioner and services listening on the Docker host's bridge address at `host.docker.internal`. The chat has no default route. | An explicit HTTP(S) mirror at `host.docker.internal` or a mounted file repository. |
+| `isolated` | The provisioner over the chat's internal bridge with no default route. | A file repository mounted with `apt_repository_dir`. |
 
-With `network = connected`, each container also joins the shared bridge
-`loaf-terminal-connected` with outbound access, on which containers cannot
-reach each other. They reach
-every address the Docker host reaches: an APT mirror, the internet, other
-hosts on its network and the host's published ports, including Open WebUI.
-Use it only where that access is acceptable. `loaf run offline` prints a note
-about this access, since local network access can still be intended on an
-offline host. Changing the setting replaces
-existing chat containers on the next start, which removes their `/home/chat`
-folders and installed packages.
+Both outbound modes use the shared `loaf-terminal-connected` bridge. Chat
+containers on it cannot reach each other. `host` uses a separate internal
+bridge with a host IPv4 address and direct chat-to-chat traffic disabled.
+In `local`, set only reachable LAN or file sources to avoid attempts against
+internet mirrors.
+Loaf validates UTF-8 `.list` and `.sources` syntax with the host's `apt-get`
+without downloading indexes. In `host` and `isolated`, it checks the configured
+APT addresses against the network mode. Apply a mode change with `loaf restart`.
+[Docker internal networks](https://docs.docker.com/reference/cli/docker/network/create/#network-internal-mode---internal) ·
+[Restart options](cli-help.md#restart)
 
 [Install packages in a chat](#install-packages-in-a-chat)
 
+#### Docker host mirror
+
+Set `network = host` and `apt_source_file = config/host-mirror.list` in
+`[terminal_server]`. Use `host.docker.internal` in the source file.
+
+```text
+deb http://host.docker.internal:8081/debian trixie main
+```
+
+The provisioner creates the bridge when it starts. On the Docker host, find
+its IPv4 address and bind the mirror there on the port in the source file.
+The example below uses the default deployment namespace.
+
+```bash
+docker network inspect loaf-terminal-host --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}'
+```
+
 ## Package mirror for image builds
 
-Set `apt_source_file` to a Debian `.list` or `.sources` file. Relative paths
-start at the project directory. During the build, the file replaces the
-inherited APT sources. The Docker builder must be able to reach the configured
-mirrors, and their suites must match the base image. A blank value keeps the
-base image's APT sources. The file is stored in the finished image, so use
-mirror URLs without embedded credentials.
+Use `loaf build --with-apt-repos` to build the terminal image with the
+configured APT settings. An `apt_source_file` replaces the inherited sources
+during the build, and `apt_repository_dir` adds a local repository. The
+Docker builder must be able to reach any configured mirrors, and their
+suites must match the base image. The finished image keeps the base image's
+APT sources. Verbose launcher output shows the source path and omits the
+contents passed to BuildKit.
 
 ```ini
 [terminal_server]
@@ -374,7 +416,7 @@ apt_source_file = config/offline-mirror.list
 deb http://apt-mirror.lan/debian trixie main
 ```
 
-Run `loaf build` while the mirror is reachable, then transfer the image to the
+Run the build while the mirror is reachable, then transfer the image to the
 offline host. The installed commands run inside the isolated workspaces.
 Packages installed during the build are available to all chats.
 
@@ -391,26 +433,21 @@ path in the project configuration. For example, place the file at
 apt_source_file = config/offline-mirror.sources
 ```
 
-Run `loaf run offline` using the updated launcher and the loaded Open Terminal
-image. Loaf mounts the file read-only at
-`/etc/apt/sources.list.d/loaf-terminal.sources` in the provisioner and its
-chat containers. A `.list` file gets the corresponding `.list` destination.
-The file is visible to terminal users. Keep it free of mirror credentials.
-In chat containers, the file replaces the image's own APT sources, as it
-does in a build, so `apt-get update` reads only the configured source. To
-keep Debian's mirrors next to a local repository with `network = connected`,
-list both in the file.
+Run `loaf restart` after changing `apt_source_file`, `apt_repository_dir` or
+the source file's contents. New chat containers use the current settings
+with the loaded Open Terminal image. Run `loaf run offline` or `loaf run online`
+if the deployment is stopped. [Restart options](cli-help.md#restart)
 
-Edit the source on the host. In-place writes are visible through the mount.
-Run `loaf run offline` again after saving through an editor that replaces the
-file. On that run, Loaf recreates the terminal server if the source changed,
-and each chat container binds the new file on its next start. A chat keeps
-its container, `/home/chat` folder and installed packages.
+Loaf mounts the configured file read-only at
+`/etc/apt/sources.list.d/apt_source_file.sources` or
+`/etc/apt/sources.list.d/apt_source_file.list`. Keep mirror credentials out
+of this file because terminal users can read it. The file replaces the
+image's APT sources, and Loaf adds the local repository's generated source
+in `apt_repository_dir.list` when configured.
 
-Chat containers also run the launcher's runner script. `loaf run offline` and
-`loaf run online` copy it to `.loaf-terminal-runtime/` in the project, a path that
-stays the same across loaf releases, so a new release changes the script that
-chat containers run without replacing them.
+An existing chat keeps its container, `/home/chat` folder and installed
+packages when only the source file's contents change. The container binds
+the updated file the next time it starts. [Mount path and format changes](#install-packages-in-a-chat)
 
 [Docker bind mounts](https://docs.docker.com/engine/storage/bind-mounts/)
 

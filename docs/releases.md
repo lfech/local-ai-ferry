@@ -57,29 +57,36 @@ the first push.
 
 The executable holds a compressed runtime: CPython, pip, the setuptools
 wheel, the launcher and its deployment data. The build leaves out what loaf
-never runs, which shrinks it from about 40 MB to about 22.5 MB:
+never runs or can create itself, which shrinks it from about 40 MB to about
+17.7 MB:
 
 | Left out | Uncompressed | Why loaf does not need it |
 | --- | --- | --- |
 | `lib/libpython3.13.so` | 31 MB | `bin/python3.13` links libpython statically. |
 | Tcl/Tk, `tkinter`, IDLE, turtle | 10 MB | They need a desktop session. |
 | `share/terminfo`, manual pages, `include/`, `python3-config` | 10 MB | They serve interactive terminals and C extension builds. |
+| Python bytecode | 9 MB | The unpacked runtime writes the bytecode of the modules it imports into its cache on first use, so later starts take as long as with bytecode in the payload. |
+| The symbol table of `bin/python3.13` | 2.7 MB | Only debuggers read it; extension modules and `ctypes` use the dynamic symbols, which stay. The build strips it when binutils' `strip` is available. |
 | `ensurepip` | 2 MB | The runtime creates no virtualenvs with pip. |
 
 The build checks that the launcher, `unittest`, `sqlite3`, `ssl`, `venv`,
-`urllib` and pip still import, and runs its usual setup, guide and dry-run
-checks with the result. The payload uses gzip at level 9.
+`urllib`, `dbm.ndbm`, `ctypes` and pip still import, and runs its usual setup,
+guide and dry-run checks with the result. The payload uses gzip at level 9.
+The first start after unpacking takes about half a second longer while
+Python writes the bytecode.
 
-These steps would shrink it further but break something, so the build does
-not take them:
+These steps would shrink it further but break something or burden every
+build, so the build does not take them:
 
-| Step | Size | What it breaks |
+| Step | Size | What it costs |
 | --- | --- | --- |
-| xz instead of gzip | about 15.5 MB | The launcher unpacks with `tar`, and minimal Debian systems such as the `debian:12-slim` and `debian:13-slim` images lack `xz`. |
-| Leave out pip and setuptools | about 18.2 MB | The executable builds the launcher wheel offline for `installers` in a source checkout whose `.venv` is missing. |
+| xz instead of gzip | about 12.4 MB | The launcher unpacks with `tar`, and minimal Debian systems such as the `debian:12-slim` and `debian:13-slim` images lack `xz`. Their `dpkg-deb` could unpack an xz payload, but other systems would need `xz`, and loaf recognizes its executables by their gzip payload. |
+| Zopfli, a gzip-compatible encoder | about 17.1 MB | Every build, also the one that a backup of a source checkout runs offline, would need Zopfli and about a minute more. |
+| Leave out pip and setuptools | about 15.2 MB | The executable builds the launcher wheel offline for `installers` in a source checkout whose `.venv` is missing. |
 | Leave out further standard library modules | below 1 MB each | pip, `loaf test` and the transfer code use most of them. |
+| UPX-packed interpreter | not measured | Malware scanners commonly flag packed executables, a poor fit for sensitive offline hosts. |
 
-The remaining bulk is `bin/python3.13` itself, about 12 MB compressed. A
+The remaining bulk is `bin/python3.13` itself, about 11.5 MB compressed. A
 smaller interpreter needs a custom CPython build instead of the pinned Python
 Build Standalone release.
 

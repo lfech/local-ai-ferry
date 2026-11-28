@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 # --- Distribution metadata and command registration ---
 [project]
 name = "local-ai-ferry"
-version = "0.5.0"
+version = "0.6.0"
 description = "Local AI Ferry prepares, transfers and runs offline Ollama and Open WebUI deployments"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -36,7 +36,9 @@ namespaces = false
 loaf = [
     "data/compose.yml",
     "data/compose.cpu.yml",
-    "data/compose.terminal-apt.yml",
+    "data/compose.terminal-runtime.yml",
+    "data/compose.terminal-apt-source.yml",
+    "data/compose.terminal-apt-repository.yml",
     "data/compose.terminal-webui.yml",
     "data/config/*.ini",
     "data/docker/*/Dockerfile",

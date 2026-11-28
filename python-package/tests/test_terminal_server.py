@@ -3,7 +3,9 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, closing, redirect_stderr, redirect_stdout
+from functools import partial
 import hashlib
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import io
 import json
@@ -24,7 +26,7 @@ from uuid import uuid4
 
 from loaf import cli, config, transfer
 from tests import DATA
-from tests.docker_support import command, compose_command
+from tests.docker_support import command, compose_command, poll_fixture_health
 
 try:
     from aiohttp import ClientSession, WSMsgType, web
@@ -189,6 +191,62 @@ class TerminalServerSettingsTests(unittest.TestCase):
             self.assertIn("APT source file is missing", errors.getvalue())
             execute.assert_not_called()
 
+    def test_with_apt_repos_builds_the_terminal_image_with_the_apt_settings(self):
+        with TemporaryDirectory() as folder:
+            project = Path(folder)
+            (project / "config").mkdir()
+            settings = project / "config/config.ini"
+
+            def invoke(*arguments):
+                with redirect_stdout(io.StringIO()) as output, redirect_stderr(io.StringIO()) as errors:
+                    try:
+                        status = cli.main(["--project-dir", folder, *arguments])
+                    except SystemExit as exit:
+                        status = exit.code
+                return status, output.getvalue(), errors.getvalue()
+
+            for content, arguments, message in (
+                ("", ("run", "offline", "--with-apt-repos"), "only supported by build and upgrade"),
+                ("", ("build", "--with-apt-repos"), "builds only with [terminal_server] enabled = true"),
+                ("[terminal_server]\nenabled = true\n", ("upgrade", "--with-apt-repos"),
+                 "needs [terminal_server] apt_source_file or apt_repository_dir"),
+            ):
+                settings.write_text(content)
+                with self.subTest(arguments=arguments):
+                    status, _, errors = invoke(*arguments, "--dry-run")
+                    self.assertEqual(status, 2)
+                    self.assertIn(message, errors)
+            settings.write_text("[terminal_server]\nenabled = true\napt_source_file = config/mirror.list\n")
+            # A dry run refuses a missing source like a real build.
+            status, _, errors = invoke("build", "--with-apt-repos", "--dry-run")
+            self.assertEqual(status, 1)
+            self.assertIn("APT source file is missing", errors)
+            (project / "config/mirror.list").write_text("deb http://mirror.invalid/debian trixie main\n")
+            status, output, _ = invoke("build", "--with-apt-repos", "--dry-run", "-v")
+            self.assertEqual(status, 0)
+            self.assertIn("LOAF_TERMINAL_BUILD_APT_SOURCE_FORMAT=list", output)
+            self.assertNotIn("base image's APT sources", output)
+            # Without the option, the build keeps the base image's sources and says how to use the configured one.
+            status, output, _ = invoke("build", "--dry-run", "-v")
+            self.assertEqual(status, 0)
+            self.assertNotIn("LOAF_TERMINAL_BUILD_APT", output)
+            self.assertIn("Add --with-apt-repos to build it with the [terminal_server] APT settings.", output)
+            # A repository serves a build on its own, with the source that the launcher writes for it.
+            (project / "mirror").mkdir()
+            (project / "mirror/Packages").write_text("")
+            settings.write_text("[terminal_server]\nenabled = true\napt_repository_dir = mirror\n")
+            status, output, _ = invoke("build", "--with-apt-repos", "--dry-run", "-v")
+            self.assertEqual(status, 0)
+            self.assertIn(f"LOAF_TERMINAL_BUILD_APT_REPOSITORY_DIR={project / 'mirror'}", output)
+            self.assertNotIn("LOAF_TERMINAL_BUILD_APT_SOURCE_FORMAT", output)
+            # Serving applies the repository with its own source file, also without apt_source_file.
+            (project / config.TERMINAL_SECRET).write_text("k" * 32)
+            status, output, _ = invoke("run", "offline", "--dry-run", "-v")
+            self.assertEqual(status, 0)
+            self.assertIn(f"LOAF_TERMINAL_APT_REPOSITORY_DIR={project / 'mirror'}", output)
+            self.assertIn("compose.terminal-apt-repository.yml", output)
+            self.assertNotIn("compose.terminal-apt-source.yml", output)
+
     def test_runtime_scripts_stay_at_one_project_path_across_releases(self):
         with TemporaryDirectory() as folder:
             project = Path(folder)
@@ -199,7 +257,9 @@ class TerminalServerSettingsTests(unittest.TestCase):
             step = cli.Step(("terminal",), ("up", "-d", "terminal-server"))
             runtime = project / cli.TERMINAL_RUNTIME_DIR
             self.assertEqual(compose.variables(step)["LOAF_TERMINAL_RUNTIME_DIR"], str(runtime))
+            digest = compose.variables(step)["LOAF_TERMINAL_PROVISIONER_HASH"]
             compose.stage_terminal_runtime()
+            self.assertEqual(digest, hashlib.sha256((runtime / "provisioner.py").read_bytes()).hexdigest())
             for name in cli.TERMINAL_RUNTIME_FILES:
                 self.assertEqual((runtime / name).read_bytes(), (DATA / "docker/terminal-server" / name).read_bytes())
             # Another release replaces changed files at the same path, so chat containers keep their mounts.
@@ -209,6 +269,24 @@ class TerminalServerSettingsTests(unittest.TestCase):
             self.assertEqual((runtime / "runner.py").read_bytes(), (DATA / "docker/terminal-server/runner.py").read_bytes())
             self.assertEqual((runtime / "provisioner.py").stat().st_ino, inode)
             self.assertEqual(sorted(path.name for path in runtime.iterdir()), sorted(cli.TERMINAL_RUNTIME_FILES))
+
+    def test_verbose_apt_build_keeps_source_text_out_of_preview_and_execution(self):
+        with TemporaryDirectory() as folder:
+            project = Path(folder)
+            source = project / "mirror.list"
+            secret = "audit-private-mirror-marker"
+            source.write_text(f"deb https://user:{secret}@mirror.invalid/debian trixie main\n")
+            settings = config.Settings(terminal_server_enabled=True, terminal_server_apt_source_file=source)
+            compose = cli.Compose(project, settings=settings, build_apt_sources=True, verbose=True)
+            step = cli.Step(("terminal",), ("build", "terminal-server"))
+            variables = compose.variables(step)
+            with patch.object(compose, "variables", return_value=variables), patch("loaf.cli.subprocess.run") as run, \
+                    redirect_stdout(io.StringIO()) as stdout:
+                compose.preview(step)
+                compose.execute(step)
+            self.assertNotIn(secret, stdout.getvalue())
+            self.assertIn(str(source), stdout.getvalue())
+            self.assertEqual(run.call_args.kwargs["env"]["LOAF_TERMINAL_BUILD_APT_SOURCE"], source.read_text())
 
     def test_terminal_key_format_preserves_the_file_bytes(self):
         with TemporaryDirectory() as folder:
@@ -292,10 +370,13 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
             wait = {"name": "wait", "in": "query", "description": "Null returns at once.",
                     "schema": {"description": "Null returns at once."}}
             metadata = {"config": {"features": {"terminal": True, "system": False}}, "schema": {"paths": {
-                "/execute": {"post": {"operationId": "run_command", "description": "Execute in the background.",
+                "/execute": {"get": {"operationId": "list_processes"},
+                             "post": {"operationId": "run_command", "description": "Execute in the background.",
                                       "parameters": [dict(wait, schema=dict(wait["schema"]))]}}, "/agents": {},
                 "/execute/{process_id}/status": {"get": {"operationId": "get_process_status", "parameters": [wait]}},
-                "/api/terminals/user/output": {}, "/api/v1/terminals/templates": {},
+                "/files/list": {"get": {"operationId": "list_files"}},
+                "/api/terminals/user/output": {"get": {"operationId": "read_user_terminal"}},
+                "/api/v1/terminals/templates": {},
             }}}
             headers = {"Authorization": "Bearer " + self.secret}
             identity = {"X-User-Id": "account-a", "X-Session-Id": "chat-a"}
@@ -308,6 +389,7 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
                     paths = (await result.json())["paths"]
                 # Model tools keep Open Terminal's own paths; the chat's single container serves them.
                 self.assertEqual(set(paths), {"/execute", "/execute/{process_id}/status", "/api/terminals/user/output"})
+                self.assertEqual(set(paths["/execute"]), {"post"})
                 description = paths["/execute"]["post"]["description"]
                 self.assertEqual(description, module.command_description(30))
                 for operation in (paths["/execute"]["post"], paths["/execute/{process_id}/status"]["get"]):
@@ -431,7 +513,7 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
 
     def test_container_runs_as_root_with_only_the_account_folder(self):
         module = self.module
-        policy = module.Policy("test-project", 2, 512, 2, 5, 1, "local", {})
+        policy = module.Policy("test-project", 2, 512, 2, 5, 1, "local", {}, "isolated")
         manager = module.Workspaces(policy, None, None, "provisioner", "pinned-image-id", None)
         owner_key = module.account_key("account")
         key = module.workspace_key(owner_key, "chat-1")
@@ -452,13 +534,15 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("PortBindings", host)
 
         # Outbound access uses Docker's resolver; a local repository is mounted read-only.
-        connected_policy = module.Policy("test-project", 2, 512, 2, 5, 1, "local", {}, "connected")
-        connected = module.Workspaces(connected_policy, None, None, "provisioner", "image", None, repository="/srv/repo")
-        mounts = connected.container_spec("network", labels, "key", owner_key, "chat-1")["HostConfig"]
-        self.assertNotIn("Dns", mounts)
-        self.assertEqual(mounts["Mounts"][-1], {"Type": "bind", "Source": "/srv/repo",
-                                                "Target": "/run/loaf-apt/repository", "ReadOnly": True})
-        self.assertNotEqual(connected.revision, manager.revision)
+        for mode in ("local", "internet"):
+            outbound = module.Policy("test-project", 2, 512, 2, 5, 1, "local", {}, mode)
+            workspaces = module.Workspaces(outbound, None, None, "provisioner", "image", None, repository="/srv/repo")
+            host = workspaces.container_spec("network", labels, "key", owner_key, "chat-1")["HostConfig"]
+            self.assertNotIn("Dns", host)
+            self.assertEqual(host["Mounts"][-1], {"Type": "bind", "Source": "/srv/repo",
+                                                  "Target": "/run/loaf-apt/repository", "ReadOnly": True})
+            self.assertEqual(workspaces.expected_networks("network"), {"network", outbound.access_network})
+            self.assertNotEqual(workspaces.revision, manager.revision)
 
         # Ownership needs the deployment, the container name and a matching chat key.
         names = ["/" + policy.asset_name(key)]
@@ -471,17 +555,24 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
 
     def test_model_guidance_names_the_tool_and_whether_apt_can_reach_a_source(self):
         module = self.module
-        for network, repository, package_source in (("isolated", None, False), ("isolated", "/srv/repo", True),
-                                                    ("connected", None, True)):
-            with self.subTest(network=network, repository=repository):
+        # The launcher writes a source for the repository, so a repository is a package source on its own.
+        for network, repository, custom_source, package_source in (
+            ("isolated", None, True, False), ("isolated", "/srv/repo", False, True),
+            ("host", None, False, False), ("host", None, True, True),
+            ("local", None, False, False), ("local", None, True, True), ("local", "/srv/repo", False, True),
+            ("internet", None, False, True),
+        ):
+            with self.subTest(network=network, repository=repository, custom_source=custom_source):
                 policy = module.Policy("p", 1, 256, 2, 5, 1, "local", {}, network)
-                manager = module.Workspaces(policy, None, None, "provisioner", "image", None, repository=repository)
+                manager = module.Workspaces(policy, None, None, "provisioner", "image", None, repository=repository,
+                                            configured_apt_source=custom_source)
                 self.assertEqual(manager.package_source, package_source)
         available, unavailable = module.system_prompt(True), module.system_prompt(False)
         for prompt in (available, unavailable):
             self.assertIn("do it yourself with the terminal tools instead of describing it", prompt)
             self.assertIn("run_command runs shell commands", prompt)
             self.assertIn("/home/chat is deleted with the chat; keep lasting files in /home/user.", prompt)
+            self.assertIn("Answer general questions directly.", prompt)
             self.assertLess(len(prompt), 700)
         self.assertIn("apt update, then apt install PACKAGE", available)
         self.assertIn("No package source is reachable; use the installed programs.", unavailable)
@@ -506,11 +597,12 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
         env = {"LOAF_TERMINAL_CPUS": "1", "LOAF_TERMINAL_MEMORY_MIB": "256", "LOAF_TERMINAL_MAX_WORKSPACES": "2",
                "LOAF_TERMINAL_IDLE_SECONDS": "5", "LOAF_TERMINAL_COMMAND_SECONDS": "1",
                "LOAF_TERMINAL_VOLUME_DRIVER": "local"}
-        self.assertEqual(module.Policy.load("p", env, bridge_options={}).network, "isolated")
-        self.assertEqual(module.Policy.load("p", {**env, "LOAF_TERMINAL_NETWORK": "connected"},
-                                            bridge_options={}).network, "connected")
-        with self.assertRaisesRegex(ValueError, "isolated or connected"):
-            module.Policy.load("p", {**env, "LOAF_TERMINAL_NETWORK": "open"}, bridge_options={})
+        self.assertEqual(module.Policy.load("p", env, bridge_options={}).network, "internet")
+        for mode in ("isolated", "host", "local", "internet"):
+            policy = module.Policy.load("p", {**env, "LOAF_TERMINAL_NETWORK": mode}, bridge_options={})
+            self.assertEqual(policy.network, mode)
+        with self.assertRaisesRegex(ValueError, "isolated, host, local or internet"):
+            module.Policy.load("p", {**env, "LOAF_TERMINAL_NETWORK": "connected"}, bridge_options={})
         self.assertEqual(module.Policy.load("p", env, bridge_options={}).command_wait, 0)
         self.assertEqual(module.Policy.load("p", {**env, "LOAF_TERMINAL_COMMAND_WAIT_SECONDS": "240"},
                                             bridge_options={}).command_wait, 240)
@@ -522,33 +614,56 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
             etc = Path(folder)
             (etc / "sources.list.d").mkdir()
             for name in ("sources.list", "sources.list.d/debian.sources", "sources.list.d/loaf-terminal.list",
-                         "sources.list.d/loaf-terminal.sources", "sources.list.d/notes.txt"):
+                         "sources.list.d/apt_source_file.sources", "sources.list.d/apt_repository_dir.list",
+                         "sources.list.d/notes.txt"):
                 (etc / name).write_text("")
-            runtime = str(etc / "sources.list.d/loaf-terminal.sources")
-            # A build-time source in the other format is inherited as well.
-            self.assertEqual(self.module.inherited_apt_sources(runtime, etc), [
+            # The files of the settings stay; a source that an earlier release's build baked in is inherited.
+            self.assertEqual(self.module.inherited_apt_sources(etc), [
                 str(etc / "sources.list"), str(etc / "sources.list.d/loaf-terminal.list"),
                 str(etc / "sources.list.d/debian.sources"),
             ])
 
     def test_runtime_revision_follows_the_mounts_and_not_the_file_contents(self):
-        def control(directory):
-            targets = {"/etc/apt/sources.list.d/loaf-terminal.list": "mirror.list",
-                       self.module.RUNTIME_RUNNER: "runner.py", self.module.NO_APT_SOURCE: "no-apt-source.list"}
+        module = self.module
+        source = "/etc/apt/sources.list.d/apt_source_file.list"
+
+        def control(directory, *, source_file=True, repository=False):
+            targets = {module.RUNTIME_RUNNER: "runner.py", module.NO_APT_SOURCE: "no-apt-source.list"}
+            if source_file:
+                targets[source] = "mirror.list"
+            if repository:
+                targets[module.REPOSITORY_SOURCE] = "apt_repository_dir.list"
             return {"Mounts": [{"Destination": target, "Source": f"{directory}/{name}", "Type": "bind", "RW": False}
                                for target, name in targets.items()]}
 
         # The files are not read: a new loaf release changes them at the same stable paths.
-        mounts, revision = self.module.workspace_runtime_mounts(control("/project/.loaf-terminal-runtime"), "list")
-        self.assertEqual(self.module.workspace_runtime_mounts(control("/project/.loaf-terminal-runtime"), "list"),
-                         (mounts, revision))
-        self.assertNotEqual(self.module.workspace_runtime_mounts(control("/elsewhere"), "list")[1], revision)
-        self.assertEqual(mounts[1], {"Type": "bind", "Source": "/project/.loaf-terminal-runtime/runner.py",
-                                     "Target": self.module.RUNTIME_RUNNER, "ReadOnly": True})
+        runtime = "/project/.loaf-terminal-runtime"
+        mounts, revision = module.workspace_runtime_mounts(control(runtime), "list")
+        self.assertEqual(module.workspace_runtime_mounts(control(runtime), "list"), (mounts, revision))
+        self.assertNotEqual(module.workspace_runtime_mounts(control("/elsewhere"), "list")[1], revision)
+        self.assertEqual([mount["Target"] for mount in mounts[:2]], [source, module.RUNTIME_RUNNER])
+        self.assertEqual(mounts[1], {"Type": "bind", "Source": f"{runtime}/runner.py",
+                                     "Target": module.RUNTIME_RUNNER, "ReadOnly": True})
+        # Each setting brings its own file, named after it; a repository alone leaves the image's sources visible.
+        both, both_revision = module.workspace_runtime_mounts(control(runtime, repository=True), "list")
+        self.assertEqual([mount["Target"] for mount in both[:3]], [source, module.REPOSITORY_SOURCE, module.RUNTIME_RUNNER])
+        self.assertNotEqual(both_revision, revision)
+        alone, _ = module.workspace_runtime_mounts(control(runtime, source_file=False, repository=True), None)
+        self.assertEqual([mount["Target"] for mount in alone], [module.REPOSITORY_SOURCE, module.RUNTIME_RUNNER])
+        inherited = "/etc/apt/sources.list.d/debian.sources"
+        with patch.object(module, "inherited_apt_sources", return_value=[inherited]):
+            bare = control(runtime, source_file=False)
+            self.assertEqual(module.workspace_runtime_mounts(bare, None), ((), None))
+            local, local_revision = module.workspace_runtime_mounts(bare, None, hide_inherited=True)
+            self.assertIsNotNone(local_revision)
+            self.assertEqual(local[-1], {"Type": "bind", "Source": f"{runtime}/no-apt-source.list",
+                                         "Target": inherited, "ReadOnly": True})
+        with self.assertRaisesRegex(ValueError, "read-only runtime bind mount at " + source):
+            module.workspace_runtime_mounts(control(runtime, source_file=False), "list")
 
     async def test_open_resumes_a_stopped_container_or_recreates_it_after_a_change(self):
         module = self.module
-        policy = module.Policy("test-project", 1, 256, 2, 5, 1, "local", {})
+        policy = module.Policy("test-project", 1, 256, 2, 5, 1, "local", {}, "isolated")
         owner_key = module.account_key("account")
         key = module.workspace_key(owner_key, "chat-1")
         name = policy.asset_name(key)
@@ -594,7 +709,7 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_initialize_recovers_running_stops_saved_and_removes_temporary_containers(self):
         module = self.module
-        policy = module.Policy("test-project", 1, 256, 1, 5, 1, "local", {})
+        policy = module.Policy("test-project", 1, 256, 1, 5, 1, "local", {}, "isolated")
         manager = module.Workspaces(policy, FakeDocker(), None, "provisioner", "image", None)
         owner_key = module.account_key("account")
         containers = {}
@@ -667,20 +782,30 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
         manager.remove.assert_awaited_once_with("b", "temporary")
         self.assertEqual(manager.temporary, {})
 
-    async def test_connected_network_disables_traffic_between_chat_containers(self):
+    async def test_shared_networks_disable_traffic_between_chat_containers(self):
         module = self.module
-        policy = module.Policy("test-project", 1, 256, 4, 5, 1, "local", {}, "connected")
-        docker = FakeDocker()
-        docker.responses = {("GET", f"/networks/{policy.connected_network}"): None}
-        manager = module.Workspaces(policy, docker, None, "provisioner", "image", None)
-        await manager.ensure_connected_network()
-        _, _, body = docker.calls[-1]
-        self.assertEqual((body["Internal"], body["Options"], body["Labels"]),
-                         (False, {module.INTER_CONTAINER: "false"}, policy.connected_labels))
-        docker.responses[("GET", f"/networks/{policy.connected_network}")] = {
-            "Labels": policy.connected_labels, "Driver": "bridge", "Internal": False, "Options": {}}
-        with self.assertRaisesRegex(RuntimeError, "isolation mismatch"):
-            await manager.ensure_connected_network()
+        for mode in ("local", "host"):
+            with self.subTest(mode=mode):
+                policy = module.Policy("test-project", 1, 256, 4, 5, 1, "local", {}, mode)
+                docker = FakeDocker()
+                internal = mode == "host"
+                options = {module.INTER_CONTAINER: "false"}
+                network = {"Labels": policy.access_labels, "Driver": "bridge", "Internal": internal,
+                           "EnableIPv6": False, "Options": options, "IPAM": {"Config": [{"Gateway": "10.9.0.1"}]}}
+                query = ("GET", f"/networks/{policy.access_network}")
+                docker.responses = {query: [None, network]}
+                manager = module.Workspaces(policy, docker, None, "provisioner", "image", None)
+                await manager.ensure_access_network()
+                _, _, body = docker.calls[1]
+                self.assertEqual((body["Internal"], body["Options"], body["Labels"]),
+                                 (internal, options, policy.access_labels))
+                if internal:
+                    spec = manager.container_spec("workspace", {}, "key", "owner", "chat")
+                    self.assertEqual(spec["HostConfig"]["ExtraHosts"], ["host.docker.internal:10.9.0.1"])
+                    self.assertEqual(spec["HostConfig"]["Dns"], ["127.0.0.1"])
+                docker.responses[query] = {**network, "Options": {}}
+                with self.assertRaisesRegex(RuntimeError, "isolation mismatch"):
+                    await manager.ensure_access_network()
 
     async def test_workspace_bridge_requires_the_selected_isolation(self):
         module = self.module
@@ -857,10 +982,187 @@ run('printf temporary > /home/chat/note.txt', chat='temporary:first')
                          f"SHA256: {hashlib.sha256(payload).hexdigest()}\n\n")
         (repository / "Packages.xz").write_bytes(lzma.compress("".join(index).encode()))
 
+    @staticmethod
+    def open_workspace(project, image, key, session=""):
+        command([
+            "docker", "run", "--rm", "--pull", "never", "--network", f"{project}_terminal-control", "-i",
+            "--mount", f"type=bind,source={key},target=/test.key,readonly",
+            "--entrypoint", "/usr/bin/python3", image, "-", session,
+        ], input="""\
+from pathlib import Path
+import sys
+from urllib.request import Request, urlopen
+
+key = Path("/test.key").read_text()
+request = Request("http://terminal-server:8000/files/cwd", headers={
+    "Authorization": "Bearer " + key, "X-User-Id": "runtime-mirror-test", "X-Session-Id": sys.argv[1],
+})
+with urlopen(request, timeout=45) as response:
+    assert response.status == 200
+""")
+        runner, = command(["docker", "ps", "-q", "--filter",
+                           f"label={transfer.WORKSPACE_PROJECT_LABEL}={project}"]).split()
+        return runner
+
+    def test_local_and_internet_share_outbound_access_with_different_default_apt_sources(self):
+        self.bridge_options()
+        namespace = f"loaf-test-network-{uuid4().hex}"
+        image = transfer.image_names(namespace, include_terminal=True)[-1]
+        command(["docker", "image", "tag", self.image, image])
+        self.addCleanup(command, ["docker", "image", "rm", image])
+        self.addCleanup(self.remove_terminal_assets, namespace)
+        with TemporaryDirectory() as folder:
+            project = Path(folder)
+            key = project / "terminal-server.key"
+            key.write_text(secrets.token_urlsafe(32))
+            key.chmod(0o600)
+            compose = cli.Compose(project, namespace=namespace)
+            bridge = f"{namespace}-terminal-connected"
+            start = cli.Step(("terminal",), ("up", "-d", "--no-build", "--pull", "never", "--wait",
+                                             "--wait-timeout", "60", "terminal-server"))
+            try:
+                for network in ("internet", "local"):
+                    with self.subTest(network=network):
+                        settings = config.Settings(terminal_server_enabled=True, terminal_server_secret_file=key,
+                                                   terminal_server_network=network)
+                        compose_command(cli.Compose(project, namespace=namespace, settings=settings), start)
+                        runner = self.open_workspace(namespace, image, key, f"temporary:{network}")
+                        details, = json.loads(command(["docker", "inspect", runner]))
+                        networks = details["NetworkSettings"]["Networks"]
+                        self.assertIn(bridge, networks)
+                        self.assertEqual(len(networks), 2)
+                        self.assertTrue(networks[bridge]["Gateway"])
+                        targets = command(["docker", "exec", runner, "apt-get", "--print-uris", "update"])
+                        self.assertEqual(bool(targets.strip()), network == "internet", targets)
+            finally:
+                compose_command(compose, cli.Step(("terminal",), ("down", "--volumes", "--timeout", "45")))
+
+    def test_host_network_reaches_an_apt_mirror_on_the_docker_host_without_a_default_route(self):
+        self.bridge_options()
+        if not shutil.which("dpkg-deb"):
+            self.skipTest("dpkg-deb is required to create the local APT fixture.")
+        namespace = f"loaf-test-host-{uuid4().hex}"
+        image = transfer.image_names(namespace, include_terminal=True)[-1]
+        command(["docker", "image", "tag", self.image, image])
+        self.addCleanup(command, ["docker", "image", "rm", image])
+        self.addCleanup(self.remove_terminal_assets, namespace)
+        with TemporaryDirectory() as folder:
+            project = Path(folder)
+            key = project / "terminal-server.key"
+            key.write_text(secrets.token_urlsafe(32))
+            key.chmod(0o600)
+            repository = project / "mirror"
+            repository.mkdir()
+            self.create_apt_repository(project, repository)
+            settings = {"terminal_server_enabled": True, "terminal_server_secret_file": key,
+                        "terminal_server_network": "host"}
+            bridge = f"{namespace}-terminal-host"
+            compose = cli.Compose(project, namespace=namespace, settings=config.Settings(**settings))
+            start = cli.Step(("terminal",), ("up", "-d", "--no-build", "--pull", "never", "--wait",
+                                             "--wait-timeout", "60", "terminal-server"))
+            try:
+                compose_command(compose, start)
+                details, = json.loads(command(["docker", "network", "inspect", bridge]))
+                self.assertTrue(details["Internal"])
+                [address] = details["IPAM"]["Config"]
+                handler = partial(SimpleHTTPRequestHandler, directory=repository)
+                with ThreadingHTTPServer((address["Gateway"], 0), handler) as mirror, ThreadPoolExecutor(1) as executor:
+                    executor.submit(mirror.serve_forever)
+                    try:
+                        source = project / "host.list"
+                        source.write_text(f"deb [trusted=yes] http://host.docker.internal:{mirror.server_port} ./\n")
+                        configured = config.Settings(**settings, terminal_server_apt_source_file=source)
+                        compose_command(cli.Compose(project, namespace=namespace, settings=configured), start)
+                        runner = self.open_workspace(namespace, image, key, "temporary:host")
+                        compose_info, = json.loads(command(["docker", "inspect", runner]))
+                        networks = compose_info["NetworkSettings"]["Networks"]
+                        self.assertIn(bridge, networks)
+                        self.assertEqual(len(networks), 2)
+                        routes = command(["docker", "exec", runner, "cat", "/proc/net/route"])
+                        self.assertNotIn("00000000", [line.split()[1] for line in routes.splitlines()[1:]])
+                        update = command(["docker", "exec", runner, "apt-get", "-o", "APT::Update::Error-Mode=any", "update"])
+                        self.assertIn("host.docker.internal", update)
+                        command(["docker", "exec", runner, "apt-get", "-y", "install", "loaf-chat-demo"])
+                        self.assertEqual(command(["docker", "exec", runner, "loaf-chat-demo"]).strip(), "configured")
+                    finally:
+                        mirror.shutdown()
+            finally:
+                compose_command(compose, cli.Step(("terminal",), ("down", "--volumes", "--timeout", "45")))
+
+    def test_restart_applies_both_apt_settings_to_new_chat_containers(self):
+        self.bridge_options()
+        name = f"test-apt-restart-{uuid4().hex}"
+        namespace = config.namespace(name)
+        _, ollama, webui, image = transfer.image_names(namespace, include_terminal=True)
+        for original, tag in (("loaf/ollama-offline:latest", ollama), ("loaf/open-webui:latest", webui),
+                              (self.image, image)):
+            command(["docker", "image", "tag", original, tag])
+            self.addCleanup(command, ["docker", "image", "rm", tag])
+        self.addCleanup(self.remove_terminal_assets, namespace)
+        with TemporaryDirectory() as folder:
+            project = Path(folder)
+            settings_dir = project / "config"
+            settings_dir.mkdir()
+            key = settings_dir / "terminal-server.key"
+            key.write_text(secrets.token_urlsafe(32))
+            key.chmod(0o600)
+            with closing(sockets.socket()) as listener:
+                listener.bind(("127.0.0.1", 0))
+                port = listener.getsockname()[1]
+            uri = "file:/run/loaf-apt/repository"
+            (project / "first.list").write_text(f"deb [trusted=yes] {uri} ./\n")
+            (project / "second.sources").write_text(f"Types: deb\nURIs: {uri}\nSuites: ./\nEnabled: no\n")
+            for name in ("first", "second"):
+                repository = project / name
+                repository.mkdir()
+                (repository / "Packages").write_text("")
+                (repository / "marker").write_text(name)
+
+            def configure(source, repository, network):
+                (settings_dir / "config.ini").write_text(
+                    f"[webui]\nport = {port}\n[terminal_server]\nenabled = true\nnetwork = {network}\n"
+                    f"apt_source_file = {source}\napt_repository_dir = {repository}\n"
+                )
+
+            def check_chat(session, source, repository):
+                runner = self.open_workspace(namespace, image, key, f"temporary:{session}")
+                details, = json.loads(command(["docker", "inspect", runner]))
+                mounts = {mount["Destination"]: mount for mount in details["Mounts"]}
+                apt_sources = "/etc/apt/sources.list.d"
+                suffix = Path(source).suffix
+                target = f"{apt_sources}/apt_source_file{suffix}"
+                self.assertEqual(mounts[target]["Source"], str(project / source))
+                self.assertFalse(mounts[target]["RW"])
+                self.assertEqual(command(["docker", "exec", runner, "cat", target]), (project / source).read_text())
+                other = ".sources" if suffix == ".list" else ".list"
+                self.assertNotIn(f"{apt_sources}/apt_source_file{other}", mounts)
+                repo_mount = mounts["/run/loaf-apt/repository"]
+                self.assertEqual(repo_mount["Source"], str(project / repository))
+                self.assertFalse(repo_mount["RW"])
+                self.assertEqual(command(["docker", "exec", runner, "cat", "/run/loaf-apt/repository/marker"]),
+                                 repository)
+                generated = command(["docker", "exec", runner, "cat", f"{apt_sources}/apt_repository_dir.list"])
+                self.assertEqual(generated, "# apt_source_file names this repository.\n" if session == "first"
+                                 else f"deb [trusted=yes] {uri} ./\n")
+                update = command(["docker", "exec", runner, "apt-get", "-o", "APT::Update::Error-Mode=any", "update"])
+                self.assertIn(uri, update)
+                return runner
+
+            loaf = [sys.executable, "-m", "loaf", "--project-dir", folder, "--namespace", config.namespace_name(namespace)]
+            compose = cli.Compose(project, namespace=namespace)
+            try:
+                configure("first.list", "first", "isolated")
+                command([*loaf, "run", "offline", "--cpu", "--wait-timeout", "60"])
+                first = check_chat("first", "first.list", "first")
+                configure("second.sources", "second", "local")
+                command([*loaf, "restart", "--wait-timeout", "60"])
+                self.assertNotEqual(check_chat("second", "second.sources", "second"), first)
+            finally:
+                compose_command(compose, cli.Step((*cli.PROFILES, "terminal"), ("down", "--volumes", "--timeout", "45")))
+
     def test_runtime_apt_source_is_read_only_and_updates_without_replacing_the_container(self):
         self.bridge_options()
         project_name = f"loaf-test-runtime-{uuid4().hex}"
-        control = f"{project_name}_terminal-control"
         image = transfer.image_names(project_name, include_terminal=True)[-1]
         command(["docker", "image", "tag", self.image, image])
         self.addCleanup(command, ["docker", "image", "rm", image])
@@ -876,29 +1178,13 @@ run('printf temporary > /home/chat/note.txt', chat='temporary:first')
                                   settings=config.Settings(terminal_server_enabled=True,
                                                            terminal_server_secret_file=key,
                                                            terminal_server_apt_source_file=source))
-            apt_target = "/etc/apt/sources.list.d/loaf-terminal.sources"
+            apt_target = "/etc/apt/sources.list.d/apt_source_file.sources"
 
             def invoke(*arguments):
                 return compose_command(compose, cli.Step(("terminal",), arguments))
 
             def check_workspace():
-                command([
-                    "docker", "run", "--rm", "--pull", "never", "--network", control, "-i",
-                    "--mount", f"type=bind,source={key},target=/test.key,readonly",
-                    "--entrypoint", "/usr/bin/python3", image, "-",
-                ], input="""\
-from pathlib import Path
-from urllib.request import Request, urlopen
-
-key = Path("/test.key").read_text()
-request = Request("http://terminal-server:8000/files/cwd", headers={
-    "Authorization": "Bearer " + key, "X-User-Id": "runtime-mirror-test",
-})
-with urlopen(request, timeout=45) as response:
-    assert response.status == 200
-""")
-                runner, = command(["docker", "ps", "-q", "--filter",
-                                   f"label={transfer.WORKSPACE_PROJECT_LABEL}={project_name}"]).split()
+                runner = self.open_workspace(project_name, image, key)
                 details, = json.loads(command(["docker", "inspect", runner]))
                 mounts = {mount["Destination"]: mount for mount in details["Mounts"]}
                 self.assertEqual(mounts[apt_target]["Source"], str(source))
@@ -924,6 +1210,17 @@ with urlopen(request, timeout=45) as response:
                 replacement.replace(source)
                 # The chat keeps its container, files and packages; its next start binds the replaced file.
                 invoke(*start)
+                self.assertEqual(check_workspace(), first)
+                control = f"{project_name}-terminal-server-1"
+                later_assets = project / "updated-assets"
+                shutil.copytree(DATA, later_assets, ignore=shutil.ignore_patterns("__pycache__"))
+                script = later_assets / "docker/terminal-server/provisioner.py"
+                with patch.object(cli.assets, "DATA_DIR", later_assets):
+                    invoke(*start)
+                    before = command(["docker", "inspect", "--format", "{{.Id}}", control])
+                    script.write_bytes(script.read_bytes() + b"\n# Provisioner update fixture\n")
+                    invoke(*start)
+                self.assertNotEqual(command(["docker", "inspect", "--format", "{{.Id}}", control]), before)
                 self.assertEqual(check_workspace(), first)
             finally:
                 invoke("down", "--volumes", "--timeout", "45")
@@ -1029,7 +1326,8 @@ with urlopen(request, timeout=45) as response:
         key.chmod(0o600)
         packaged = cli.Compose(folder, project_name=project, files=[DATA / "compose.yml"])
         env = dict(os.environ, **packaged.variables())
-        env.update(LOAF_TERMINAL_SECRET_FILE=str(key), LOAF_TERMINAL_COMMAND_SECONDS="45")
+        env.update(LOAF_TERMINAL_SECRET_FILE=str(key), LOAF_TERMINAL_COMMAND_SECONDS="15",
+                   LOAF_TERMINAL_NETWORK="isolated")
         step = cli.Step(profiles, ("config", "--format", "json"))
         return key, json.loads(compose_command(packaged, step, env=env))
 
@@ -1047,6 +1345,7 @@ with urlopen(request, timeout=45) as response:
             # Use the packaged services with disposable data and a closed network.
             # This test exercises the WebUI connection without starting inference.
             services = {name: original["services"][name] for name in (webui, "terminal-server")}
+            poll_fixture_health(services)
             services["terminal-server"]["image"] = self.image
             if not bridge_options:
                 services["terminal-server"]["working_dir"] = "/opt/loaf-terminal"
@@ -1192,7 +1491,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             "OPEN_TERMINAL_ENABLE_NOTEBOOKS": "false",
         }):
             module = load_component("runner")
-            app = module.build_app(1)
+            app = module.build_app(0.25)
             async with app.router.lifespan_context(app), AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://runner",
             ) as client:

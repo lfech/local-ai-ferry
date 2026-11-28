@@ -131,7 +131,10 @@ def networks(namespace: str) -> list[Resource]:
         if not compose:
             if not name.startswith(prefix):
                 continue
-            purpose = "terminal connected" if TERMINAL_CONNECTED_LABEL in labels else "terminal workspace"
+            if TERMINAL_CONNECTED_LABEL in labels:
+                purpose = "terminal host" if record["Internal"] else "terminal connected"
+            else:
+                purpose = "terminal workspace"
         found.append((not compose, name, Resource(name, (purpose, "yes" if record["Internal"] else "no", name))))
     return [resource for *_, resource in sorted(found)]
 

@@ -12,12 +12,14 @@ from uuid import uuid4
 
 from loaf import cli, transfer
 from tests import ARTIFACTS
-from tests.docker_support import CPU_TESTS, DEFAULT_IMAGES, GPU_TESTS, command, compose_command, compose_config
+from tests.docker_support import (
+    CPU_TESTS, DEFAULT_IMAGES, GPU_TESTS, command, compose_command, compose_config, poll_fixture_health,
+)
 from tests.webui_chat import WebUIChat
 
 
-CACHED_MODEL = "hf.co/mistralai/Ministral-3-3B-Reasoning-2512-GGUF:Q4_K_M"
-DISPLAY_NAME = "Ministral-3B-Reasoning:latest"
+CACHED_MODEL = "hf.co/ibm-granite/granite-4.0-h-350m-GGUF:Q4_K_M"
+DISPLAY_NAME = "Granite-4.0-H-350M:latest"
 SELECTION = (cli.Model(CACHED_MODEL), cli.Model(CACHED_MODEL, DISPLAY_NAME))
 OLLAMA_REQUEST = dedent("""\
     import sys
@@ -38,6 +40,7 @@ class ModelWorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.template = compose_config(cpu=cls.cpu)
+        poll_fixture_health(cls.template["services"])
         for service in cls.template["services"].values():
             if "container_name" in service or any(
                 mount["type"] != "volume" or mount["source"] not in cls.template["volumes"]
@@ -66,7 +69,7 @@ class ModelWorkflowTests(unittest.TestCase):
         for kind in ("networks", "volumes"):
             for key, resource in config[kind].items():
                 resource["name"] = f"{project}-{key}"
-        # The model archive test stages the store and its archive, several GB: keep them on disk, not in a tmpfs.
+        # The transfer test stages another copy of the store beside the archive.
         ARTIFACTS.mkdir(exist_ok=True)
         folder = tempfile.TemporaryDirectory(prefix="loaf-model-", dir=ARTIFACTS)
         add_cleanup(folder.cleanup)
@@ -183,7 +186,7 @@ class ModelWorkflowTests(unittest.TestCase):
                 {"role": "user", "content": "hello :)"},
             ],
             "stream": False,
-            "options": {"temperature": 0.7, "num_predict": 128 if self.cpu else 2048},
+            "options": {"temperature": 0, "num_predict": 128 if self.cpu else 2048},
             "keep_alive": "1m",
         }
         response = self.webui_request(compose, "offline", "chat", payload)

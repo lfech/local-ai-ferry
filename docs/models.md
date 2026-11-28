@@ -33,12 +33,31 @@ Edit `config/models.ini` to change the default selection. Switching
 selection files changes future downloads. The models already in
 the shared Ollama volume remain available. Select the configured Ollama aliases
 in WebUI. The Coder entries use exact merged GGUF filename tags. In a check
-with the terminal server's tools, the 7B Coder wrote tool calls as JSON text,
-which Ollama does not run, so use the chat model with the terminal server.
+with the terminal server's tools, the 7B Coder wrote tool calls as JSON text.
+Use the Coder profiles for editor completion and select a model with native
+tool calling for Open Terminal.
 
 [Published GGUF](https://huggingface.co/ibm-granite/granite-4.0-h-350m-GGUF) ·
 [Qwen3 0.6B GGUF](https://huggingface.co/unsloth/Qwen3-0.6B-GGUF) ·
 [Selection syntax](launcher.md#select-models)
+
+## Opt-in terminal model
+
+Select the Ministral 3B Reasoning example explicitly to download it as
+`Ministral-3B-Terminal`.
+
+```bash
+loaf download --models-file config/model-examples/models.terminal.ini
+```
+
+To use it as the project's persistent model selection, set `[launcher]
+models_file = model-examples/models.terminal.ini` in `config/config.ini`.
+The list controls future downloads. Ollama makes the downloaded alias available
+alongside the models already installed. Select `Ministral-3B-Terminal` in
+Open WebUI. Use the context settings for the Ministral hardware profile.
+[Model selection](launcher.md#select-models) ·
+[Enable or disable a model's terminal access](terminal-server.md#use-the-terminal-from-a-model) ·
+[Ministral hardware profile](#6-gb-vram-hardware-profile)
 
 ## 16 GB VRAM hardware profile
 

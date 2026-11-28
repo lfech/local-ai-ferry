@@ -38,6 +38,7 @@ class ConfigTests(unittest.TestCase):
             (assets.DATA_DIR / "compose.yml", r"LOAF_INI_OLLAMA_IMAGE:-([^}]+)\}", defaults.ollama_image),
             (assets.DATA_DIR / "compose.yml", r"LOAF_INI_WEBUI_IMAGE:-([^}]+)\}", defaults.webui_image),
             (assets.DATA_DIR / "compose.yml", r"LOAF_TERMINAL_BASE_IMAGE:-([^}]+)\}", defaults.terminal_server_image),
+            (assets.DATA_DIR / "compose.yml", r"LOAF_TERMINAL_NETWORK:-([^}]+)\}", defaults.terminal_server_network),
             (assets.DATA_DIR / "compose.yml", r"LOAF_TERMINAL_COMMAND_WAIT_SECONDS:-([^}]+)\}",
              str(defaults.terminal_server_command_wait_seconds)),
             (docker / "ollama/Dockerfile", r"ARG OLLAMA_IMAGE=(\S+)", defaults.ollama_image),
@@ -100,44 +101,67 @@ class ConfigTests(unittest.TestCase):
                 self.path.write_text(source)
                 config.load(self.config_dir)
 
-    def test_terminal_apt_source_file_supplies_build_arguments(self):
+    def test_terminal_network_defaults_to_internet_and_rejects_the_old_name(self):
+        self.assertEqual(config.load(self.config_dir).terminal_server_network, "internet")
+        for value in ("isolated", "host", "local", "internet"):
+            with self.subTest(value=value):
+                self.path.write_text(f"[terminal_server]\nnetwork = {value}\n")
+                self.assertEqual(config.load(self.config_dir).compose_variables()["LOAF_TERMINAL_NETWORK"], value)
+        self.path.write_text("[terminal_server]\nnetwork = connected\n")
+        with self.assertRaisesRegex(config.ConfigError, "expected isolated, host, local or internet"):
+            config.load(self.config_dir)
+
+    def test_builds_use_the_apt_settings_only_with_apt_repos(self):
         step = cli.Step(("terminal",), ("build", "terminal-server"))
-        defaults = cli.Compose(self.project, settings=config.load(self.config_dir))
-        self.assertNotIn("LOAF_TERMINAL_APT_SOURCE_FILE", defaults.variables(step))
-        self.path.write_text("[terminal_server]\napt_source_file=config/local mirror.sources\n")
-        compose = cli.Compose(self.project, settings=config.load(self.config_dir))
-        self.assertNotIn("LOAF_TERMINAL_APT_SOURCE_FILE", compose.variables())
+        self.path.write_text("[terminal_server]\nenabled = true\napt_source_file=config/local mirror.sources\n"
+                             "apt_repository_dir = mirror\n")
+        settings = config.load(self.config_dir)
+        # Without --with-apt-repos, a build reads neither setting, so missing files do not matter.
+        plain = cli.Compose(self.project, settings=settings).variables(step)
+        self.assertFalse([name for name in plain if "APT" in name], plain)
+        compose = cli.Compose(self.project, settings=settings, build_apt_sources=True)
+        self.assertFalse([name for name in compose.variables() if "APT" in name])
         with self.assertRaisesRegex(FileNotFoundError, "Terminal server APT source file is missing"):
             compose.variables(step)
         source = self.config_dir / "local mirror.sources"
-        source.write_text("Types: deb\nURIs: http://mirror.test/debian\nSuites: trixie\nComponents: main\n")
+        source.write_text("Types: deb\nURIs: file:/run/loaf-apt/repository\nSuites: ./\nTrusted: yes\n")
+        with self.assertRaisesRegex(FileNotFoundError, "APT repository directory is missing"):
+            compose.variables(step)
+        repository = self.project / "mirror"
+        repository.mkdir()
+        (repository / "Packages.xz").write_bytes(b"")
         variables = compose.variables(step)
-        self.assertEqual(variables["LOAF_TERMINAL_APT_SOURCE_FILE"], str(source))
-        self.assertEqual(variables["LOAF_TERMINAL_APT_SOURCE_FORMAT"], "sources")
-        self.assertEqual(variables["LOAF_TERMINAL_APT_SOURCE_HASH"], sha256(source.read_bytes()).hexdigest())
+        # Buildx gets the source's text, not its file, and the repository as a named build context.
+        self.assertEqual(variables["LOAF_TERMINAL_BUILD_APT_SOURCE"], source.read_text())
+        self.assertEqual(variables["LOAF_TERMINAL_BUILD_APT_SOURCE_FORMAT"], "sources")
+        self.assertEqual(variables["LOAF_TERMINAL_BUILD_APT_SOURCE_HASH"], sha256(source.read_bytes()).hexdigest())
+        self.assertEqual(variables["LOAF_TERMINAL_BUILD_APT_REPOSITORY_DIR"], str(repository))
+        self.assertNotIn("LOAF_TERMINAL_APT_SOURCE_FILE", variables)
         source.write_text("Types: deb\nURIs: http://modified.test/debian\nSuites: trixie\nComponents: main\n")
-        self.assertNotEqual(compose.variables(step)["LOAF_TERMINAL_APT_SOURCE_HASH"],
-                            variables["LOAF_TERMINAL_APT_SOURCE_HASH"])
+        self.assertNotEqual(compose.variables(step)["LOAF_TERMINAL_BUILD_APT_SOURCE_HASH"],
+                            variables["LOAF_TERMINAL_BUILD_APT_SOURCE_HASH"])
         self.path.write_text("[terminal_server]\napt_source_file=config/local.txt\n")
         with self.assertRaisesRegex(config.ConfigError, "expected a Debian APT file"):
             config.load(self.config_dir)
 
-    def test_runtime_apt_source_changes_the_terminal_start_without_a_build(self):
+    def test_every_terminal_start_applies_the_current_apt_settings(self):
         self.path.write_text("[terminal_server]\nenabled = true\napt_source_file = config/offline.sources\n"
                              "apt_repository_dir = mirror\n")
         compose = cli.Compose(self.project, settings=config.load(self.config_dir))
         start = cli.Step(("terminal",), ("up", "--no-build", "--pull", "never", "terminal-server"))
         stop = cli.Step(("terminal",), ("stop", "terminal-server"))
         build = cli.Step(("terminal",), ("build", "terminal-server"))
-        overlay = str(cli.assets.DATA_DIR / "compose.terminal-apt.yml")
-        self.assertIn(overlay, compose.command(start))
+        overlays = [str(cli.assets.DATA_DIR / name) for name in
+                    ("compose.terminal-runtime.yml", "compose.terminal-apt-source.yml", "compose.terminal-apt-repository.yml")]
+        command = compose.command(start)
+        self.assertTrue(all(overlay in command for overlay in overlays))
         for step in (stop, build):
-            self.assertNotIn(overlay, compose.command(step))
-        self.assertNotIn("LOAF_TERMINAL_APT_SOURCE_FILE", compose.variables(stop))
+            self.assertFalse(set(overlays) & set(compose.command(step)))
+            self.assertFalse([name for name in compose.variables(step) if "APT" in name])
         with self.assertRaisesRegex(FileNotFoundError, "APT source file is missing"):
             compose.variables(start)
         source = self.config_dir / "offline.sources"
-        source.write_text("first source\n")
+        source.write_text("Types: deb\nURIs: http://mirror.test/debian\nSuites: trixie\nComponents: main\n")
         with self.assertRaisesRegex(FileNotFoundError, "APT repository directory is missing"):
             compose.variables(start)
         repository = self.project / "mirror"
@@ -149,10 +173,143 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(before["LOAF_TERMINAL_APT_SOURCE_FILE"], str(source))
         self.assertEqual(before["LOAF_TERMINAL_APT_SOURCE_FORMAT"], "sources")
         self.assertEqual(before["LOAF_TERMINAL_APT_REPOSITORY_DIR"], str(repository))
-        self.assertNotIn("LOAF_TERMINAL_APT_REPOSITORY_DIR", compose.variables(build))
-        source.write_text("second source\n")
+        # Each setting brings its own file: the launcher writes the repository's source beside the configured one.
+        self.assertEqual(compose.repository_source(repository), "deb [trusted=yes] file:/run/loaf-apt/repository ./\n")
+        compose.stage_terminal_runtime()
+        written = self.project / cli.TERMINAL_RUNTIME_DIR / cli.REPOSITORY_SOURCE
+        self.assertEqual(written.read_text(), compose.repository_source(repository))
+        self.assertEqual(before["LOAF_TERMINAL_APT_REPOSITORY_SOURCE_HASH"], sha256(written.read_bytes()).hexdigest())
+        # A changed source changes the terminal server's label, so the next start recreates it.
+        source.write_text("Types: deb\nURIs: http://other.test/debian\nSuites: trixie\nComponents: main\n")
         self.assertNotEqual(before["LOAF_TERMINAL_APT_SOURCE_HASH"],
                             compose.variables(start)["LOAF_TERMINAL_APT_SOURCE_HASH"])
+        # A source that names the repository itself keeps APT from seeing it twice.
+        source.write_text("Types: deb\nURIs: file:/run/loaf-apt/repository\nSuites: ./\nTrusted: yes\n")
+        self.assertTrue(compose.repository_source(repository).startswith("#"))
+        # The repository applies on its own; without a source, the image keeps its APT sources.
+        self.path.write_text("[terminal_server]\nenabled = true\napt_repository_dir = mirror\n")
+        alone = cli.Compose(self.project, settings=config.load(self.config_dir))
+        command = alone.command(start)
+        self.assertIn(overlays[0], command)
+        self.assertNotIn(overlays[1], command)
+        self.assertIn(overlays[2], command)
+        self.assertEqual(alone.variables(start)["LOAF_TERMINAL_APT_REPOSITORY_DIR"], str(repository))
+        self.assertNotIn("LOAF_TERMINAL_APT_SOURCE_FILE", alone.variables(start))
+        # The current provisioner serves even without either APT setting.
+        for network in ("isolated", "host", "local", "internet"):
+            with self.subTest(network=network):
+                self.path.write_text(f"[terminal_server]\nenabled = true\nnetwork = {network}\n")
+                plain = cli.Compose(self.project, settings=config.load(self.config_dir))
+                self.assertIn(overlays[0], plain.command(start))
+                self.assertFalse(set(overlays[1:]) & set(plain.command(start)))
+                plain.stage_terminal_runtime()
+                self.assertFalse(written.exists())
+
+    def test_repository_sources_cover_flat_and_suite_repositories(self):
+        compose = cli.Compose(self.project, settings=config.Settings())
+        repository = self.project / "mirror"
+        trixie = repository / "dists/trixie"
+        trixie.mkdir(parents=True)
+        (trixie / "InRelease").write_text("-----BEGIN PGP SIGNED MESSAGE-----\nSuite: stable\n"
+                                          "Components: main contrib\n")
+        local = repository / "dists/local"
+        local.mkdir()
+        (local / "Release").write_text("Codename: local\nComponents: main\n")
+        (repository / "dists/stable").symlink_to("trixie")
+        (repository / "dists/broken").mkdir()
+        # A signed suite needs the image's keys; an unsigned one is trusted. Links and suites without Release go.
+        self.assertEqual(compose.repository_source(repository),
+                         "deb [trusted=yes] file:/run/loaf-apt/repository local main\n"
+                         "deb file:/run/loaf-apt/repository trixie main contrib\n")
+        (repository / "Packages").write_text("")
+        self.assertTrue(compose.repository_source(repository).startswith(
+            "deb [trusted=yes] file:/run/loaf-apt/repository ./\n"))
+        (repository / "Packages").unlink()
+        for suite in (trixie, local):
+            for name in ("InRelease", "Release"):
+                (suite / name).unlink(missing_ok=True)
+        with self.assertRaisesRegex(FileNotFoundError, "no APT index"):
+            compose.repository_source(repository)
+
+    def test_only_an_active_repository_uri_overrides_the_generated_source(self):
+        repository = self.project / "mirror"
+        repository.mkdir()
+        (repository / "Packages").touch()
+        uri = "file:/run/loaf-apt/repository"
+        generated = f"deb [trusted=yes] {uri} ./\n"
+        for suffix, content, uses_repository in (
+            ("list", f"# deb {uri} ./\n", False),
+            ("list", f"deb http://mirror.test/debian trixie main # {uri}\n", False),
+            ("list", f"deb-src [trusted=yes] {uri} ./\n", False),
+            ("list", "deb [trusted=yes] file:///run/loaf-apt/repository/ ./\n", True),
+            ("sources", f"Types: deb\nURIs: {uri}\nSuites: ./\nEnabled: no\n", False),
+            ("sources", f"Types: deb\nURIs: {uri}\nSuites: ./\nEnabled: false\n", False),
+            ("sources", f"Types: deb-src\nURIs: {uri}\nSuites: ./\nTrusted: yes\n", False),
+            ("sources", f"Types:deb\nURIs:{uri}\nSuites:./\nEnabled:\n no\n", False),
+            ("sources", "Types: deb\nURIs: http://mirror.test/debian\nSuites: trixie\nComponents: main\n"
+                        "Signed-By: /run/loaf-apt/repository/key.gpg\n", False),
+            ("sources", f"Types: deb\nURIs: http://mirror.test/debian\n {uri}\nSuites: ./\n", True),
+        ):
+            with self.subTest(content=content):
+                source = self.config_dir / f"mirror.{suffix}"
+                source.write_text(content)
+                compose = cli.Compose(self.project, settings=config.Settings(terminal_server_apt_source_file=source))
+                self.assertEqual(compose.repository_source(repository),
+                                 "# apt_source_file names this repository.\n" if uses_repository else generated)
+
+    def test_an_apt_source_must_match_its_format(self):
+        def parsed(name):
+            settings = config.Settings(terminal_server_apt_source_file=Path("config") / name)
+            return cli.Compose(self.project, settings=settings).terminal_apt_source()
+
+        for name, content, message in (
+            ("deb822.list", "# mirror\nTypes: deb\nURIs: https://mirror.test/debian\n", "Use .sources"),
+            ("one-line.sources", "deb https://mirror.test/debian trixie main\n", "Use .list"),
+            ("missing-component.list", "deb https://mirror.test/debian trixie\n", "invalid Debian APT syntax"),
+            ("missing-suite.sources", "Types: deb\nURIs: https://mirror.test/debian\n", "invalid Debian APT syntax"),
+        ):
+            with self.subTest(name=name):
+                (self.config_dir / name).write_text(content)
+                with self.assertRaisesRegex(config.ConfigError, message):
+                    parsed(name)
+        for name, content in (("good.list", "deb https://mirror.test/debian trixie main\n"),
+                              ("good.sources", "Types: deb\nURIs: https://mirror.test/debian\nSuites: trixie\nComponents: main\n"),
+                              ("empty.list", "")):
+            (self.config_dir / name).write_text(content)
+            self.assertEqual(parsed(name).path, self.config_dir / name)
+        mirror = self.config_dir / "mirror"
+        mirror.write_text("Types: deb\nURIs: https://mirror.test/debian\nSuites: trixie\nComponents: main\n")
+        (self.config_dir / "linked.sources").symlink_to(mirror.name)
+        self.assertEqual(parsed("linked.sources").path, mirror)
+        (self.config_dir / "bad.list").write_bytes(b"# invalid byte \xff\n")
+        with self.assertRaisesRegex(config.ConfigError, "bad.list must be UTF-8"):
+            parsed("bad.list")
+
+    def test_runtime_apt_sources_follow_the_network_mode(self):
+        path = self.config_dir / "mirror.list"
+        repo = self.project / "repo"
+        repo.mkdir()
+        (repo / "Packages").touch()
+        for network, uri, mounted, accepts in (
+            ("isolated", "http://host.docker.internal:8001/debian", False, False),
+            ("isolated", "file:/run/loaf-apt/repository", False, False),
+            ("isolated", "file:/run/loaf-apt/repository", True, True),
+            ("host", "http://host.docker.internal:8001/debian", False, True),
+            ("host", "https://deb.debian.org/debian", True, False),
+            ("host", "file:/run/loaf-apt/repository", True, True),
+            ("local", "http://mirror.lan/debian", False, True),
+        ):
+            with self.subTest(network=network, uri=uri, mounted=mounted):
+                path.write_text(f"deb {uri} {'./' if uri.startswith('file:') else 'trixie main'}\n")
+                settings = config.Settings(terminal_server_apt_source_file=path, terminal_server_network=network,
+                                           terminal_server_apt_repository_dir=repo if mounted else None)
+                compose = cli.Compose(self.project, settings=settings)
+                if accepts:
+                    self.assertEqual(compose.terminal_apt_inputs(serving=True)[0].path, path)
+                else:
+                    with self.assertRaisesRegex(config.ConfigError, f"network = {network} requires"):
+                        compose.terminal_apt_inputs(serving=True)
+                self.assertEqual(compose.terminal_apt_inputs(serving=False)[0].path, path)
 
     def test_local_model_selection_uses_packaged_files_only_when_missing_locally(self):
         # The running loaf's packaged files: its defaults and model lists.

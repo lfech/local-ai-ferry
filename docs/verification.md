@@ -27,6 +27,9 @@ An empty suite exits with status 5.
 The command discovers [`python-package/tests/`](../python-package/tests/) in the
 current checkout. Use `--project-dir PATH` to select another checkout. To run an
 individual group from the checkout root, use standard unittest discovery.
+On Python 3.12 or newer, add `--durations 10` to a direct unittest run to
+report the ten slowest cases. Wall-clock time also includes fixture setup
+and cleanup, such as image builds and model downloads.
 
 ```bash
 .venv/bin/python -m unittest discover -s python-package/tests -t python-package -p 'test_package.py' -bv
@@ -102,14 +105,15 @@ Select one case by name from the package directory. Use `-b` with direct
 ## Full isolated GPU workflow
 
 Use the built local images, working NVIDIA container access, internet access,
-and disk space for the model and staged copies. Each Compose project lives in
-`.test-artifacts/` in the checkout, on disk even where `/tmp` is a small
-memory-backed filesystem. The transfer case needs about 6 GB there: backup
-stages the uncompressed model store (2.8 GB) beside its compressed archive,
-and restore stages the store again before it changes the volume. `loaf clean`
-removes the directory. The suite downloads Ministral and exports its
-Modelfiles once. Each serving workflow starts from
-a copy in its own volume and Compose project.
+and disk space for the model and staged copies. The suite downloads
+Granite 4.0 H 350M Q4_K_M (223 MB) and exports its Modelfiles once. Each
+serving workflow starts from a copy in its own volume and Compose project.
+Fixture services probe readiness every second using the packaged health
+checks. The transfer case stages the model store beside its compressed
+archive, then stages it again during restore. Allow at least 1 GB
+in `.test-artifacts/` as well as space for the model volumes in Docker.
+`loaf clean` removes the artifact directory.
+[IBM Granite GGUF weights](https://huggingface.co/ibm-granite/granite-4.0-h-350m-GGUF)
 
 ```bash
 RUN_DOCKER_TESTS=1 RUN_GPU_TESTS=1 ./loaf test -v
@@ -119,7 +123,8 @@ The individual cases check the source and alias Modelfiles, recovery of a
 missing manifest, explicit replay of a new definition, and recovery from an
 invalid definition that prevents WebUI startup. The inference case checks
 authenticated model discovery through WebUI, the 16,384-token default
-and full GPU placement. The transfer case switches
+with a prompt exceeding 7,008 evaluated tokens, completion, and full GPU
+placement. The transfer case switches
 to the connected profile, checks WebUI health on a temporary loopback port,
 and mirrors the model store with `--delete`. It verifies that the added
 alias disappears and both connected containers keep their IDs.
@@ -152,7 +157,10 @@ Open WebUI's terminal proxy with two authorized accounts and a denied
 account, exercise GCC/G++, Python, and Sphinx workflows, and repeat the
 builds after a cold restart on the internal control network. The online and
 offline cases have separate Docker projects and volumes and run
-concurrently. They need no model or GPU.
+concurrently. Their services use one-second readiness probes. One account's
+15-second command-limit test runs alongside the other account's build checks.
+The live-output check releases its running command after receiving stdout
+and stderr through the WebSocket. The cases need no model or GPU.
 
 The serving cases use `http://terminal-server:8000` for saved connections
 and check the default and recent entries offered in the working-directory
@@ -169,9 +177,21 @@ account's folder shared by its chats, isolation from a second chat and from
 another account's draft, a temporary chat that starts fresh after a restart,
 packages and files of a saved chat across the restart, and container removal
 after chat deletion.
+The restart case changes both APT settings in `config.ini` while serving
+offline on CPU. It runs `loaf restart`, opens a fresh chat and checks its
+read-only mounts and ability to update package lists from the new repository
+in `local` mode. A separate case checks that `local` and `internet` attach
+to the same outbound bridge, and uses `apt-get --print-uris update` to check
+the image's Debian sources. [APT update options](https://manpages.debian.org/trixie/apt/apt-get.8.en.html)
 
-The serving cases exercise production isolation by default and use `iproute2` on
-the local Docker host to inspect the bridge. It checks that the host bridge
+The `host` case serves a fixture repository bound to the Docker host's bridge
+address. Its chat installs a package through `host.docker.internal` and checks
+that its route table has no default route. The source-refresh case also
+changes the bundled provisioner and checks that Compose replaces that
+service while the chat retains its container.
+
+The serving cases select `network = isolated` and use `iproute2` on
+the local Docker host to inspect the bridge. They check that the host bridge
 has no IPv4 address and each workspace has no default route, IPv6 address,
 or connection to the other workspace or control API. On Engine 26 and 27,
 `[tests] allow_legacy_terminal_bridge = true` runs the workflows with ordinary
@@ -204,7 +224,7 @@ built standalone executable. It uses SmolLM2-135M-Instruct Q2_K with one
 88 MB weight file and 1,024 context tokens. It checks sign-in enforcement,
 model discovery, a completed reply, saved chat creation, and device
 placement. Use the full [model workflow](#full-isolated-gpu-workflow) for
-the Ministral, long-context, and transfer regression checks.
+long-context inference and model transfer regression checks.
 
 ```bash
 python3 python-package/tests/release_handoff.py dist/loaf --chat-only
@@ -264,9 +284,10 @@ and confirms that inference fails. The fixture has one chat model and the
 three core images.
 
 Use `--keep PATH` to retain the synthetic backup and its test login in a
-new directory on a disk-backed filesystem. The rehearsal uses the release
-executable's backup compression setting, which defaults to gzip level 4.
-Use `--compression LEVEL` to override it with a level from 0 through 9.
+new directory on a disk-backed filesystem. The rehearsal uses gzip level 1
+to reduce CPU time during backup. Use `--compression LEVEL` to select a
+level from 0 through 9, or `--compression 4` to exercise the release
+executable's default backup level.
 
 ```bash
 mkdir -p backup
@@ -349,18 +370,19 @@ or override them for a run with the flags below. Transfer tests require Git.
 | Open WebUI tool history | Checks the optional compatibility filter for interrupted Ollama tool turns, including provider selection, preserved tool results, and repeated requests. |
 | Documentation | Checks local links, heading anchors and guide navigation. Parses Bash examples. Checks that the command reference covers every command and global flag. |
 | Deployment | Checks settings layers and `system_config`, system mode and the Debian default, the collision warning, shared locks in setgid directories, the running installation's deployment files for every project, also with a Compose file or a `docker-project` link of its own, settings or a checkout as what makes a directory a project, `loaf version`, and the bundled guides that stay until `--force` replaces them, their exported links and the manual page, which names each command's options and describes every option once. |
-| Debian package | With Docker, builds the `.deb` with `scripts/build-release.sh --debian-only`, checks control fields, conffiles and files including the standalone executable, then installs, runs and purges it on Debian 12 and 13. The checks include the backup preview with the packaged executable and, on amd64, that executable itself. The manual page passes `groff` with warnings enabled. [Package checks](../python-package/tests/debian_package_checks.sh) |
+| Debian package | With Docker, builds the `.deb` once with `scripts/build-release.sh --debian-only`, checks control fields, conffiles and files including the standalone executable, then installs, runs and purges it in parallel Debian 12 and 13 containers. The checks include the backup preview with the packaged executable and, on amd64, that executable itself. The manual page passes `groff` with warnings enabled. [Package checks](../python-package/tests/debian_package_checks.sh) |
 | Release tagging | Uses temporary Git repositories to check version selection, annotated tags, previews, and tag-only pushes and retries. Requires Python 3.11 or newer. |
 | Docker | Checks resolved Compose profiles, INI settings that reach Compose with exported variables winning and a project `.env` only with `docker_env_enable`, the restart policy that brings back the serving services and the terminal server but not the downloader, CPU and GPU device settings, image settings, and that each Dockerfile and build secret stays inside its build context. Tests each export and startup shell scenario, verifies container removal and the stop opt-out, and runs a two-volume archive round trip. `loaf docker rm all` removes exactly the resources of a disposable deployment and keeps the shared image. |
-| CPU and GPU model workflows | Check downloaded model exports, offline Ministral inference, startup failure and recovery, explicit Modelfile replay, and model archive mirroring with the connected services running. |
-| Terminal server | Checks the WebUI connection preset from the key with `webui_access`, the key secret for both WebUI services and the Compose override that adds it, credential validation, the system prompt that the terminal server answers without a container, the `run_command` description and the configured wait added to command calls without one, HTTP and WebSocket proxying to the chat's container, the root container policy with only the account's folder of the user volume, network access settings, a runtime APT source that replaces the image's sources and whose replaced file a chat sees on its next start without a new container, runtime scripts at one project path with a revision from the mount paths, `apt install` without `-y` or a terminal, resuming stopped containers and replacing them after a configuration change, startup reconciliation and shutdown, closing the disconnected shells of an idle container before it stops, file browsing and chat deletion, `apt` as root, development tools through Open WebUI, and backup and restore of the image, user volume and key. Transfer tests also cover automatic image inclusion and `--no-terminal-server`. Docker-backed workflows are opt-in. |
-| Model catalog | Checks that the example/default model specifiers resolve to Ollama-compatible manifests. |
+| CPU and GPU model workflows | Check downloaded model exports, offline Granite 4.0 H 350M inference, startup failure and recovery, explicit Modelfile replay, and model archive mirroring with the connected services running. |
+| Terminal server | Checks the WebUI connection preset from the key with `webui_access`, the key secret for both WebUI services and the Compose override that adds it, credential validation, the system prompt that the terminal server answers without a container, the `run_command` description and the configured wait added to command calls without one, a running command's stdout and stderr reaching Open WebUI's command stream for the Terminal pane before the command ends, HTTP and WebSocket proxying to the chat's container, the root container policy with only the account's folder of the user volume, network access settings, a runtime APT source that replaces the image's sources and whose replaced file a chat sees on its next start without a new container, runtime scripts at one project path with a revision from the mount paths, `apt install` without `-y` or a terminal, resuming stopped containers and replacing them after a configuration change, startup reconciliation and shutdown, closing the disconnected shells of an idle container before it stops, file browsing and chat deletion, `apt` as root, development tools through Open WebUI, and backup and restore of the image, user volume and key. Transfer tests also cover automatic image inclusion and `--no-terminal-server`. Docker-backed workflows are opt-in. |
+| Model catalog | Checks that the example and default model specifiers resolve to Ollama-compatible manifests. The test fetches each distinct manifest once with up to four requests in flight. |
 
 ## Coverage limits
 
-The full CPU and GPU suites download and test Ministral. The compact handoff
-tests SmolLM2-135M-Instruct Q2_K, which is smaller than the default
-selection. Catalog checks
+The CPU and GPU workflow suites use Granite 4.0 H 350M.
+The compact handoff uses SmolLM2-135M-Instruct Q2_K. The shell suite
+exercises export of both a model blob and a multimodal projector with a
+synthetic fixture. Catalog checks
 verify the model references. Hardware fits for the example profiles are
 estimates. Native Debian GPU inference, interactive browser login, vision
 input, and Tether desktop installation and sign-in are outside direct test

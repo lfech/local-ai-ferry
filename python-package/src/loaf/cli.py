@@ -9,6 +9,7 @@ import argparse
 from configparser import ConfigParser, Error as INIError
 from contextlib import nullcontext
 from dataclasses import dataclass, field
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -21,7 +22,7 @@ import tarfile
 from typing import Iterator, Sequence
 import zlib
 
-from . import assets, cleanup, completion, config, docs, integrations, readiness, resources, setup, transfer
+from . import apt, assets, cleanup, completion, config, docs, integrations, readiness, resources, setup, transfer
 from .locks import AlreadyRunningError, PROJECT_LOCK, project_lock
 from .progress import wait_status
 
@@ -57,6 +58,13 @@ TESTS_DIR = Path("python-package/tests")
 # The terminal scripts that chat containers bind when an APT source replaces the image's sources.
 TERMINAL_RUNTIME_DIR = ".loaf-terminal-runtime"
 TERMINAL_RUNTIME_FILES = ("provisioner.py", "runner.py", "no-apt-source.list")
+# The source that the launcher writes for [terminal_server] apt_repository_dir, named after the setting.
+REPOSITORY_SOURCE = "apt_repository_dir.list"
+APT_BUILD_SECRETS = {"LOAF_TERMINAL_BUILD_APT_SOURCE", "LOAF_TERMINAL_BUILD_APT_REPOSITORY_SOURCE"}
+# Chat containers and builds with --with-apt-repos mount apt_repository_dir here.
+APT_REPOSITORY = str(apt.REPOSITORY)
+# A flat repository has its index at the root, a suite repository below dists/.
+FLAT_APT_INDEXES = ("Release", "InRelease", *(f"Packages{suffix}" for suffix in ("", ".gz", ".xz", ".bz2", ".lz4", ".zst")))
 TEST_RUNNER = """\
 from pathlib import Path
 import sys
@@ -295,6 +303,7 @@ class Compose:
         namespace: str = config.DEPLOYMENT,
         settings: config.Settings | None = None,
         verbose: bool = False,
+        build_apt_sources: bool = False,
     ) -> None:
         # Resolve cwd when called, not when the package is imported or installed.
         self.project_dir = (project_dir or Path.cwd()).resolve()
@@ -305,6 +314,8 @@ class Compose:
         self.project_name = project_name or namespace
         self.settings = settings or config.Settings()
         self.verbose = verbose
+        # loaf build --with-apt-repos: the [terminal_server] APT settings also serve the terminal image's build.
+        self.build_apt_sources = build_apt_sources
 
     def command(self, step: Step) -> list[str]:
         command = [
@@ -318,8 +329,12 @@ class Compose:
         if self.settings.terminal_server_enabled:
             # Open WebUI receives the bearer key to preset its terminal connection.
             files += (assets.DATA_DIR / "compose.terminal-webui.yml",)
-        if self.uses_terminal_runtime_source(step):
-            files += (assets.DATA_DIR / "compose.terminal-apt.yml",)
+        if self.uses_terminal_runtime(step):
+            files += (assets.DATA_DIR / "compose.terminal-runtime.yml",)
+            if self.settings.terminal_server_apt_source_file is not None:
+                files += (assets.DATA_DIR / "compose.terminal-apt-source.yml",)
+            if self.settings.terminal_server_apt_repository_dir is not None:
+                files += (assets.DATA_DIR / "compose.terminal-apt-repository.yml",)
         for path in files:
             command += ["--file", str(path)]
         for profile in step.profiles:
@@ -338,19 +353,42 @@ class Compose:
             variables["CUDA_VISIBLE_DEVICES"] = self.settings.cuda_visible_devices
         if self.settings.terminal_server_enabled:
             variables["LOAF_TERMINAL_SECRET_FILE"] = str(self.terminal_secret_file())
-        apt_source = self.settings.terminal_server_apt_source_file
-        if apt_source is not None and step is not None and "terminal-server" in step.arguments:
-            runtime = self.uses_terminal_runtime_source(step)
-            if runtime or step.arguments[0] == "build":
-                path = self.terminal_apt_source_file(apt_source)
-                variables.update(LOAF_TERMINAL_APT_SOURCE_FILE=str(path),
-                                 LOAF_TERMINAL_APT_SOURCE_FORMAT=apt_source.suffix[1:],
-                                 LOAF_TERMINAL_APT_SOURCE_HASH=setup.file_digest(path))
-            if runtime:
-                variables["LOAF_TERMINAL_RUNTIME_DIR"] = str(self.terminal_runtime_dir())
-                repository = self.terminal_apt_repository_dir()
-                if repository is not None:
-                    variables["LOAF_TERMINAL_APT_REPOSITORY_DIR"] = str(repository)
+        if step is not None and "terminal-server" in step.arguments:
+            variables.update(self.terminal_apt_variables(step))
+        return variables
+
+    def terminal_apt_variables(self, step: Step) -> dict[str, str]:
+        """The [terminal_server] APT settings for a step: every start of the terminal server applies them, so a
+        changed setting takes effect with loaf restart or loaf run. A build uses them only with --with-apt-repos."""
+        if step.arguments[0] == "build":
+            if not self.build_apt_sources:
+                return {}
+            source, repository = self.terminal_apt_inputs(serving=False)
+            variables = {}
+            if source is not None:
+                variables.update(LOAF_TERMINAL_BUILD_APT_SOURCE=source.text,
+                                 LOAF_TERMINAL_BUILD_APT_SOURCE_FORMAT=source.suffix[1:],
+                                 LOAF_TERMINAL_BUILD_APT_SOURCE_HASH=sha256(source.text.encode()).hexdigest())
+            if repository is not None:
+                text = self.repository_source(repository, source)
+                variables.update(LOAF_TERMINAL_BUILD_APT_REPOSITORY_DIR=str(repository),
+                                 LOAF_TERMINAL_BUILD_APT_REPOSITORY_SOURCE=text,
+                                 LOAF_TERMINAL_BUILD_APT_REPOSITORY_SOURCE_HASH=sha256(text.encode()).hexdigest())
+            return variables
+        if not self.uses_terminal_runtime(step):
+            return {}
+        source, repository = self.terminal_apt_inputs(serving=True)
+        provisioner = assets.DATA_DIR / "docker/terminal-server/provisioner.py"
+        variables = {"LOAF_TERMINAL_RUNTIME_DIR": str(self.terminal_runtime_dir()),
+                     "LOAF_TERMINAL_PROVISIONER_HASH": setup.file_digest(provisioner)}
+        if source is not None:
+            variables.update(LOAF_TERMINAL_APT_SOURCE_FILE=str(source.path),
+                             LOAF_TERMINAL_APT_SOURCE_FORMAT=source.suffix[1:],
+                             LOAF_TERMINAL_APT_SOURCE_HASH=sha256(source.text.encode()).hexdigest())
+        if repository is not None:
+            variables.update(LOAF_TERMINAL_APT_REPOSITORY_DIR=str(repository),
+                             LOAF_TERMINAL_APT_REPOSITORY_SOURCE_HASH=sha256(
+                                 self.repository_source(repository, source).encode()).hexdigest())
         return variables
 
     def terminal_secret_file(self) -> Path:
@@ -368,8 +406,13 @@ class Compose:
         if target.is_symlink() or (target.exists() and not target.is_dir()):
             raise OSError(f"{target} must be a local directory.")
         target.mkdir(exist_ok=True)
-        for name in TERMINAL_RUNTIME_FILES:
-            data = (assets.DATA_DIR / "docker/terminal-server" / name).read_bytes()
+        files = {name: (assets.DATA_DIR / "docker/terminal-server" / name).read_bytes() for name in TERMINAL_RUNTIME_FILES}
+        source, repository = self.terminal_apt_inputs(serving=True)
+        if repository is not None:
+            files[REPOSITORY_SOURCE] = self.repository_source(repository, source).encode()
+        else:
+            (target / REPOSITORY_SOURCE).unlink(missing_ok=True)
+        for name, data in files.items():
             path = target / name
             if path.is_file() and not path.is_symlink() and path.read_bytes() == data:
                 continue
@@ -378,15 +421,61 @@ class Compose:
             pending.chmod(0o644)
             pending.replace(path)
 
-    def uses_terminal_runtime_source(self, step: Step) -> bool:
-        return (self.settings.terminal_server_enabled and self.settings.terminal_server_apt_source_file is not None
-                and step.arguments[0] == "up" and "terminal-server" in step.arguments)
+    def uses_terminal_runtime(self, step: Step) -> bool:
+        """Start the provisioner from this launcher so loaded images use the current policy."""
+        return (self.settings.terminal_server_enabled and step.arguments[0] == "up"
+                and "terminal-server" in step.arguments)
 
-    def terminal_apt_source_file(self, configured: Path) -> Path:
+    def terminal_apt_source(self) -> apt.Source | None:
+        configured = self.settings.terminal_server_apt_source_file
+        if configured is None:
+            return None
         source = (self.project_dir / configured.expanduser()).resolve()
         if not source.is_file():
             raise FileNotFoundError(f"Terminal server APT source file is missing: {source}")
-        return source
+        return apt.read_source(source, configured.suffix)
+
+    def terminal_apt_inputs(self, *, serving: bool) -> tuple[apt.Source | None, Path | None]:
+        source = self.terminal_apt_source()
+        repository = self.terminal_apt_repository_dir()
+        if serving and source is not None:
+            source.check_network(self.settings.terminal_server_network, repository=repository is not None)
+        return source, repository
+
+    def repository_source(self, repository: Path, source: apt.Source | None = None) -> str:
+        """The APT source for apt_repository_dir: its flat index and each suite below dists/.
+
+        A repository without a signature is marked trusted. A configured binary entry covers its suite and components.
+        """
+        if source is None:
+            source = self.terminal_apt_source()
+
+        entries = [(repository, "./", [])] if any((repository / name).exists() for name in FLAT_APT_INDEXES) else []
+        dists = repository / "dists"
+        for suite in sorted(dists.iterdir()) if dists.is_dir() else ():
+            release = next((suite / name for name in ("InRelease", "Release") if (suite / name).is_file()), None)
+            if suite.is_symlink() or release is None or not re.fullmatch(r"[A-Za-z0-9._-]+", suite.name):
+                continue
+            components = next((line.split(":", 1)[1].split() for line in
+                               release.read_text(encoding="utf-8", errors="replace").splitlines()
+                               if line.startswith("Components:")), [])
+            if components:
+                entries.append((suite, suite.name, components))
+        if not entries:
+            raise FileNotFoundError("Terminal server APT repository directory has no APT index (Packages or Release "
+                                    f"at the root, or a suite below dists/ whose Release names its Components): {repository}")
+        lines = []
+        for directory, suite, components in entries:
+            needed = [component for component in components or [""] if source is None or not source.covers(suite, component)]
+            if not needed:
+                continue
+            signed = (directory / "InRelease").is_file() or (directory / "Release.gpg").is_file()
+            options = "" if signed else "[trusted=yes] "
+            lines.append(f"deb {options}file:{APT_REPOSITORY} {suite} {' '.join(needed)}".rstrip() + "\n")
+        generated = "".join(lines)
+        if generated and source is not None:
+            apt.check_combination(source, generated)
+        return generated or "# apt_source_file names this repository.\n"
 
     def terminal_apt_repository_dir(self) -> Path | None:
         configured = self.settings.terminal_server_apt_repository_dir
@@ -395,10 +484,7 @@ class Compose:
         directory = (self.project_dir / configured.expanduser()).resolve()
         if not directory.is_dir():
             raise FileNotFoundError(f"Terminal server APT repository directory is missing: {directory}")
-        # A flat repository has its index at the root, a suite repository below dists/.
-        indexes = ("dists", "Release", "InRelease", *(f"Packages{suffix}" for suffix in ("", ".gz", ".xz", ".bz2",
-                                                                                     ".lz4", ".zst")))
-        if not any((directory / name).exists() for name in indexes):
+        if not any((directory / name).exists() for name in ("dists", *FLAT_APT_INDEXES)):
             raise FileNotFoundError(
                 f"Terminal server APT repository directory has no APT index (Packages, Release or dists/): {directory}")
         return directory
@@ -410,7 +496,11 @@ class Compose:
         defaults = config.Settings().compose_variables()
         assignments = []
         values = self.variables(step) if variables is None else variables
+        if "LOAF_TERMINAL_BUILD_APT_SOURCE" in values:
+            print(f"Terminal APT source file {self.settings.terminal_server_apt_source_file}", flush=True)
         for name, value in values.items():
+            if name in APT_BUILD_SECRETS:
+                continue
             if value == defaults.get(name) and name not in os.environ:
                 continue
             if sys.platform == "win32":
@@ -428,7 +518,7 @@ class Compose:
 
     def execute(self, step: Step) -> None:
         action = step.arguments[0]
-        if self.uses_terminal_runtime_source(step):
+        if self.uses_terminal_runtime(step):
             self.stage_terminal_runtime()
         variables = self.variables(step)
         if self.verbose:
@@ -438,7 +528,12 @@ class Compose:
         env = self.environment(variables)
         wait = action == "up" and "--wait" in step.arguments
         with (wait_status("Waiting for services to become healthy") if wait else nullcontext()):
-            subprocess.run(self.command(step), cwd=self.project_dir, check=True, shell=False, env=env)
+            try:
+                subprocess.run(self.command(step), cwd=self.project_dir, check=True, shell=False, env=env)
+            except subprocess.CalledProcessError:
+                if action != "config":
+                    note_docker_access(env, self.project_dir)
+                raise
 
 
 def execute_plan(
@@ -461,6 +556,21 @@ def execute_plan(
 
 class DockerQueryError(RuntimeError):
     """Docker could not report the deployment's running containers."""
+
+
+DOCKER_ACCESS_HINT = "Check 'docker version' and see docs/debian.md for Docker access."
+
+
+def note_docker_access(environment: dict[str, str], project: Path) -> None:
+    """Check access after a failure while keeping Compose output live."""
+    try:
+        result = subprocess.run(["docker", "version", "--format", "{{.Server.Version}}"], cwd=project,
+                                env=environment, capture_output=True, check=False, timeout=5)
+        if result.returncode == 0:
+            return
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    print(DOCKER_ACCESS_HINT, file=sys.stderr)
 
 
 # compose.cpu.yml sets this in the Ollama services, which tells containers that serve on CPU apart.
@@ -498,15 +608,20 @@ def serving_state(compose: Compose) -> ServingState:
         detail = str(exc).rstrip()
         detail += "" if detail.endswith((".", "?", "!")) else "."
         raise DockerQueryError(f"Docker could not report which services of {compose.project_name} run: {detail} "
-                               "Check 'docker version'; docs/debian.md describes Docker access.") from exc
+                               f"{DOCKER_ACCESS_HINT}") from exc
     return ServingState(tuple(profile for profile in SERVING if any(service in running for service in SERVICES[profile])),
                         cpu)
 
 
 def note_terminal_network(settings: config.Settings, mode: str, serving: str | None) -> None:
-    if serving == "offline" and mode in ("run", "restart") and settings.terminal_server_enabled \
-            and settings.terminal_server_network == "connected":
-        print("Note: [terminal_server] network = connected, so chat containers that models drive can reach every "
+    network = settings.terminal_server_network
+    if serving != "offline" or mode not in ("run", "restart") or not settings.terminal_server_enabled:
+        return
+    if network == "host":
+        print(f"Note: [terminal_server] network = host gives chat containers access to Docker host services at {apt.HOST}.",
+              flush=True)
+    elif network in ("local", "internet"):
+        print(f"Note: [terminal_server] network = {network}, so chat containers that models drive can reach every "
               "address the Docker host reaches.", flush=True)
 
 
@@ -584,8 +699,8 @@ COMMAND_HELP = {
         "loaf docs loaf.1 | man -l -",
     ),
     "completion": CommandHelp("Install, remove or print Bash completion for loaf."),
-    "build": CommandHelp("Build the local deployment images.", COMPOSE_OPTIONS),
-    "upgrade": CommandHelp("Pull updated base images and rebuild local images.", COMPOSE_OPTIONS),
+    "build": CommandHelp("Build the local deployment images.", (*COMPOSE_OPTIONS, "--with-apt-repos")),
+    "upgrade": CommandHelp("Pull updated base images and rebuild local images.", (*COMPOSE_OPTIONS, "--with-apt-repos")),
     "download": CommandHelp("Pull the selected Ollama models.", (*START_OPTIONS, "--models-file")),
     "run": CommandHelp(
         "Start Ollama and WebUI: offline for disconnected use, online with internet access.",
@@ -698,6 +813,8 @@ def add_options(parser, selected: tuple[str, ...] | None = None) -> None:
     add("--wait-timeout", type=wait_timeout_option, metavar="SECONDS",
         help="Override the service readiness wait from config.ini. 0 waits without a limit.")
     add("-a", "--attach", action="store_true", help="Follow live Compose logs after the workflow.")
+    add("--with-apt-repos", action="store_true",
+        help="Build the terminal image with [terminal_server] apt_source_file and apt_repository_dir.")
     if selected is None:
         # Former options only point to their new form.
         for flag in (*RENAMED_OPTIONS, "--link-docker-project"):
@@ -1188,6 +1305,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--cpu is only supported by run, restart, status, restore, test and integration systemd.")
     if setup_tests and (args.archive is not None or args.force):
         parser.error("setup tests installs only the test packages. Omit --archive and --force.")
+    if args.with_apt_repos and args.mode not in ("build", "upgrade"):
+        parser.error("--with-apt-repos is only supported by build and upgrade.")
     if args.badges and args.mode != "test":
         parser.error("--badges is only supported by test.")
     if args.full and args.mode != "clean":
@@ -1394,6 +1513,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--models-file is supported by download, backup --export and integration continue.")
     if args.wait_timeout is not None and workflow_mode not in SERVICES and args.mode != "restart":
         parser.error("--wait-timeout is only supported by commands that start services.")
+    if args.with_apt_repos and not settings.terminal_server_enabled:
+        parser.error("--with-apt-repos applies to the terminal image, which builds only with [terminal_server] "
+                     "enabled = true.")
+    if args.with_apt_repos and settings.terminal_server_apt_source_file is None \
+            and settings.terminal_server_apt_repository_dir is None:
+        parser.error("--with-apt-repos needs [terminal_server] apt_source_file or apt_repository_dir.")
     if args.mode == "docker":
         override = args.config_dir.resolve() if args.config_dir is not None else None
         with_containers = next_command(project_dir, override, args.namespace_name, "docker", "rm", "containers", *docker_types,
@@ -1515,16 +1640,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                 layer_dirs=layer_dirs, settings=settings, namespace=namespace, namespace_name=namespace_name,
                 archive=archive, adopted=adopted, system=system_mode, standalone=standalone_setup,
             )
-        compose = Compose(project_dir, files=compose_files, namespace=namespace, settings=settings, verbose=args.verbose)
+        compose = Compose(project_dir, files=compose_files, namespace=namespace, settings=settings, verbose=args.verbose,
+                          build_apt_sources=args.with_apt_repos)
         if settings.terminal_server_enabled and args.mode in ("run", "restart"):
             if not compose.terminal_secret_file().exists():
                 raise FileNotFoundError(
                     f"Terminal server key file is missing: {compose.terminal_secret_file()}. Create it with: "
                     + next_command(project_dir, override_dir, None, "setup", "terminal-server-key", system=system_mode))
             config.read_terminal_secret(compose.terminal_secret_file())
-            if settings.terminal_server_apt_source_file is not None:
-                compose.terminal_apt_source_file(settings.terminal_server_apt_source_file)
-                compose.terminal_apt_repository_dir()
+        if (settings.terminal_server_enabled and args.mode in ("run", "restart")) or args.with_apt_repos:
+            # Refuse a missing or unusable APT setting before any service changes, also in dry runs.
+            source, repository = compose.terminal_apt_inputs(serving=not args.with_apt_repos)
+            if repository is not None:
+                compose.repository_source(repository, source)
+        if args.mode in ("build", "upgrade") and not args.with_apt_repos and settings.terminal_server_enabled and (
+                settings.terminal_server_apt_source_file or settings.terminal_server_apt_repository_dir):
+            print("Note: the terminal image builds with its base image's APT sources. Add --with-apt-repos to build "
+                  "it with the [terminal_server] APT settings.", flush=True)
         if args.mode in TRANSFER_MODES:
             with (nullcontext() if args.dry_run or args.verify else project_lock(lock_path)):
                 if args.verify:

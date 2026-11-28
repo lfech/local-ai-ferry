@@ -213,6 +213,18 @@ class PlanTests(unittest.TestCase):
         self.assertTrue(kwargs['check'])
         self.assertEqual(kwargs['env']['LOAF_NAMESPACE'], '')
 
+    def test_failed_compose_command_points_to_docker_access_if_the_daemon_is_unreachable(self):
+        compose = cli.Compose()
+        step = cli.Step(('offline',), ('stop', 'ollama-offline'))
+        failure = subprocess.CalledProcessError(1, 'docker')
+        for status, hint in ((1, True), (0, False)):
+            daemon = subprocess.CompletedProcess('docker version', status)
+            with self.subTest(status=status), patch('loaf.cli.subprocess.run', side_effect=[failure, daemon]) as run, \
+                    redirect_stderr(io.StringIO()) as stderr, self.assertRaises(subprocess.CalledProcessError):
+                compose.execute(step)
+            self.assertEqual('docs/debian.md' in stderr.getvalue(), hint)
+            self.assertEqual(run.call_args.args[0][:2], ['docker', 'version'])
+
     def test_failed_command_prevents_all_later_commands(self):
         # Fail the second planned operation, then prove no later operation ran.
         with tempfile.TemporaryDirectory() as folder:
@@ -749,18 +761,21 @@ class CliTests(unittest.TestCase):
             self.assertEqual(exc.exception.code, 2)
             mocked.assert_not_called()
 
-    def test_offline_with_a_connected_terminal_network_notes_the_access(self):
+    def test_offline_with_an_outbound_terminal_network_notes_the_access(self):
         with tempfile.TemporaryDirectory() as folder:
             # Its own key: run refuses a missing one, and a fresh checkout such as CI's has none.
             key = Path(folder, 'terminal-server.key')
             key.write_text('k' * 32, encoding='ascii')
-            Path(folder, 'config.ini').write_text(
-                f'[terminal_server]\nenabled = true\nnetwork = connected\nsecret_file = {key}\n', encoding='utf-8')
-            for mode, noted in (('offline', True), ('online', False)):
-                with self.subTest(mode=mode), patch('loaf.cli.execute_plan'), \
+            for mode, network, noted in (('offline', 'local', True), ('offline', 'internet', True), ('offline', 'host', True),
+                                         ('offline', 'isolated', False), ('online', 'internet', False)):
+                Path(folder, 'config.ini').write_text(
+                    f'[terminal_server]\nenabled = true\nnetwork = {network}\nsecret_file = {key}\n', encoding='utf-8')
+                with self.subTest(mode=mode, network=network), patch('loaf.cli.execute_plan'), \
                         redirect_stdout(io.StringIO()) as output, redirect_stderr(io.StringIO()):
                     self.assertEqual(cli.main(['--project-dir', str(ROOT), '--config-dir', folder, 'run', mode, '--dry-run']), 0)
-                self.assertEqual('Note: [terminal_server] network = connected' in output.getvalue(), noted)
+                self.assertEqual(f'Note: [terminal_server] network = {network}' in output.getvalue(), noted)
+                if network == 'host':
+                    self.assertIn('host.docker.internal', output.getvalue())
                 self.assertNotIn('Warning', output.getvalue())
 
     def test_compose_reads_the_project_env_file_only_when_enabled(self):

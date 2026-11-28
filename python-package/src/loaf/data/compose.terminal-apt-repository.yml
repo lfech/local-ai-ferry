@@ -1,0 +1,12 @@
+# The source that the launcher writes for [terminal_server] apt_repository_dir.
+services:
+  terminal-server:
+    labels:
+      loaf.terminal.runtime-apt-repository: ${LOAF_TERMINAL_APT_REPOSITORY_SOURCE_HASH:?}
+    volumes:
+      - type: bind
+        source: ${LOAF_TERMINAL_RUNTIME_DIR:?}/apt_repository_dir.list
+        target: /etc/apt/sources.list.d/apt_repository_dir.list
+        read_only: true
+        bind:
+          create_host_path: false

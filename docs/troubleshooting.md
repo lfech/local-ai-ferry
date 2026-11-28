@@ -159,7 +159,9 @@ terminal works in the Files tab but the model answers with instructions,
 check the model's Terminal capability, function calling mode and selected
 terminal, then follow the steps for small models. If one command shows as two
 **Ran command** entries, the first still running, the command ran longer
-than `[terminal_server] command_wait_seconds`; raise it up to 240.
+than `[terminal_server] command_wait_seconds`; raise it up to 240. The entry
+shows a command's output only when it ends; follow it live in the
+**Sessions** strip below the Files tab's file browser.
 
 If the Files tab shows dotfiles such as `.bashrc` but you are looking for a
 generated file, ask the model for its absolute path and open its directory
@@ -177,12 +179,11 @@ folder button next to the terminal selector below the chat input.
 ## Packages in the terminal
 
 Commands run as root, so `apt-get install` works in the chat's container.
-When `apt-get update` cannot reach any source, the container has no route to
-a mirror: with `[terminal_server] network = isolated`, set `apt_source_file`
-and `apt_repository_dir` for a repository on the Docker host. With
-`network = connected`, check that the Docker host reaches the mirror. Then run
-`loaf run offline` or `loaf run online`. Packages installed in a chat stay in its
-container only; a new chat starts without them.
+If `apt-get update` finds no package sources, check which sources the current
+terminal network mode enables. In `host` mode, check the mirror's listener
+address and port on the Docker host. [Terminal network modes](terminal-server.md#network-access) ·
+[Docker host mirror](terminal-server.md#docker-host-mirror) ·
+[Apply APT settings to chat containers](terminal-server.md#edit-an-apt-source-on-the-offline-host)
 
 A new chat container has no package lists, so `Unable to locate package`
 right after the chat starts means that `apt update` has not run yet.
@@ -204,10 +205,9 @@ under its working directory, which is the project directory when `loaf` runs
 Compose. The packaged images keep their Dockerfiles and default inputs inside
 their contexts.
 
-A terminal `apt_source_file` outside the project directory can still stop
-`loaf build` with `additional privileges requested`, or with a prompt for
-read access in a terminal. Move the file into the project, for example under
-`config/`, or update Docker Compose to 5.7.0 or newer.
+With `loaf build --with-apt-repos`, the configured `apt_repository_dir` is
+also a build context. If Buildx requests read access to that directory,
+check the path in `[terminal_server]`.
 
 [Package mirror](terminal-server.md#package-mirror-for-image-builds) ·
 [Compose build inputs](https://github.com/docker/compose/commit/43a5d5a253)

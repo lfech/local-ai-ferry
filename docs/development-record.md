@@ -7,6 +7,127 @@ Git milestones use commit timestamps. Working-tree milestones use the
 associated verification time where it was recorded.
 Earlier entries use the current names for commands, paths and artifacts.
 
+## 2026-11-28 18:18 CET — Reconcile the audit backlog
+
+The ToDo list and problems register now reflect the verified audit fixes.
+Items 1–3 and 5–10 are resolved or accepted. Item 4 remains open because
+Ministral still called a tool for three of 24 ordinary questions after the
+prompt change. The problem numbers carry over from the audit.
+[Problems](instructions/problems.md) ·
+[Verification](verification-record.md#2026-11-28-181819-0100--reconcile-the-audit-backlog)
+
+## 2026-11-28 18:09 CET — Terminal network, tool and APT audit fixes
+
+- **Model selection and tools (1, 5).** Added an opt-in Ministral 3B terminal
+  model list and documented the per-model Terminal switch in Open WebUI.
+  The provisioner publishes command execution and status, file display,
+  and shared interactive terminal input and output. The Files tab and
+  command streams still use their workspace APIs.
+- **GPU test directory (2).** The author repaired the checkout's artifact
+  directory ownership.
+- **Docker access (3).** A failed Compose operation checks daemon access
+  while keeping Compose output live. Daemon failures point to the Docker
+  access guide.
+- **Plain questions (4).** Added explicit guidance to answer general
+  questions directly. In the larger sample, Ministral used a tool for three
+  of 24 plain questions with the guidance and eight of 24 before it. It
+  called tools for all eight terminal requests in both cases.
+- **Network and APT sources (6, 7, 10).** The author chose `host` for mirrors
+  on the Docker host and retired the `connected` value. `isolated` accepts
+  mounted file repositories. `local` disables inherited Debian sources.
+  The launcher uses APT's parser to check UTF-8 source files without fetching
+  indexes. Enabled binary entries cover matching suites and components.
+- **Build trace and provisioner updates (8, 9).** Verbose traces omit the APT
+  secret values. The Compose service carries the provisioner digest, so a
+  new script triggers service recreation during `loaf run`.
+
+## 2026-11-28 17:10 CET — Deep verification of the working tree
+
+The author requested an independent audit, checks for coverage gaps and a
+focused comparison with related projects. The audit used a fresh copy of the
+working files and isolated Docker projects. It covered the launcher, Open
+Terminal, packaging, public model catalog, GPU workflows and cold handoff.
+
+The audit confirmed workspace preservation for the `connected` alias and
+found an upgrade gap for configurations that had relied on the old implicit
+network mode. It also exercised a signed APT repository offline, reproduced
+APT source selection and build trace issues, and checked two open problems
+from the previous audit against the current working tree. The findings and
+proposed resolutions are merged under the existing problem numbers.
+[Problems](instructions/problems.md) ·
+[Verification](verification-record.md#2026-11-28-171032-0100--deep-verification-of-the-working-tree)
+
+## 2026-11-28 17:01 CET — Terminal network modes and APT defaults
+
+The author approved `internet` as the default terminal network mode and
+`local` as a mode with the same outbound bridge and the image's default APT
+sources disabled. Explicit APT sources and mounted repositories still apply.
+`isolated` retains its internal-only bridge.
+
+`connected` is read as `internet` in existing settings, including restored
+ones. The launcher keeps the existing bridge and workspace revision for
+that rename. It starts the current provisioner from the project's runtime
+directory so loaded terminal images can use the new policy.
+
+## 2026-11-28 16:51 CET — Apply chat APT settings on restart
+
+`loaf restart` reads the project's current `[terminal_server]` settings and
+starts the provisioner with the runtime mounts. A full CLI regression changes
+both APT paths and checks the mounts and package index update in a fresh chat
+created after the restart.
+
+The launcher generates a local APT source when the custom source merely
+mentions the repository in a comment, a signing key path or a disabled entry.
+An active repository URI still takes precedence. Source validation uses the
+configured `.list` or `.sources` extension, which also names the mount when
+the configured path is a symlink.
+
+## 2026-11-28 16:14 CET — Smaller standalone executable
+
+The author asked for a smaller standalone executable with all its
+functionality, using tricks from the internet.
+
+- **Bytecode.** The build's own import checks ran without `-B` and wrote
+  536 bytecode files, about 9 MB, into the runtime before it was packed. The
+  checks now run with `-B`, the build removes every `__pycache__` before
+  packing, and the launcher starts Python without `-B`, so the unpacked
+  runtime writes the bytecode of the modules it imports into its cache on
+  first use. Later starts take as long as before; the first start after
+  unpacking takes about half a second longer.
+- **Symbol table.** Python Build Standalone's "stripped" interpreter keeps its
+  symbol table. The build strips it with `strip --strip-all` when binutils is
+  available; extension modules and `ctypes` use the dynamic symbols, which
+  stay. The import check now also covers `dbm.ndbm` and `ctypes`.
+- **Result.** The executable shrinks from 22.55 MB to 17.72 MB.
+- **Not taken.** xz would reach about 12.4 MB, but minimal Debian systems lack
+  `xz`, and loaf recognizes its executables by their gzip payload; `dpkg-deb`
+  could unpack xz there, but not on other systems. Zopfli, which keeps the
+  gzip format, would save about 0.6 MB at about a minute more for every
+  build, including the offline build that a checkout backup runs. A
+  UPX-packed interpreter is a pattern that malware scanners flag.
+  [releases.md](releases.md#executable-size) lists them with their sizes.
+
+## 2026-11-28 16:02 CET — Live command output in the Terminal pane
+
+The author asked for the stdout and stderr of a model's command to stream
+live into its **Ran command** entry in the chat, which now shows a spinner
+while the command runs and its output only at the end.
+
+- **Finding.** Open WebUI v0.13.4 builds the entry from the finished tool
+  result: its frontend reads the output from the result, and its backend
+  passes a terminal tool's result on only when the call has returned. Live
+  output in the entry would need a patch of Open WebUI, which loaf runs
+  unmodified and which another `[images] webui_image` would not carry.
+- **Decision.** The author chose Open WebUI's own place for it: every command
+  that the model starts gets a tab in the **Sessions** strip below the chat's
+  file browser, which follows its output as it arrives. The terminal server
+  already relays these streams to the chat's container.
+- **Guides and test.** `terminal-server.md` and the troubleshooting guide
+  say where to follow a running command. The live Open Terminal check
+  through Open WebUI now starts a command without a wait, as a model's call
+  does, and requires its stdout and stderr on the Terminal pane's command
+  stream before the call returns.
+
 ## 2026-11-28 15:30 CET — Audit of the fixes and core tasks
 
 The author asked for an independent audit after the implementation: to fill

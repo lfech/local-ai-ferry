@@ -198,13 +198,16 @@ Build the local Ollama and WebUI images and the terminal image when enabled.
 Uses `--config-dir PATH`, `--namespace NAME`, `--dry-run`, and `-a` or
 `--attach`.
 
+- `--with-apt-repos` applies the configured APT settings to the terminal
+  image build. [Package mirror](terminal-server.md#package-mirror-for-image-builds)
+
 [Image recipes](configuration.md#select-an-ollama-build-recipe)
 
 ### upgrade
 
 Pull updated upstream base images and rebuild the same local images as
-`build`. Restart the serving profile to use them. Uses `--config-dir PATH`,
-`--namespace NAME`, `--dry-run`, and `-a` or `--attach`.
+`build`. Restart the serving profile to use them. Takes the same options as
+[`build`](#build), including `--with-apt-repos`.
 
 ### download
 
@@ -223,8 +226,8 @@ saved model store, and the terminal server when enabled. Starting one profile
 stops the other, because both use the same volumes.
 
 - `offline` puts Ollama on an internal network and gives WebUI its offline
-  settings. With `[terminal_server] network = connected`, it notes that chat
-  containers that models drive can reach every address the Docker host reaches.
+  settings. It prints a note when chat containers have host or outbound access.
+  [Terminal network modes](terminal-server.md#network-access)
 - `online` gives Ollama and WebUI internet access.
 
 Uses `--config-dir PATH`, `--namespace NAME`, `--dry-run`,
@@ -257,6 +260,8 @@ says how a real run decides.
 
 Uses `--config-dir PATH`, `--namespace NAME`, `--dry-run`,
 `--wait-timeout SECONDS`, and `-a` or `--attach`.
+
+[Apply APT settings to chat containers](terminal-server.md#edit-an-apt-source-on-the-offline-host)
 
 - `--cpu` starts the profile with CPU inference, also when it serves on GPU now.
 

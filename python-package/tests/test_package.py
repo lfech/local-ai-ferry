@@ -2,6 +2,7 @@
 # Exercise the real virtualenv command in disposable project directories. Fixture
 # suites are tiny and separate from this suite, preventing recursive `loaf test`.
 
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
 import importlib.metadata
@@ -85,7 +86,7 @@ class PackageTests(unittest.TestCase):
 
     # --- Paths come from cwd or an explicit override, never the installation ---
     def test_every_workflow_defaults_to_current_directory(self):
-        with tempfile.TemporaryDirectory(prefix='loaf project with spaces ') as folder:
+        with tempfile.TemporaryDirectory(prefix='loaf project with spaces ') as folder, ThreadPoolExecutor(4) as workers:
             root = self.project(folder)
             # Backup previews need the standalone executable that the folder carries, like a real backup.
             result = self.invoke(folder, 'backup', '--dry-run')
@@ -93,9 +94,15 @@ class PackageTests(unittest.TestCase):
             self.assertIn(f'put that executable at {root.resolve() / "loaf"}'.encode(), result.stderr)
             (root / 'loaf').write_bytes(transfer.EXECUTABLE_HEADER + b"\n__LOAF_PAYLOAD__\n\x1f\x8bfixture")
             # Restore previews need a backup; without one they fail like a real restore.
-            for mode in (*cli.COMPOSE_COMMANDS, "backup"):
+            previews = {
+                mode: workers.submit(
+                    self.invoke, folder, mode, *(('offline',) if mode in ('run', 'restart') else ()), '--dry-run',
+                )
+                for mode in (*cli.COMPOSE_COMMANDS, "backup")
+            }
+            for mode, preview in previews.items():
                 with self.subTest(mode=mode):
-                    result = self.invoke(folder, mode, *(('offline',) if mode in ('run', 'restart') else ()), '--dry-run')
+                    result = preview.result()
                     self.assertEqual(result.returncode, 0, result.stderr)
                     output = result.stdout.decode('utf-8')
                     self.assertIn(str(root.resolve()), output)

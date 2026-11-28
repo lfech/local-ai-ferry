@@ -27,6 +27,7 @@ You are an independent auditor. Forget all you know about this repository and cl
 ## ToDo List
 
 ### Problem fix decisions
+1. Is deferred until further notice. Small models do not do this reliably anyways.
 
 ### Core functionality
 

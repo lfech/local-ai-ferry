@@ -1,5 +1,6 @@
 """Build the Debian package and install it in clean Debian 12 and 13 containers."""
 
+from concurrent.futures import ThreadPoolExecutor
 import os
 import shutil
 import subprocess
@@ -46,12 +47,16 @@ class DebianPackageTests(unittest.TestCase):
         self.assertEqual(conffiles, "/etc/loaf/config.ini\n")
 
     def test_package_installs_runs_and_purges_on_debian_12_and_13(self):
-        for image in ("debian:12-slim", "debian:13-slim"):
-            with self.subTest(image=image):
-                output = command([
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            installs = {
+                image: workers.submit(command, [
                     "docker", "run", "--rm", "--pull", "missing",
                     "--mount", f"type=bind,source={self.output},target=/deb,readonly",
                     "--mount", f"type=bind,source={TESTS_DIR / 'debian_package_checks.sh'},target=/checks.sh,readonly",
                     image, "sh", "/checks.sh",
                 ], timeout=900)
-                self.assertIn("Debian package checks passed", output)
+                for image in ("debian:12-slim", "debian:13-slim")
+            }
+            for image, install in installs.items():
+                with self.subTest(image=image):
+                    self.assertIn("Debian package checks passed", install.result())
