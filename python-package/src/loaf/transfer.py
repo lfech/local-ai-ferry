@@ -20,13 +20,14 @@ import sys
 import tarfile
 from tempfile import NamedTemporaryFile, TemporaryDirectory, TemporaryFile
 from typing import Callable, Iterable
+import zlib
 
 from . import assets, config, locks
 from .progress import Progress, TrackedStream
 from .setup import (
     INSTALL_CACHE, PYTHON_PACKAGE_DIR, PYTHON_RUNTIME_DIR, PYTHON_WHEEL_DIR, SYSTEM_GROUP, TEST_WHEEL_RECORD,
-    TOOLKIT_DIR, WHEEL_CACHE_RECORD, docker_installer_files, file_digest, prepare_python_wheels, protect_terminal_key,
-    toolkit_files,
+    TOOLKIT_DIR, TOOLKIT_PACKAGES, WHEEL_CACHE_RECORD, SetupError, docker_installer_files, file_digest,
+    prepare_python_wheels, protect_terminal_key, toolkit_files,
 )
 
 
@@ -35,9 +36,13 @@ ARCHIVE_VERSION = config.ARCHIVE_VERSION
 MANIFEST = "loaf.json"
 MANIFEST_LIMIT = 1024 * 1024
 BUNDLE_NAME = "local-ai-ferry"
+# Backup folders before 0.5.0 also held a SHA256SUMS file. loaf.json records every hash now; a release download
+# folder keeps its own SHA256SUMS for the release files.
 CHECKSUMS = "SHA256SUMS"
 LAUNCHER = "loaf"
 EXECUTABLE_HEADER = b"#!/bin/bash\n# loaf standalone backup launcher v1\n"
+# The gzip-compressed runtime payload follows this marker.
+PAYLOAD_MARKER = b"\n__LOAF_PAYLOAD__\n\x1f\x8b"
 # Archive types in backup and restore order. Each type has one destination.
 TYPES = ("source", "config", "installers", "images", "models", "webui", "terminal")
 ALIASES = {"project": ("config", "installers"), "volumes": ("models", "webui", "terminal")}
@@ -211,9 +216,38 @@ def latest_backup(directory: Path, *, namespace: str = config.DEPLOYMENT) -> Pat
     return max(backups)[2] if backups else None
 
 
+def begins_with_manifest(path: Path) -> bool:
+    """Whether a file is a gzip-compressed tar whose first member is loaf.json.
+
+    Only the first tar header is decompressed, so a damaged or truncated rest still counts.
+    """
+    if path.is_symlink() or not path.is_file():
+        return False
+    decompressor = zlib.decompressobj(wbits=31)
+    header = b""
+    try:
+        with path.open("rb") as raw:
+            while len(header) < tarfile.BLOCKSIZE:
+                chunk = decompressor.unconsumed_tail or raw.read(16384)
+                if not chunk:
+                    return False
+                header += decompressor.decompress(chunk, tarfile.BLOCKSIZE - len(header))
+        member = tarfile.TarInfo.frombuf(header, tarfile.ENCODING, "surrogateescape")
+    except (OSError, zlib.error, tarfile.TarError):
+        return False
+    return member.name == MANIFEST and member.isfile()
+
+
+def bundle_archive(directory: Path) -> Path | None:
+    """The one loaf archive of a backup folder: a launcher and a .tar.gz that begins with loaf.json."""
+    if not directory.is_dir() or (directory / LAUNCHER).is_symlink() or not (directory / LAUNCHER).is_file():
+        return None
+    archives = [path for path in sorted(directory.glob("*.tar.gz")) if begins_with_manifest(path)]
+    return archives[0] if len(archives) == 1 else None
+
+
 def is_bundle(directory: Path) -> bool:
-    return (directory.is_dir() and (directory / CHECKSUMS).is_file() and not (directory / CHECKSUMS).is_symlink()
-            and (directory / LAUNCHER).is_file())
+    return bundle_archive(directory) is not None
 
 
 def find_bundle(directory: Path, selection: Path | None) -> Path | None:
@@ -232,14 +266,18 @@ def find_bundle(directory: Path, selection: Path | None) -> Path | None:
 
 def adopt_bundle(folder: Path) -> Path:
     """Make a backup folder a project: move the backup to backup/<name>/ and keep a launcher copy at the root."""
-    sums = read_checksums(folder)
-    archive = next(name for name in sums if name != LAUNCHER)
+    found = bundle_archive(folder)
+    if found is None:
+        raise TransferError(f"{folder} is not a backup folder with {LAUNCHER} and one loaf archive.")
+    archive = found.name
     # The archive keeps the folder's original name, which later restores find in the default backup directory.
     target = folder / "backup" / archive.removesuffix(".tar.gz")
     if target.exists() or target.is_symlink():
         raise TransferError(f"Cannot move the backup to {target}, which already exists.")
     target.parent.mkdir(exist_ok=True)
     launcher = folder / LAUNCHER
+    # A backup folder from before 0.5.0 also holds SHA256SUMS, which moves with it.
+    names = (archive, LAUNCHER, *((CHECKSUMS,) if (folder / CHECKSUMS).is_file() else ()))
     with ExitStack() as rollback:
         target.mkdir()
         rollback.callback(target.rmdir)
@@ -247,8 +285,8 @@ def adopt_bundle(folder: Path) -> Path:
         rollback.callback(copy.unlink, missing_ok=True)
         shutil.copyfile(launcher, copy)
         copy.chmod(file_modes(folder)[1])
-        # The moved backup stays complete: its checksums list the original launcher and archive.
-        for name in (archive, LAUNCHER, CHECKSUMS):
+        # The moved backup stays complete: loaf.json records the original launcher's hash.
+        for name in names:
             (folder / name).rename(target / name)
             rollback.callback((target / name).rename, folder / name)
         copy.rename(launcher)
@@ -260,17 +298,21 @@ def standalone_executable(path: Path) -> bool:
     if not path.is_file():
         return False
     with path.open("rb") as executable:
-        header = executable.read(4096)
-    return header.startswith(EXECUTABLE_HEADER) and b"\n__LOAF_PAYLOAD__\n\x1f\x8b" in header
+        header = executable.read(8192)
+    return header.startswith(EXECUTABLE_HEADER) and PAYLOAD_MARKER in header
 
 
 def release_executable(project: Path) -> Path:
+    """The standalone executable a backup folder carries: the running one, the installed one, then the project's."""
     configured = os.environ.get("LOAF_RELEASE_EXECUTABLE")
-    candidates = [Path(configured)] if configured else [project / "loaf", project / "dist/loaf"]
+    candidates = [Path(configured)] if configured else [assets.STANDALONE_EXECUTABLE, project / "loaf",
+                                                        project / "dist/loaf"]
     for candidate in candidates:
         if standalone_executable(candidate):
             return candidate
-    raise TransferError("Standalone release executable missing. Run backup with the release loaf or put it at dist/loaf.")
+    raise TransferError(
+        f"A backup carries the standalone loaf executable, but this loaf has none. Run backup with the release "
+        f"executable, or put that executable at {project / 'loaf'}.")
 
 
 def file_modes(directory: Path) -> tuple[int, int]:
@@ -282,12 +324,15 @@ def file_modes(directory: Path) -> tuple[int, int]:
 
 @dataclass(frozen=True)
 class Archive:
-    """An archive and, for a backup folder, its launcher and recorded checksum."""
+    """An archive and, for a backup folder, its launcher.
+
+    launcher_matches is whether the launcher has the hash that loaf.json records, None without either.
+    """
 
     path: Path
     manifest: dict
     executable: Path | None = None
-    digest: str | None = None
+    launcher_matches: bool | None = None
 
     @property
     def namespace_name(self) -> str:
@@ -351,6 +396,12 @@ def validate_manifest(data, minimum: int, name: str) -> dict:
         raise invalid("terminal without the WebUI data that owns its accounts.")
     if data.get("skip_terminal_server", True) is not True or ("skip_terminal_server" in data and "terminal" in kinds):
         raise invalid("unexpected skip_terminal_server.")
+    # Backups since 0.5.0 record the launcher that the folder carries.
+    launcher = data.get("launcher")
+    if launcher is not None and not (
+            isinstance(launcher, dict) and type(launcher.get("size")) is int and launcher["size"] > 0
+            and isinstance(launcher.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", launcher["sha256"])):
+        raise invalid("unexpected launcher record.")
     return data
 
 
@@ -358,14 +409,17 @@ def read_manifest(path: Path, minimum: int) -> dict:
     """Read only the first member, which lists the archive's types before any payload."""
     if path.is_symlink() or not path.is_file():
         raise TransferError(f"Backup archive not found: {path}. Use --backup-dir or --archive to locate it.")
-    with gzip.open(path, "rb") as compressed, tarfile.open(fileobj=compressed, mode="r|") as archive:
-        member = archive.next()
-        if member is None or member.name != MANIFEST or not member.isfile() or member.size > MANIFEST_LIMIT:
-            raise TransferError(
-                f"{path.name} does not begin with {MANIFEST}. Archives from loaf releases before format "
-                f"{ARCHIVE_VERSION} need the loaf release that created them; their backup folder contains it.")
-        with archive.extractfile(member) as payload:
-            data = payload.read()
+    try:
+        with gzip.open(path, "rb") as compressed, tarfile.open(fileobj=compressed, mode="r|") as archive:
+            member = archive.next()
+            if member is None or member.name != MANIFEST or not member.isfile() or member.size > MANIFEST_LIMIT:
+                raise TransferError(
+                    f"{path.name} does not begin with {MANIFEST}. Archives from loaf releases before format "
+                    f"{ARCHIVE_VERSION} need the loaf release that created them; their backup folder contains it.")
+            with archive.extractfile(member) as payload:
+                data = payload.read()
+    except (EOFError, zlib.error, gzip.BadGzipFile, tarfile.TarError) as exc:
+        raise TransferError(f"{path.name} is truncated or damaged: {exc}") from exc
     try:
         manifest = json.loads(data)
     except ValueError as exc:
@@ -373,33 +427,32 @@ def read_manifest(path: Path, minimum: int) -> dict:
     return validate_manifest(manifest, minimum, path.name)
 
 
-def read_checksums(directory: Path) -> dict[str, str]:
-    sums = {}
-    for line in (directory / CHECKSUMS).read_text(encoding="utf-8").splitlines():
-        match = re.fullmatch(r"([0-9a-f]{64})  ([^/\s]+)", line)
-        if not match or match[2] in sums:
-            raise TransferError(f"Invalid {CHECKSUMS} in {directory}.")
-        sums[match[2]] = match[1]
-    archives = [name for name in sums if name != LAUNCHER]
-    if LAUNCHER not in sums or len(archives) != 1 or not archives[0].endswith(".tar.gz"):
-        raise TransferError(f"{CHECKSUMS} in {directory} must list the launcher and one archive.")
-    return sums
+def launcher_record(executable: Path) -> dict:
+    return {"size": executable.stat().st_size, "sha256": file_digest(executable)}
 
 
 def open_archive(selection: Path, *, minimum: int = ARCHIVE_VERSION, verify_launcher: bool = True) -> Archive:
-    """Open a backup folder or an archive file and read its manifest."""
+    """Open a backup folder or an archive file and read its manifest.
+
+    loaf.json holds the hash of every member, which restore and verify check. A launcher that differs from the
+    one loaf.json records only gets a warning: the running loaf restores the archive.
+    """
     if not selection.is_dir():
         return Archive(selection, read_manifest(selection, minimum))
-    if not is_bundle(selection):
-        raise TransferError(f"{selection} is not a backup folder with {LAUNCHER} and {CHECKSUMS}.")
-    sums = read_checksums(selection)
-    name = next(name for name in sums if name != LAUNCHER)
+    archive = bundle_archive(selection)
+    if archive is None:
+        raise TransferError(f"{selection} is not a backup folder with {LAUNCHER} and one loaf archive (*.tar.gz).")
+    manifest = read_manifest(archive, minimum)
     executable = selection / LAUNCHER
-    if executable.is_symlink() or not standalone_executable(executable):
+    if not standalone_executable(executable):
         raise TransferError(f"Standalone backup launcher missing or invalid: {executable}")
-    if verify_launcher and file_digest(executable) != sums[LAUNCHER]:
-        raise TransferError(f"SHA-256 verification failed for {executable}.")
-    return Archive(selection / name, read_manifest(selection / name, minimum), executable, sums[name])
+    matches = None
+    if verify_launcher and manifest.get("launcher") is not None:
+        matches = launcher_record(executable) == manifest["launcher"]
+        if not matches:
+            print(f"Warning: {executable} differs from the launcher that {MANIFEST} records. The archive's members "
+                  "are still checked against their recorded hashes.", file=sys.stderr, flush=True)
+    return Archive(archive, manifest, executable, matches)
 
 
 class HashingReader:
@@ -457,55 +510,53 @@ def unpack(archive: Archive, staging: Path | None, select: set[str]) -> dict:
     expected = {member["path"]: member for item in archive.manifest["items"] for member in item["members"]}
     seen = set()
     results = {}
-    with archive.path.open("rb") as raw:
-        whole = HashingReader(raw)
-        with gzip.GzipFile(fileobj=whole, mode="rb") as compressed:
-            with tarfile.open(fileobj=compressed, mode="r|") as members:
-                first = members.next()
-                with members.extractfile(first) as payload:
-                    if json.loads(payload.read()) != archive.manifest:
-                        raise TransferError(f"{archive.path.name} changed while it was read.")
-                # Iterating the archive would yield the manifest again.
-                while (member := members.next()) is not None:
-                    if not member.isfile() or member.name not in expected or member.name in seen:
-                        raise TransferError(f"Unexpected member in {archive.path.name}: {member.name!r}")
-                    if member.size != expected[member.name]["size"]:
-                        raise TransferError(f"Size mismatch for {member.name} in {archive.path.name}.")
-                    stage = member.name in select
-                    if stage:
-                        (staging / member.name).parent.mkdir(parents=True, exist_ok=True)
-                    target = (staging / member.name).open("xb") if stage else nullcontext()
-                    with (
-                        target as output,
-                        Progress(f"{'Unpack' if stage else 'Check'} {member.name}", member.size) as progress,
-                        members.extractfile(member) as payload,
-                    ):
-                        reader = HashingReader(payload, progress, output)
-                        try:
-                            if (result := check_member(member.name, reader)) is not None:
-                                results[member.name] = result
-                        except TransferError as problem:
-                            # A changed member reports the hash mismatch rather than what it broke.
+    try:
+        with archive.path.open("rb") as raw:
+            with gzip.GzipFile(fileobj=raw, mode="rb") as compressed:
+                with tarfile.open(fileobj=compressed, mode="r|") as members:
+                    first = members.next()
+                    with members.extractfile(first) as payload:
+                        if json.loads(payload.read()) != archive.manifest:
+                            raise TransferError(f"{archive.path.name} changed while it was read.")
+                    # Iterating the archive would yield the manifest again.
+                    while (member := members.next()) is not None:
+                        if not member.isfile() or member.name not in expected or member.name in seen:
+                            raise TransferError(f"Unexpected member in {archive.path.name}: {member.name!r}")
+                        if member.size != expected[member.name]["size"]:
+                            raise TransferError(f"Size mismatch for {member.name} in {archive.path.name}.")
+                        stage = member.name in select
+                        if stage:
+                            (staging / member.name).parent.mkdir(parents=True, exist_ok=True)
+                        target = (staging / member.name).open("xb") if stage else nullcontext()
+                        with (
+                            target as output,
+                            Progress(f"{'Unpack' if stage else 'Check'} {member.name}", member.size) as progress,
+                            members.extractfile(member) as payload,
+                        ):
+                            reader = HashingReader(payload, progress, output)
+                            try:
+                                if (result := check_member(member.name, reader)) is not None:
+                                    results[member.name] = result
+                            except TransferError as problem:
+                                # A changed member reports the hash mismatch rather than what it broke.
+                                while reader.read(COPY_BUFFER):
+                                    pass
+                                if reader.digest.hexdigest() != expected[member.name]["sha256"]:
+                                    raise TransferError(f"SHA-256 verification failed for {member.name}.") from problem
+                                raise
+                            # The content check can end before the member does, for example at tar padding.
                             while reader.read(COPY_BUFFER):
                                 pass
-                            if reader.digest.hexdigest() != expected[member.name]["sha256"]:
-                                raise TransferError(f"SHA-256 verification failed for {member.name}.") from problem
-                            raise
-                        # The content check can end before the member does, for example at tar padding.
-                        while reader.read(COPY_BUFFER):
-                            pass
-                    if reader.digest.hexdigest() != expected[member.name]["sha256"]:
-                        raise TransferError(f"SHA-256 verification failed for {member.name}.")
-                    seen.add(member.name)
-            # Read to EOF so gzip checks its checksum before Docker state can change.
-            while compressed.read(COPY_BUFFER):
-                pass
-        while whole.read(COPY_BUFFER):
-            pass
+                        if reader.digest.hexdigest() != expected[member.name]["sha256"]:
+                            raise TransferError(f"SHA-256 verification failed for {member.name}.")
+                        seen.add(member.name)
+                # Read to EOF so gzip checks its checksum before Docker state can change.
+                while compressed.read(COPY_BUFFER):
+                    pass
+    except (EOFError, zlib.error, gzip.BadGzipFile, tarfile.TarError) as exc:
+        raise TransferError(f"{archive.path.name} is truncated or damaged: {exc}") from exc
     if seen != set(expected):
         raise TransferError(f"{archive.path.name} is missing {', '.join(sorted(set(expected) - seen))}.")
-    if archive.digest is not None and whole.digest.hexdigest() != archive.digest:
-        raise TransferError(f"SHA-256 verification failed for {archive.path.name}.")
     return results
 
 
@@ -670,10 +721,34 @@ def archive_config(config_dir: Path, destination: Path, *, exclude_file: Path | 
               ((path, (Path("config") / path.relative_to(config_dir)).as_posix()) for path in files))
 
 
+def toolkit_warning(project: Path, problem: str | None) -> str:
+    """Explain how each installation type caches the NVIDIA Container Toolkit packages that GPU inference needs."""
+    packages = " ".join(TOOLKIT_PACKAGES)
+    cache = project / TOOLKIT_DIR
+    return "\n".join([
+        "Warning: The installers type holds no NVIDIA Container Toolkit packages"
+        + (f": {problem}" if problem else "."),
+        "The destination needs the toolkit for GPU inference; CPU inference works without it. To include its",
+        "packages in the backup, cache them while connected and back up again:",
+        "  Source checkout:        loaf setup",
+        "  Standalone executable:  loaf setup --with-docker-deps",
+        f"  Debian package:         sudo mkdir -p {cache} && cd {cache} && sudo apt-get download {packages}",
+        "Or install the toolkit on the destination from NVIDIA's repository.",
+    ])
+
+
 def archive_installers(project: Path, destination: Path, *, exclude_file: Path | None) -> None:
-    """Archive the cached installers: Python wheels, NVIDIA and Docker Debian packages."""
+    """Archive the cached installers: Python wheels, NVIDIA and Docker Debian packages.
+
+    Missing NVIDIA toolkit packages only cause a warning: the backup still serves CPU inference.
+    """
     paths = set()
-    packages = toolkit_files(project)
+    try:
+        packages, problem = toolkit_files(project), None
+    except SetupError as exc:
+        packages, problem = [], str(exc)
+    if not packages:
+        print(toolkit_warning(project, problem), file=sys.stderr, flush=True)
     wheels = project / PYTHON_WHEEL_DIR
     if (project / PYTHON_PACKAGE_DIR / "pyproject.toml").is_file():
         prepare_python_wheels(project)
@@ -919,7 +994,7 @@ def require_empty_volume(project: Path, namespace: str, name: str) -> dict | Non
     if entry.strip():
         raise TransferError(
             f"Restore needs a new or empty {name} volume, but it holds data. Save it with loaf backup if you need "
-            f"it, remove it with 'docker volume rm {name}', or restore into another namespace with --namespace.")
+            f"it, then remove it with 'docker volume rm {name}'.")
     return volume
 
 
@@ -1140,40 +1215,51 @@ def validate_volume_payload(source, volumes: set[str], label: str | None = None)
         raise TransferError(f"{label} is missing data for {', '.join(sorted(missing))}.")
 
 
-MODEL_TRANSFER_SETUP = """\
+# Stream the store without copying it first: tar reads the manifests and saved Modelfiles before the immutable,
+# content-addressed blobs they name. A blob removed while tar runs fails the backup instead of a later restore.
+SNAPSHOT_MODELS = """\
+set -eu
+cd /ollama
+if [ ! -d models ]; then
+    mkdir -p /tmp/empty/models
+    exec tar -cf - -C /tmp/empty models
+fi
+{
+    find models -path models/blobs -prune -o -print0
+    if [ -d config ]; then find config ! -name '*.model.tmp.*' -print0; fi
+    if [ -d models/blobs ]; then find models/blobs ! -name '*-partial*' -print0; fi
+} | tar -cf - --no-recursion --null -T -
+"""
+
+# Unpack into a scratch directory in the volume itself, so that new blobs move into place by rename instead of a
+# second copy. Existing blobs are content-addressed and stay. --delete-delay mirrors the archive.
+IMPORT_MODELS = """\
 set -eu
 command -v rsync >/dev/null || { echo 'Run loaf build to add rsync to the transfer image.' >&2; exit 1; }
-"""
-
-SNAPSHOT_MODELS = MODEL_TRANSFER_SETUP + """\
-mkdir /staging/models
-# Capture the manifest set before copying the immutable blobs it refers to.
-rsync -a --exclude=/blobs/ -- /ollama/models/ /staging/models/
-if [ -d /ollama/config ]; then
-    rsync -a --exclude='*.model.tmp.*' -- /ollama/config /staging/
-fi
-if [ -d /ollama/models/blobs ]; then
-    rsync -a --exclude='*-partial*' -- /ollama/models/blobs /staging/models/
-fi
-cd /staging
-set -- models
-if [ -d config ]; then set -- "$@" config; fi
-tar -cf - "$@"
-"""
-
-IMPORT_MODELS = MODEL_TRANSFER_SETUP + """\
-tar -xpf - -C /staging
-mkdir -p /staging/models/blobs /staging/config /ollama/models/blobs /ollama/config
+mkdir -p /ollama/models/blobs /ollama/config
 scratch=$(mktemp -d /ollama/.loaf-transfer.XXXXXX)
 trap 'rm -rf -- "$scratch"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-rsync -a --ignore-existing --temp-dir="$scratch" --exclude='*-partial*' -- /staging/models/blobs/ /ollama/models/blobs/
-rsync -a --checksum "$@" --temp-dir="$scratch" -- /staging/config/ /ollama/config/
+tar -xpf - -C "$scratch"
+mkdir -p "$scratch/models/blobs" "$scratch/config"
+find "$scratch/models/blobs" -maxdepth 1 -type f ! -name '*-partial*' -exec basename -a -- {} + > "$scratch/blobs.list"
+find "$scratch/models/blobs" -maxdepth 1 -type f ! -name '*-partial*' -exec sh -c '
+    for blob do
+        target=/ollama/models/blobs/${blob##*/}
+        [ -e "$target" ] || mv -- "$blob" "$target"
+    done' loaf-move-blobs {} +
+rsync -a --checksum "$@" --temp-dir="$scratch" -- "$scratch/config/" /ollama/config/
 # Publish complete manifests before deleting any blobs that old manifests use.
-rsync -a --checksum "$@" --temp-dir="$scratch" --exclude=/blobs/ -- /staging/models/ /ollama/models/
+rsync -a --checksum "$@" --temp-dir="$scratch" --exclude=/blobs/ -- "$scratch/models/" /ollama/models/
 if [ "$#" -gt 0 ]; then
-    rsync -a --ignore-existing "$@" --delete-excluded --temp-dir="$scratch" --exclude='*-partial*' -- /staging/models/blobs/ /ollama/models/blobs/
+    # Mirror the blobs as well, including interrupted downloads.
+    find /ollama/models/blobs -maxdepth 1 -type f -exec sh -c '
+        list=$1
+        shift
+        for blob do
+            grep -qxF -- "${blob##*/}" "$list" || rm -f -- "$blob"
+        done' loaf-delete-blobs "$scratch/blobs.list" {} +
 fi
 """
 
@@ -1280,9 +1366,9 @@ def model_volume_command(project: Path, namespace: str, *, restore: bool = False
         command += ["-i"]
     else:
         mount += ",readonly"
+        command += ["--tmpfs", "/tmp"]
     command += [
-        "--mount", mount, "--mount", "type=volume,target=/staging",
-        "--entrypoint", "/bin/sh", image_names(namespace)[0], "-c",
+        "--mount", mount, "--entrypoint", "/bin/sh", image_names(namespace)[0], "-c",
         IMPORT_MODELS if restore else SNAPSHOT_MODELS,
     ]
     if delete:
@@ -1348,7 +1434,9 @@ def matching_terminal_key(path: Path, key: bytes) -> bool:
         return False
     existing = config.read_terminal_secret(path)
     if existing.rstrip(b"\r\n") != key.rstrip(b"\r\n"):
-        raise TransferError(f"Terminal server key at {path} differs from the backup.")
+        raise TransferError(
+            f"Terminal server key at {path} differs from the backup's key, which its Open WebUI data uses. Remove "
+            f"{path} if no deployment uses it yet, or restore without the terminal and webui types.")
     return True
 
 
@@ -1423,6 +1511,7 @@ def backup(
     terminal_key: Path | None = None,
     skip_terminal_server: bool = False,
     config_dir: Path | None = None,
+    launcher: dict | None = None,
 ) -> None:
     """Write one archive: loaf.json first, then the members of each selected type.
 
@@ -1496,7 +1585,8 @@ def backup(
         manifest = {
             "format": ARCHIVE_FORMAT, "version": ARCHIVE_VERSION, "created": datetime.now().astimezone().isoformat(),
             "loaf": assets.release_version(), "deployment": namespace_name,
-            **({"skip_terminal_server": True} if skip_terminal_server else {}), "items": items,
+            **({"skip_terminal_server": True} if skip_terminal_server else {}),
+            **({"launcher": launcher} if launcher is not None else {}), "items": items,
         }
         # Publish only after all payloads are complete, preserving any old backup
         # if a command fails or the operation is interrupted.
@@ -1508,7 +1598,7 @@ def backup(
 
 def backup_bundle(project: Path, destination: Path, prepare_services: Callable[[], None], *,
                   namespace_name: str, executable: Path | None = None, **options) -> None:
-    """Publish a backup folder with the archive, the launcher that can restore it and their checksums."""
+    """Publish a backup folder with the archive and the launcher that can restore it. loaf.json records both hashes."""
     if destination.is_relative_to(project / ".git"):
         raise TransferError("Choose a backup directory outside .git.")
     if executable is None:
@@ -1516,7 +1606,7 @@ def backup_bundle(project: Path, destination: Path, prepare_services: Callable[[
     elif not standalone_executable(executable):
         raise TransferError(f"The build did not produce a standalone executable at {executable}.")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    private, runnable = file_modes(destination.parent)
+    runnable = file_modes(destination.parent)[1]
     with TemporaryDirectory(prefix=".loaf-backup-", dir=destination.parent) as folder:
         bundle = Path(folder) / destination.name
         bundle.mkdir()
@@ -1526,10 +1616,7 @@ def backup_bundle(project: Path, destination: Path, prepare_services: Callable[[
         copy.chmod(runnable)
         archive = bundle / f"{destination.name}.tar.gz"
         backup(project, archive, prepare_services, namespace=config.namespace(namespace_name),
-               namespace_name=namespace_name, **options)
-        sums = bundle / CHECKSUMS
-        sums.write_text(f"{file_digest(copy)}  {LAUNCHER}\n{file_digest(archive)}  {archive.name}\n", encoding="utf-8")
-        sums.chmod(private)
+               namespace_name=namespace_name, launcher=launcher_record(copy), **options)
         bundle.rename(destination)
 
 
@@ -1552,6 +1639,10 @@ def verify_backup(archive: Archive, namespace: str) -> None:
     checked = unpack(archive, None, set())
     platforms = check_image_tags(checked["images.tar"], namespace) if "images.tar" in checked else {}
     print(f"Verified SHA-256 hashes and contents of all members of {archive.path}")
+    if archive.launcher_matches:
+        print(f"The launcher {archive.executable} matches the hash that {MANIFEST} records.")
+    elif archive.executable is not None and archive.launcher_matches is None:
+        print(f"{MANIFEST} records no launcher hash: the backup is from a loaf release before 0.5.0.")
     for line in describe(archive):
         print(line)
     for image, supported in sorted(platforms.items()):
@@ -1579,12 +1670,21 @@ def setup_from_archive(archive: Archive, project: Path, *, installers: bool) -> 
 
 
 def requested_types(archive: Archive, types) -> tuple[str, ...]:
-    """The types a restore applies: the named ones, which the archive must contain, or all of its types."""
+    """The types a restore applies: all of the archive's types, or the selected ones.
+
+    An alias selects the types of its group that the archive contains. A named type must be in the archive.
+    """
     items = archive.items
-    requested = expand_types(types) if types else tuple(kind for kind in TYPES if kind in items)
+    if not types:
+        return tuple(kind for kind in TYPES if kind in items)
+    named = [name for name in types if name not in ALIASES]
+    grouped = {kind for name in types if name in ALIASES for kind in ALIASES[name] if kind in items}
+    requested = expand_types([*named, *grouped])
     missing = [kind for kind in requested if kind not in items]
     if missing:
         raise TransferError(f"{archive.path.name} does not contain {', '.join(missing)}.")
+    if not requested:
+        raise TransferError(f"{archive.path.name} contains none of {', '.join(types)}.")
     return requested
 
 
@@ -1603,13 +1703,32 @@ def restore(project: Path, archive: Archive, types: tuple[str, ...] | None = Non
     settings = settings or config.Settings()
     config_dir = configuration[1] if configuration else project / "config"
     project.mkdir(parents=True, exist_ok=True)
+
+    # Docker checks that need only loaf.json run before the archive is read, which can take long.
+    if {"models", "webui", "terminal"} & set(requested) and "images" not in requested:
+        require_helper_image(project, namespace)
+    webui = next(name for name, role in volume_names(namespace).items() if role == "webui")
+    if "webui" in requested:
+        require_empty_volume(project, namespace, webui)
+    users = terminal_volume(namespace)
+    restores_users = "terminal" in requested and TERMINAL_VOLUME in {
+        member["path"] for member in items["terminal"]["members"]}
+    existing_users = require_empty_volume(project, namespace, users) if restores_users else None
+    drop_connection = archive.skip_terminal_server and "webui" in requested
+    webui_image = image_names(namespace)[2]
+    if drop_connection and "images" not in requested and not local_image(project, webui_image):
+        raise TransferError(f"This backup leaves out the terminal server, so restore removes loaf's saved terminal "
+                            f"connection from the WebUI data with the local image {webui_image}, which is missing. "
+                            "Restore the images too.")
+    model_command = model_volume_command(project, namespace, restore=True, delete=delete) if "models" in requested else None
+
     # Stage files in the project so the archive can stay on read-only media.
     with TemporaryDirectory(prefix=".loaf-restore-", dir=project) as folder:
         staging = Path(folder)
         print(f"Checking and unpacking {archive.path}…", file=sys.stderr, flush=True)
         checked = unpack(archive, staging, {member["path"] for kind in requested for member in items[kind]["members"]})
 
-        # Check everything before the first change. unpack checked each member's content.
+        # The content checks also run before the first change. unpack checked each member.
         if "images" in requested:
             check_image_tags(checked["images.tar"], namespace)
         terminal = read_terminal(items["terminal"], staging) if "terminal" in requested else None
@@ -1637,25 +1756,11 @@ def restore(project: Path, archive: Archive, types: tuple[str, ...] | None = Non
             raise TransferError("The backup uses the terminal key path for a configuration file.")
         if terminal is not None:
             matching_terminal_key(terminal_key, terminal.key)
-        if {"models", "webui", "terminal"} & set(requested) and "images" not in requested:
-            require_helper_image(project, namespace)
-        webui = next(name for name, role in volume_names(namespace).items() if role == "webui")
-        if "webui" in requested:
-            require_empty_volume(project, namespace, webui)
-        users = terminal_volume(namespace)
+        # The restored settings decide the user volume's storage.
         users_options = json.loads(settings.terminal_server_volume_options)
-        if terminal is not None and terminal.users:
-            existing = require_empty_volume(project, namespace, users)
-            if existing is not None:
-                check_volume_settings(existing, terminal_volume_labels(namespace), settings.terminal_server_volume_driver,
-                                      users_options)
-        drop_connection = archive.skip_terminal_server and "webui" in requested
-        webui_image = image_names(namespace)[2]
-        if drop_connection and "images" not in requested and not local_image(project, webui_image):
-            raise TransferError(f"This backup leaves out the terminal server, so restore removes loaf's saved terminal "
-                                f"connection from the WebUI data with the local image {webui_image}, which is missing. "
-                                "Restore the images too.")
-        model_command = model_volume_command(project, namespace, restore=True, delete=delete) if "models" in requested else None
+        if existing_users is not None:
+            check_volume_settings(existing_users, terminal_volume_labels(namespace),
+                                  settings.terminal_server_volume_driver, users_options)
 
         publish_checkout(checkout_entries, staging / "replaced")
         publish_project_files(config_targets, config_dir.stat().st_gid if system else None)

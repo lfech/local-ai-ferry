@@ -2,10 +2,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-mode=${1:?Use scripts/build-release.sh TAG [OUTPUT_DIRECTORY] or --binary-only}
+# TAG builds the release assets from the tagged commit. --binary-only and --debian-only build the standalone
+# executable or the Debian package from the current working files.
+mode=${1:?Use scripts/build-release.sh TAG [OUTPUT_DIRECTORY], --binary-only or --debian-only}
 output=${2:-dist}
 host_python=${LOAF_BUILD_PYTHON:-python3}
-if [[ $mode != --binary-only ]]; then
+if [[ $mode != --binary-only && $mode != --debian-only ]]; then
     tag=$mode
     "$host_python" - "$tag" <(git show HEAD:python-package/pyproject.toml) <<'PY'
 from pathlib import Path
@@ -45,7 +47,7 @@ run_logged() {
 bundle="$stage/bundle"
 dist="$stage/dist"
 mkdir -p "$bundle/wheels" "$bundle/python-licenses" "$dist"
-if [[ $mode == --binary-only ]]; then
+if [[ $mode == --binary-only || $mode == --debian-only ]]; then
     source="$stage/source"
     mkdir -p "$source/python-package" "$source/scripts"
     # Follow the package's links to README.md and docs/ so that the wheel holds the guides.
@@ -152,6 +154,8 @@ run_logged local_pip wheel --no-index --no-deps --find-links "$bundle/wheels" --
 
 echo "Assemble the standalone executable…"
 run_logged local_pip install --no-index --no-deps --no-compile "$dist/"*.whl
+# The executable carries this wheel. The release wheel built below carries the executable instead.
+rm -- "$dist/"*.whl
 "$python" -I - "$source/python-package" "$bundle" "$stage/licenses.tar.gz" "$python_release" <<'PY'
 from pathlib import Path
 import json
@@ -218,8 +222,23 @@ with (bundle / "LICENSE.txt").open("wb") as output:
                     append_license(f"{wheel.name} / {name}", archive.read(name))
 PY
 cp -- "$bundle/LICENSE.txt" "$dist/LICENSE.txt"
+
+# Leave out what loaf never runs. docs/releases.md#executable-size explains each part and what stays.
+(
+    cd "$bundle/python"
+    # bin/python3.13 links libpython statically, so the shared library is a second copy.
+    rm -rf -- lib/libpython3*.so* include share lib/pkgconfig bin/python3*-config bin/idle3*
+    # Tcl/Tk, IDLE and turtle graphics need a desktop session.
+    rm -rf -- lib/tcl[0-9]* lib/tk[0-9]* lib/itcl* lib/thread[0-9]* lib/libtcl* lib/libtk* \
+        lib/python3.*/tkinter lib/python3.*/idlelib lib/python3.*/turtledemo lib/python3.*/turtle.py \
+        lib/python3.*/lib-dynload/_tkinter.*
+    # Only virtualenvs with pip need ensurepip; the launcher creates none with this runtime.
+    rm -rf -- lib/python3.*/ensurepip
+)
+run_logged "$python" -I -c 'import loaf.cli, unittest, sqlite3, ssl, venv, urllib.request, pydoc'
+run_logged "$python" -I -m pip --version
 printf '%s\n' "$version_tag" > "$bundle/.loaf-release"
-tar -czf "$stage/payload.tar.gz" -C "$bundle" .loaf-release LICENSE.txt python python-licenses wheels
+tar -cf - -C "$bundle" .loaf-release LICENSE.txt python python-licenses wheels | gzip -9n > "$stage/payload.tar.gz"
 bundle_id=$(sha256sum "$stage/payload.tar.gz" | cut -d ' ' -f 1)
 "$host_python" - "$source/scripts" "$bundle_id" > "$dist/loaf" <<'PY'
 from pathlib import Path
@@ -244,8 +263,8 @@ run_logged bash -eu -c '
     "$launcher" setup --dry-run
     "$launcher" setup
     test -f config/config.ini
-    # The model list comes from the system or packaged layer until the project adds one.
-    test ! -e config/models.ini
+    # Setup copies the model list in effect, here the packaged one.
+    test -f config/models.ini
     test -f docs/README.md
     test -f docs/.loaf-docs
     "$launcher" version | grep -q "^Installation: standalone executable "
@@ -254,7 +273,8 @@ run_logged bash -eu -c '
     test ! -e .git
     test ! -e python-package
     "$launcher" download --dry-run
-    "$launcher" offline --cpu --dry-run
+    "$launcher" run offline --cpu --dry-run
+    "$launcher" backup config --dry-run | grep -q "^Include the standalone executable $launcher$"
     "$launcher" --license | cmp - "$4"
 ' bash "$stage/project" "$stage/data" "$dist/loaf" "$dist/LICENSE.txt"
 mkdir -p -- "$output"
@@ -265,14 +285,35 @@ if [[ $mode == --binary-only ]]; then
     mv -fT -- "$pending/LICENSE.txt" "$output/LICENSE.txt"
     mv -fT -- "$pending/loaf" "$output/loaf"
     printf 'Standalone executable ready at %s\n' "$output/loaf"
-else
-    echo "Build the Debian package…"
-    run_logged env SOURCE_DATE_EPOCH="$(git log -1 --format=%ct HEAD)" LOAF_BUILD_PYTHON="$host_python" \
-        bash "$source/scripts/build-deb.sh" "$dist/"*.whl "$dist"
-    (
-        cd "$dist"
-        sha256sum -- loaf LICENSE.txt *.whl *.deb *.tar.gz > SHA256SUMS
-    )
-    cp -- "$dist/loaf" "$dist/LICENSE.txt" "$dist/"*.whl "$dist/"*.deb "$source_archive" "$dist/SHA256SUMS" "$output/"
-    printf 'Release assets ready at %s\n' "$output"
+    exit 0
 fi
+
+# The release wheel and the Debian package carry the standalone executable, so that backups from either
+# installation include it.
+echo "Build the release wheel with the standalone executable…"
+install -D -m 755 -- "$dist/loaf" "$source/python-package/src/loaf/data/standalone/loaf"
+run_logged local_pip wheel --no-index --no-deps --find-links "$bundle/wheels" --wheel-dir "$dist" "$source/python-package"
+echo "Build the Debian package…"
+if [[ $mode == --debian-only ]]; then
+    epoch=$(git log -1 --format=%ct HEAD 2>/dev/null || date +%s)
+else
+    epoch=$(git log -1 --format=%ct HEAD)
+fi
+# The tagged source archive holds the packaging files; working-file builds use the checkout's own.
+deb_script=$source/scripts/build-deb.sh
+[[ $mode == --debian-only ]] && deb_script=scripts/build-deb.sh
+run_logged env SOURCE_DATE_EPOCH="$epoch" LOAF_BUILD_PYTHON="$host_python" bash "$deb_script" "$dist/"*.whl "$dist"
+if [[ $mode == --debian-only ]]; then
+    package=$(basename -- "$dist/"*.deb)
+    pending=$(mktemp -d "$output/.loaf-binary-XXXXXXXX")
+    install -m 644 -- "$dist/$package" "$pending/$package"
+    mv -fT -- "$pending/$package" "$output/$package"
+    printf 'Debian package ready at %s\n' "$output/$package"
+    exit 0
+fi
+(
+    cd "$dist"
+    sha256sum -- loaf LICENSE.txt *.whl *.deb *.tar.gz > SHA256SUMS
+)
+cp -- "$dist/loaf" "$dist/LICENSE.txt" "$dist/"*.whl "$dist/"*.deb "$source_archive" "$dist/SHA256SUMS" "$output/"
+printf 'Release assets ready at %s\n' "$output"

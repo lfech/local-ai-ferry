@@ -14,7 +14,7 @@ import subprocess
 import sys
 import sysconfig
 from tempfile import NamedTemporaryFile, TemporaryDirectory, mkdtemp
-from typing import Iterable, Iterator
+from typing import Iterable, Iterator, Sequence
 from urllib.request import urlopen
 
 from . import assets, config, docs
@@ -161,19 +161,41 @@ def link_packaged_project(project: Path, *, dry_run: bool = False) -> bool:
     return True
 
 
-def setup_standalone(project: Path) -> None:
-    directory = project / "config"
+def create_file(target: Path, content: str) -> None:
+    """Write a new file; an existing one stays as it is."""
+    try:
+        with target.open("x", encoding="utf-8") as output:
+            output.write(content)
+    except FileExistsError:
+        if not target.is_file():
+            raise SetupError(f"{target} must be a file.") from None
+    else:
+        print(f"Created {target}.")
+
+
+def prepare_configuration(directory: Path, lower: Sequence[Path], models_name: str | None = "models.ini") -> None:
+    """Create config.ini with every default commented out and the model list in effect, never replacing files.
+
+    The model list is a copy of the highest lower layer's, so the deployment starts with the same selection.
+    """
+    if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+        raise SetupError(f"{directory} must be a local configuration directory.")
+    directory.mkdir(parents=True, exist_ok=True)
+    create_file(directory / config.CONFIG_NAME, config_template(LOCAL_CONFIG_HEADER))
+    if models_name is not None:
+        source = next((layer / models_name for layer in reversed(lower) if (layer / models_name).is_file()), None)
+        if source is not None:
+            create_file(directory / models_name, source.read_text(encoding="utf-8"))
+
+
+def setup_standalone(project: Path, directory: Path | None = None, lower: Sequence[Path] = (),
+                     models_name: str | None = "models.ini") -> None:
+    """Link the packaged Docker project, create the default configuration and export the guides."""
+    directory = directory or project / "config"
     if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
         raise SetupError(f"{directory} must be a local configuration directory.")
     link_packaged_project(project)
-    directory.mkdir(exist_ok=True)
-    target = directory / config.CONFIG_NAME
-    try:
-        with target.open("x", encoding="utf-8") as output:
-            output.write(config_template(LOCAL_CONFIG_HEADER))
-    except FileExistsError:
-        if not target.is_file():
-            raise SetupError(f"{target} must be a configuration file.") from None
+    prepare_configuration(directory, lower or (assets.DATA_DIR / "config",), models_name)
     docs.export(project)
 
 
@@ -292,7 +314,8 @@ def toolkit_files(project: Path, *, download_to: Path | None = None) -> list[Pat
         candidates.update(deb_packages([download_to]))
         missing = [key for key in keys if key not in candidates]
     if missing:
-        raise SetupError("Installer packages for the installed NVIDIA toolkit are missing. Run loaf setup while connected.")
+        raise SetupError("The APT cache and the installer cache lack the packages of the installed NVIDIA toolkit "
+                         f"({', '.join('_'.join(key[:2]) for key in missing)}).")
     return [candidates[key] for key in keys]
 
 
@@ -677,17 +700,6 @@ def prepare_python_wheels(project: Path, python: Path | None = None, *, allow_do
     return wheels
 
 
-def launcher_wheel(project: Path) -> Path:
-    """Return the cached launcher wheel built from the current source files."""
-    wheels = prepare_python_wheels(project, allow_downloads=True)
-    record = json.loads((wheels / WHEEL_CACHE_RECORD).read_text(encoding="utf-8"))
-    prefix = assets.DISTRIBUTION.replace("-", "_") + "-"
-    names = [name for name in record["wheels"] if name.startswith(prefix)]
-    if len(names) != 1:
-        raise SetupError(f"Expected one launcher wheel in {wheels}, found {len(names)}.")
-    return wheels / names[0]
-
-
 def publish_wheels(staging: Path, wheels: Path, record_name: str, inputs: dict) -> None:
     """Move complete staged wheels into the cache, then record their digests."""
     built = sorted(staging.glob("*.whl"))
@@ -865,4 +877,4 @@ def create_test_repository(project: Path, image: str) -> None:
     print(f"Use it for apt in chat containers with these settings in {project / 'config' / config.CONFIG_NAME}:\n"
           f"  [terminal_server]\n  apt_source_file = {TEST_REPOSITORY_SOURCE.as_posix()}\n"
           f"  apt_repository_dir = {TEST_REPOSITORY_DIR.as_posix()}\n"
-          f"Then run loaf offline or loaf online and ask the model to run: apt-get install {packages}")
+          f"Then run loaf run offline or loaf run online and ask the model to run: apt-get install {packages}")

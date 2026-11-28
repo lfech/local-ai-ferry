@@ -13,15 +13,9 @@ Its `loaf` CLI runs Ollama and Open WebUI with Docker Compose on Debian or
 Debian in WSL2. It uses NVIDIA acceleration by default and also supports CPU
 inference.
 
-On the connected machine, run `loaf setup`, `loaf build`, and `loaf download`
-to prepare the deployment. Run `loaf online` to test it. Use
-`loaf online --cpu` on a machine without NVIDIA GPU access.
-
-To move the deployment offline, run `loaf backup` and copy the entire backup
-folder to the destination. From the backup folder, run `./loaf setup`,
-`./loaf restore` and `./loaf offline`. The folder becomes the project, and
-the backup moves to its `backup/` directory.
-[Backup recovery](docs/transfer.md#debian-restore)
+Prepare a deployment on a connected machine with the [Quick Setup](#quick-setup),
+then move it with `loaf backup` and restore the backup folder on the offline
+host. [Backup and recovery](docs/transfer.md#debian-restore)
 
 ## Development disclosure
 
@@ -68,20 +62,20 @@ Toolkit installers under the Git-ignored `install-cache/` directory. On Debian
 Compose, and Buildx. Configure the NVIDIA container runtime before starting GPU
 inference. [Debian setup](docs/debian.md#install-the-loaf-command)
 
-Setup creates the terminal bearer key if it is missing. To prepare only the
-key, run `loaf setup --terminal-server-key`. The checkout enables the terminal
-server. [Terminal server setup](docs/terminal-server.md#enable-and-connect)
+The checkout enables the terminal server, which needs a bearer key. Create it
+with `./loaf setup --terminal-server-key`.
+[Terminal server setup](docs/terminal-server.md#enable-and-connect)
 
 Build the images, download the selected models, and start offline serving.
 
 ```bash
 ./loaf build
 ./loaf download
-./loaf offline
+./loaf run offline
 ```
 
 On a preparation machine without NVIDIA GPU access, use
-`./loaf offline --cpu` or `./loaf online --cpu`.
+`./loaf run offline --cpu` or `./loaf run online --cpu`.
 Test a chat on CPU and then back up the same deployment for the GPU target.
 [CPU serving](docs/launcher.md#serve-on-cpu)
 
@@ -101,19 +95,15 @@ Once the test succeeds, create the transfer archive.
 ./loaf backup
 ```
 
-Backup stops the project's services and saves the archive in `backup/` by
-default. With the terminal server enabled, it includes the locally available
-Open Terminal image, the terminal user volume and the bearer key that Open
-WebUI's saved connection needs. Use `loaf backup --no-terminal-server` to
-leave them out; the restored deployment then starts without a terminal.
-Run `./loaf offline` to resume serving, adding `--cpu` on a CPU host.
-[Backup and recovery](docs/transfer.md)
+Backup saves a folder in `backup/` and prints the command that resumes
+serving. [What a backup holds](docs/transfer.md) ·
+[backup options](docs/cli-help.md#backup)
 
 ### If a command fails
 
 Fix the reported issue and retry the command that failed. Docker and Ollama
 can reuse completed layers and model files.
-Use `./loaf -v offline` to include the exact Compose commands in the output.
+Use `./loaf -v run offline` to include the exact Compose commands in the output.
 
 | Failure | Where to check |
 | --- | --- |
@@ -128,21 +118,16 @@ when starting from a prepared archive.
 
 ## Commands and shared model store
 
-| Mode | What it does |
-| --- | --- |
-| `setup` / `install` | Prepare the deployment and its terminal key. Use `--terminal-server-key` for key setup alone. `--test-local-repository` creates a small APT repository for `apt` in chat containers. `setup tests` caches and installs the test packages. [Setup options](docs/cli-help.md#setup) |
-| `link-docker-project` | Create a `docker-project` symlink to the packaged Compose file, Dockerfiles, and default configuration. [Direct Compose commands](docs/launcher.md#link-the-docker-project) |
-| `integration` | Print a systemd unit, Continue YAML, or Tether installation instructions. [Host integrations](docs/installation.md#host-integrations) |
-| `build` / `upgrade` | Build the local images. Upgrade refreshes upstream base images first. |
-| `package` | Build the standalone executable (`binary`) or the Debian package (`debian`) from the source checkout into `dist/`. [Local builds](docs/releases.md#build-and-check-locally) |
-| `clean` | Remove temporary files and the runtime cache. Add `--full` to clear generated installation files too; it asks before removing the installer cache. [Cleanup](docs/launcher.md#clean-generated-files) |
-| `download` | Download selected models using the downloader. |
-| `online` / `offline` | Start Ollama and WebUI with the selected network profile. Add `--cpu` for CPU inference. |
-| `backup` / `restore` | Select any of `source`, `config`, `installers`, `images`, `models`, `webui` and `terminal`, or the aliases `project` and `volumes`. `models` alone transfers the model store. [Archive types](docs/transfer.md#select-archive-types) |
-| `backup --verify` | Run restore's checks on the archive members and check the bundled launcher, list the types, and report saved image platforms without Docker. |
-| `version` / `docs` | Show the release and installation, or read the bundled guides and manual page. [Bundled guides](docs/launcher.md#read-the-bundled-guides) |
-| `status` / `stop` | Check deployment readiness and list containers, or stop and remove containers across all profiles. [Keep stopped containers](docs/launcher.md#stop-and-remove-containers) |
-| `test` | Run the checkout's test suite. [Verification guide](docs/verification.md) |
+`loaf --help` lists the commands and `loaf COMMAND --help` their options. The
+[command reference](docs/cli-help.md) explains every command and option:
+[setup](docs/cli-help.md#setup), [package](docs/cli-help.md#package),
+[clean](docs/cli-help.md#clean), [version](docs/cli-help.md#version),
+[docs](docs/cli-help.md#docs), [completion](docs/cli-help.md#completion),
+[build and upgrade](docs/cli-help.md#build), [download](docs/cli-help.md#download),
+[run](docs/cli-help.md#run), [status](docs/cli-help.md#status),
+[stop](docs/cli-help.md#stop), [docker](docs/cli-help.md#docker),
+[backup](docs/cli-help.md#backup), [restore](docs/cli-help.md#restore),
+[integration](docs/cli-help.md#integration) and [test](docs/cli-help.md#test).
 
 ```mermaid
 flowchart LR
@@ -153,74 +138,29 @@ flowchart LR
   WebUI <--> Browser[localhost:3000]
 ```
 
-The launcher switches profiles and prevents overlapping runs in this checkout.
-All Ollama services share a volume. Run one profile at a time.
-All services have `scale: 1`. See [launcher options and failure handling](docs/launcher.md).
-`loaf` defaults to the **current directory**. Use `--project-dir PATH` to select
-another checkout or a directory with a `docker-project` link. The Python source
-and [deployment data](python-package/src/loaf/data/) live in `python-package/`.
-Run `loaf --help` for the command list and `loaf COMMAND --help` for its flags.
-[Command reference](docs/cli-help.md)
-Use `--namespace NAME` to keep a deployment's images, volumes, and backups
-separate in the Docker namespace `loaf-NAME`. [Separate namespaces](docs/launcher.md#run-a-separate-namespace)
+All Ollama services share one volume, so one serving profile runs at a time;
+`loaf run` switches between them. `loaf` works on the current directory. The
+Python source and [deployment data](python-package/src/loaf/data/) live in
+`python-package/`. [Failure handling](docs/launcher.md#failure-and-concurrency-behavior) ·
+[Separate namespaces](docs/launcher.md#run-a-separate-namespace)
 
 ## Choose models and context
 
-The default INI section `[models.default]` selects IBM's Granite 4.0 H 350M in
-Q4_K_M, a 223 MB chat model that can call tools. Add a `[models.<name>]` section with a `model` value
-for each model you want to use. Those sections replace the default selection.
-Add `name` to show the model under that readable name only. Choose a different
-INI with `--models-file` or select another settings directory with `--config-dir`.
-[Selection syntax](docs/launcher.md#select-models)
+The default selection is IBM's Granite 4.0 H 350M in Q4_K_M, a 223 MB chat
+model that can call tools. [Model selection](docs/launcher.md#select-models) ·
+[Example lists for 6, 8 and 16 GB of VRAM](docs/models.md)
 
-| Example list | Intended hardware | Choices |
-| --- | --- | --- |
-| [16 GB VRAM](config/model-examples/models.16gb.ini) | GPUs with about 16 GB of VRAM | Qwen3-14B, Coder-14B |
-| [8 GB VRAM](config/model-examples/models.8gb.ini) | GPUs with about 8 GB of VRAM | Qwen3-4B, Coder-7B |
-| [6 GB VRAM](config/model-examples/models.6gb.ini) | GPUs with about 6 GB of VRAM | Ministral-3B |
-
-Each 8 GB and 16 GB list also comes as `_chat` and `_code` variants with only
-the chat or only the coding model. Pass the model file to `loaf download`.
-[Example commands and hardware estimates](docs/models.md)
-
-**Context matters:** the server defaults to **16384 tokens**. Set `num_ctx=16384`
-explicitly for the Qwen3 examples to override their larger preset. Start with
-4096 output tokens so reasoning has room to finish. [WebUI settings](docs/configuration.md#webui-settings)
-explains context precedence and sampling.
+**Context matters:** the server defaults to **16384 tokens**, and the Qwen3
+examples need an explicit `num_ctx`. [WebUI settings](docs/configuration.md#webui-settings)
 
 ## Data, stopping and transfer
 
-| Storage | Contents |
-| --- | --- |
-| `loaf-ollama` volume, mounted at `/ollama` | `models/`: weights, projectors and manifests; `config/`: exported Modelfiles |
-| `loaf-open-webui` volume, mounted at `/app/backend/data` | Accounts, chats, settings and caches |
-| `loaf-terminal-users` volume, the account's folder at `/home/user` | Persistent files and settings shared by the account's chats. [Workspace storage](docs/terminal-server.md#offline-transfer-and-shutdown) |
-| `/home/chat` in the chat's terminal container | Files and installed packages of one chat, removed with the chat. [Files tab](docs/terminal-server.md#use-the-terminal-from-a-model) |
-
-Backend startup imports all saved `.model` files. Models and exports persist
-after you remove an entry from the selection file.
-
-Stop the deployment and remove its service containers with `loaf stop`. Use
-`loaf stop --no-remove-containers` to keep the stopped containers and their logs.
-
-```bash
-loaf stop
-```
-
-`loaf docker ps` lists the deployment's containers, images, volumes and
-networks. `loaf docker rm` removes the selected types after confirmation.
-[Docker resources](docs/launcher.md#list-and-remove-docker-resources)
-
-To move computers, run `loaf backup` and transfer the resulting
-`backup/YYYYMMDD-HHMM_local-ai-ferry/` folder. On the destination, enter
-that folder and run `./loaf setup` followed by `./loaf restore`. The folder
-becomes the project.
-[Offline transfer](docs/transfer.md#debian-restore)
-
-Offline startup uses local images and models. Ollama is on an internal network;
-WebUI also has a bridge for localhost access. Its offline flags suppress automatic
-downloads, while a physically disconnected host provides full network isolation.
-See [configuration and offline behavior](docs/configuration.md).
+The [storage table](docs/configuration.md#services-and-storage) lists the
+volumes with the models, the Open WebUI accounts and chats and the terminal
+user folders. `loaf stop` stops the deployment, and `loaf docker` lists or
+removes its Docker resources. To move computers, back up and restore the
+deployment as [the transfer guide](docs/transfer.md#debian-restore) describes.
+[Offline behavior](docs/configuration.md#networking-and-offline-operation)
 
 ## Guides
 
@@ -230,8 +170,7 @@ See [configuration and offline behavior](docs/configuration.md).
 | [Open WebUI Tether](docs/tether.md) | Desktop installation and connection to a running deployment |
 | [Debian](docs/debian.md) | Native Docker/NVIDIA setup, startup and SSH browser access |
 | [Local network access](docs/local-network.md) | Publish or remove LAN access on native Debian and Debian in WSL 2 |
-| [CLI overview](docs/cli.md) | Find commands and help |
-| [CLI reference](docs/cli-help.md) | Every command and its flags |
+| [CLI reference](docs/cli-help.md) | Every command and its options, the one place that explains them |
 | [Launcher](docs/launcher.md) | Installation, model selection, serving and failure handling |
 | [Models](docs/models.md) | 16 GB VRAM/8 GB VRAM specifiers, sizes and resource guidance |
 | [Configuration](docs/configuration.md) | Volumes, environment, context, networking and extra features |

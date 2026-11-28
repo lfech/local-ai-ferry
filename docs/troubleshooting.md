@@ -67,7 +67,7 @@ file to a disconnected host and set it up there.
 ## GPU access
 
 On a preparation host without NVIDIA GPU access, run `loaf status --cpu` and
-start with `loaf offline --cpu` or `loaf online --cpu`. [CPU serving](launcher.md#serve-on-cpu)
+start with `loaf run offline --cpu` or `loaf run online --cpu`. [CPU serving](launcher.md#serve-on-cpu)
 
 In WSL2, use a Windows NVIDIA driver with WSL2 support. For both native Debian
 and Debian in WSL2, configure the NVIDIA Container Toolkit on the Docker Engine
@@ -102,7 +102,7 @@ Each Modelfile's `FROM` paths must exist under the same `/ollama/models` mount.
 Transfer weights/projectors and manifests along with exported text definitions.
 
 A failed import prevents readiness and WebUI startup. Fix the source export or
-missing blobs, then retry `loaf offline`. Startup timeout values must
+missing blobs, then retry `loaf run offline`. Startup timeout values must
 be positive integers. [Configuration](configuration.md#applying-changes)
 explains the separate API-startup and Compose-health timeouts.
 
@@ -131,7 +131,7 @@ after removing an entry from the selection. [Model selection](launcher.md#select
 
 ## Browser connection
 
-Open the address printed by `loaf offline` or `loaf online`. The default is
+Open the address printed by `loaf run offline` or `loaf run online`. The default is
 `http://localhost:3000`. In WebUI, check that the Ollama URL is
 `http://ollama-offline:11434`. Offline WebUI uses the internal inference
 network for Ollama and the `web` bridge for host port publishing. Online WebUI
@@ -168,7 +168,7 @@ When `apt-get update` cannot reach any source, the container has no route to
 a mirror: with `[terminal_server] network = isolated`, set `apt_source_file`
 and `apt_repository_dir` for a repository on the Docker host. With
 `network = connected`, check that the Docker host reaches the mirror. Then run
-`loaf offline` or `loaf online`. Packages installed in a chat stay in its
+`loaf run offline` or `loaf run online`. Packages installed in a chat stay in its
 container only; a new chat starts without them.
 [Install packages in a chat](terminal-server.md#install-packages-in-a-chat)
 

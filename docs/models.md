@@ -19,7 +19,7 @@ selected model is downloaded in turn.
 ```bash
 loaf build
 loaf download --models-file config/model-examples/models.16gb.ini
-loaf offline
+loaf run offline
 ```
 
 The 16 GB and 8 GB lists also come in single-role variants:

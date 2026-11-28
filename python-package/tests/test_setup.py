@@ -43,9 +43,11 @@ class SetupTests(unittest.TestCase):
             ):
                 self.assertEqual(cli.main(["--project-dir", directory, "setup"]), 0)
             prepare.assert_called_once_with(project, with_docker_deps=False, allow_root=False)
-            key = project / cli.config.TERMINAL_SECRET
-            cli.config.read_terminal_secret(key)
-            self.assertEqual(key.stat().st_mode & 0o777, 0o600)
+            # Only setup --terminal-server-key creates the key. The default configuration never replaces files.
+            self.assertFalse((project / cli.config.TERMINAL_SECRET).exists())
+            self.assertIn("# ollama_image = ", (project / "config/config.ini").read_text(encoding="utf-8"))
+            self.assertEqual((project / "config/models.ini").read_bytes(),
+                             (cli.assets.DATA_DIR / "config/models.ini").read_bytes())
             run.assert_not_called()
             compose.assert_not_called()
 
@@ -121,7 +123,8 @@ class SetupTests(unittest.TestCase):
             install.assert_not_called()
             self.assertIn("Deployment ready", log.getvalue())
             self.assertTrue((project / "config/config.ini").is_file())
-            self.assertTrue((project / cli.config.TERMINAL_SECRET).is_file())
+            self.assertTrue((project / "config/models.ini").is_file())
+            self.assertFalse((project / cli.config.TERMINAL_SECRET).exists())
             self.assertTrue((project / "docker-project/compose.yml").is_file())
 
     def test_source_setup_as_root_needs_allow_root_for_another_owners_checkout(self):
@@ -288,15 +291,17 @@ class SetupTests(unittest.TestCase):
                 redirect_stderr(StringIO()),
             ):
                 self.assertEqual(cli.main([*command, "--dry-run"]), 0)
-                self.assertIn("default configuration", log.getvalue())
+                self.assertIn(f"Create {project.resolve() / 'config/config.ini'}", log.getvalue())
                 self.assertEqual(list(project.iterdir()), [project / "loaf"])
                 self.assertEqual(cli.main(command), 0)
                 configuration = project / "config/config.ini"
                 # Every key is commented so that system settings and packaged defaults stay in effect.
                 self.assertEqual(cli.config.load(project / "config"), cli.config.Settings())
                 self.assertIn("# ollama_image = ", configuration.read_text(encoding="utf-8"))
-                self.assertFalse((project / "config/models.ini").exists())
-                self.assertTrue((project / cli.config.TERMINAL_SECRET).is_file())
+                # Setup copies the model list in effect; a later setup keeps the project's changes.
+                self.assertEqual((project / "config/models.ini").read_bytes(),
+                                 (cli.assets.DATA_DIR / "config/models.ini").read_bytes())
+                self.assertFalse((project / cli.config.TERMINAL_SECRET).exists())
                 self.assertTrue((project / "docker-project/compose.yml").is_file())
                 self.assertEqual((project / "docs/.loaf-docs").read_text().strip(), cli.assets.release_version())
                 self.assertTrue((project / "docs/README.md").is_file())
@@ -308,6 +313,34 @@ class SetupTests(unittest.TestCase):
             self.assertFalse((project / setup.PYTHON_PACKAGE_DIR).exists())
             install.assert_not_called()
             toolkit.assert_not_called()
+
+    def test_setup_writes_the_default_configuration_into_the_selected_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "project"
+            settings = Path(directory) / "settings"
+            system = Path(directory) / "etc loaf"
+            project.mkdir()
+            system.mkdir()
+            # The model list in effect comes from the system layer when it has one.
+            (system / "models.ini").write_text("[models.default]\nmodel = hf.co/system/selected:Q4_K_M\n")
+            command = ["--project-dir", str(project), "setup", "--config-dir", str(settings)]
+            with (
+                patch.dict(os.environ, LOAF_SYSTEM_CONFIG_DIR=str(system)),
+                patch.object(setup, "bundled_release", return_value=project / "runtime"),
+                redirect_stdout(StringIO()) as log,
+                redirect_stderr(StringIO()),
+            ):
+                self.assertEqual(cli.main([*command, "--dry-run"]), 0)
+                self.assertFalse(settings.exists())
+                self.assertEqual(cli.main(command), 0)
+                self.assertIn(f"Created {settings / 'config.ini'}.", log.getvalue())
+                self.assertEqual((settings / "models.ini").read_text(), (system / "models.ini").read_text())
+                self.assertFalse((project / "config").exists())
+                (settings / "models.ini").write_text("# local selection\n")
+                (settings / "config.ini").write_text("# local settings\n")
+                self.assertEqual(cli.main(command), 0)
+            self.assertEqual((settings / "models.ini").read_text(), "# local selection\n")
+            self.assertEqual((settings / "config.ini").read_text(), "# local settings\n")
 
     def test_release_setup_does_not_write_through_a_config_link(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -654,25 +687,6 @@ class SetupTests(unittest.TestCase):
                 self.assertEqual(wheel.read_bytes(), b"after!")
             self.assertIn("Reuse the cached Python wheels", status.getvalue())
 
-    def test_launcher_wheel_selects_the_current_build_from_the_cache_record(self):
-        with tempfile.TemporaryDirectory() as directory:
-            project = Path(directory)
-            wheels = project / setup.PYTHON_WHEEL_DIR
-            wheels.mkdir(parents=True)
-            # An older launcher release stays in the cache next to the current build.
-            (wheels / "local_ai_ferry-0.1.0-py3-none-any.whl").touch()
-            record = wheels / setup.WHEEL_CACHE_RECORD
-            current = {"local_ai_ferry-1.0.0-py3-none-any.whl": "a", "setuptools-80-py3-none-any.whl": "b"}
-            record.write_text(json.dumps({"inputs": {}, "wheels": current}), encoding="utf-8")
-            with patch.object(setup, "prepare_python_wheels", return_value=wheels) as prepare:
-                self.assertEqual(setup.launcher_wheel(project), wheels / "local_ai_ferry-1.0.0-py3-none-any.whl")
-            prepare.assert_called_once_with(project, allow_downloads=True)
-            record.write_text(json.dumps({"inputs": {}, "wheels": {"setuptools-80-py3-none-any.whl": "b"}}),
-                              encoding="utf-8")
-            with patch.object(setup, "prepare_python_wheels", return_value=wheels):
-                with self.assertRaisesRegex(setup.SetupError, "Expected one launcher wheel"):
-                    setup.launcher_wheel(project)
-
     def test_unsuccessful_rebuild_restores_previous_environment(self):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
@@ -719,7 +733,7 @@ class SetupTests(unittest.TestCase):
 
 
 class TestRepositoryTests(unittest.TestCase):
-    def test_local_repository_holds_the_packages_and_replaces_only_its_own_directory(self):
+    def create_file_repository_holds_the_packages_and_replaces_only_its_own_directory(self):
         calls = []
 
         def docker(command, **kwargs):

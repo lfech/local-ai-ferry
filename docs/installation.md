@@ -2,57 +2,24 @@
 
 ## Disconnected Debian installation
 
-Copy the trusted backup folder to the destination and enter it. The
-folder's `loaf` uses its bundled Python. Setup and restore make the folder
-the project and move the backup to its `backup/` directory. Prepare a compatible NVIDIA driver
-for GPU inference and use an account with Docker access.
-[Backup recovery](transfer.md#debian-restore) · [Docker access](debian.md#docker-access)
+Copy the trusted backup folder to the destination and restore it there, as
+[Debian restore](transfer.md#debian-restore) shows. The folder's `loaf`
+brings its own Python. For a fresh deployment, use the
+[release executable](releases.md#run-the-executable) instead.
 
-```bash
-chmod +x loaf
-./loaf setup
-./loaf restore
-```
-
-Setup creates default configuration and the terminal server key and links
-the packaged Docker files. Restore checks the backup and loads everything it
-contains: settings and Modelfiles, installers, images, models and WebUI
-data, and, when included, the source checkout and chat folders. Continue
-with `./loaf offline` in the same folder. For a fresh deployment, use the
-release executable and run setup.
-[Backup recovery](transfer.md#debian-restore) ·
-[Release executable](releases.md#run-the-executable)
-
-On Debian 12 or 13, use the following setup command when the backup has
-Docker installers for the same release and package architecture:
-
-```bash
-./loaf setup --with-docker-deps
-```
-
-The command verifies and extracts the backed-up Debian packages and uses
-the cached local APT source. When available, it also uses the cached
-NVIDIA toolkit. For a source checkout with host Python, see the separate
-editable installation steps. [Source installation](launcher.md#prepare-python-installation-offline)
-
-After a fresh Docker install, enable it and check your login has access.
-[Docker access](debian.md#docker-access)
+The destination needs Docker access for your login and, for GPU inference, a
+compatible NVIDIA driver. On Debian 12 or 13, `./loaf setup --with-docker-deps`
+installs Docker and the NVIDIA toolkit from a backup that holds their
+installers for the same release and architecture. After a fresh Docker
+install, enable it; register the NVIDIA runtime once, when it is safe to
+restart Docker. [Docker access](debian.md#docker-access) ·
+[Source installation](launcher.md#prepare-python-installation-offline)
 
 ```bash
 sudo systemctl enable --now docker
-```
-
-If Docker has yet to be configured for NVIDIA, register the runtime and restart
-Docker when it is safe to interrupt running containers.
-
-```bash
 sudo nvidia-ctk runtime configure --runtime=docker
 sudo systemctl restart docker
 ```
-
-If the archive omitted the Open Terminal bearer key and setup created a new
-one, update the saved terminal connection after starting WebUI.
-[Terminal setup](terminal-server.md#enable-and-connect)
 
 ## Debian package
 
@@ -75,7 +42,9 @@ The package operates the system deployment. Its settings are in `/etc/loaf`
 and its data, backups and lock are in `/var/lib/loaf`. Root, members of the
 `docker` group and the `loaf` systemd service can operate it. Its backups in
 `/var/lib/loaf/backup` are readable by that group, so any member can restore
-them. The terminal server key is `/etc/loaf/terminal-server.key`. Select a portable deployment
+them. The package carries the standalone executable that each backup folder
+includes. The package creates the terminal server key
+`/etc/loaf/terminal-server.key`. Select a portable deployment
 directory with `loaf --project-dir PATH`. A portable deployment reads
 `/etc/loaf` below its own `config/config.ini`.
 [Settings layers](configuration.md#project-configuration)
@@ -106,8 +75,11 @@ Generate the system-wide unit using the installed `loaf` under the account
 that will run the service. That account needs Docker access. The unit uses
 the selected project, Python environment, override directory and namespace.
 Like the Debian package's unit, it requires `docker.service` and starts after
-it. `ExecStart` runs `loaf offline --attach`, which follows logs in the
-foreground after startup. Stopping the unit runs `loaf stop` for the same
+it. `ExecStart` runs `loaf run offline --attach`, which follows logs in the
+foreground after startup; generate it with `--cpu` for a host without NVIDIA
+GPU access. For the Debian package's system deployment on such a host,
+install `loaf --system integration systemd --cpu` as
+`/etc/systemd/system/loaf.service`, which replaces the packaged unit. Stopping the unit runs `loaf stop` for the same
 deployment and removes its service containers. Both units allow 90 seconds
 for that, because the terminal server may take 45 seconds to stop its chat
 containers.

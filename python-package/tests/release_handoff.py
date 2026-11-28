@@ -86,7 +86,7 @@ def cold_handoff(bundle, name, namespace, port, fixture, deb=None):
         launcher = ("env", "XDG_DATA_HOME=/work/cache", "/handoff/loaf")
         target(*launcher, "setup", timeout=300)
         target(*launcher, "restore", timeout=600)
-        target(*launcher, "offline", "--cpu")
+        target(*launcher, "run", "offline", "--cpu")
         target("python3", "-c", (FIXTURES / "webui_chat.py").read_text(),
                f"http://127.0.0.1:{port}", MODEL, input=json.dumps(fixture))
         backend = target(
@@ -161,7 +161,7 @@ def rehearse(executable, root, compression, retain, *, chat_only, ollama_image, 
         launch("build", timeout=900)
         launch("download", timeout=600)
         cpu = ollama_image == OLLAMA_IMAGE
-        launch("offline", *(("--cpu",) if cpu else ()))
+        launch("run", "offline", *(("--cpu",) if cpu else ()))
         webui = WebUIChat(f"http://127.0.0.1:{port}")
         webui.require_sign_in()
         credentials = {"email": "loaf-handoff@example.invalid", "password": secrets.token_urlsafe(24)}

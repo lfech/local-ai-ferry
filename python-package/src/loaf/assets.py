@@ -12,6 +12,8 @@ CHECKOUT_DATA = Path("python-package/src/loaf/data")
 DOCKER_PROJECT = "docker-project"
 # Only the Debian package build writes this marker into its deployment data.
 DEBIAN_PACKAGE_MARKER = DATA_DIR / "debian-package"
+# The release wheel and the Debian package carry the standalone executable that backups include.
+STANDALONE_EXECUTABLE = DATA_DIR / "standalone/loaf"
 SYSTEM_PROJECT_DIR = Path("/var/lib/loaf")
 DISTRIBUTION = "local-ai-ferry"
 

@@ -39,6 +39,9 @@ def command(args, *, input=None, timeout=180, decode_errors="strict", env=None, 
 
 
 def compose_command(compose, step, *, env=None, **options):
+    # Like Compose.execute, keep the terminal scripts that the APT override binds at their project path.
+    if compose.uses_terminal_runtime_source(step):
+        compose.stage_terminal_runtime()
     if env is None:
         env = dict(os.environ, **compose.variables(step))
     return command(compose.command(step), env=env, cwd=compose.project_dir, **options)

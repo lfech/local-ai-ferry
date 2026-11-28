@@ -121,6 +121,21 @@ class CleanupTests(unittest.TestCase):
             self.assertIn("cannot download its installers again", asked.call_args.args[0])
             self.assertEqual(cached.is_file(), kept)
 
+    def test_full_removes_the_cached_runtime_downloads_with_the_installers(self):
+        # The executable build's checked downloads are archives, but no backups.
+        runtime = self.put(self.project / "install-cache/python/cpython-3.13.18-install_only_stripped.tar.gz")
+        with patch("sys.stdin.isatty", return_value=True), patch("builtins.input", return_value="y"):
+            status, output = self.invoke("--full")
+        self.assertEqual(status, 0, output)
+        self.assertNotIn("Keep", output)
+        self.assertFalse(runtime.exists())
+        # Another archive in the cache still protects it.
+        backup = self.put(self.project / "install-cache/deb/saved_local-ai-ferry.tar.gz")
+        with patch("sys.stdin.isatty", return_value=True), patch("builtins.input", return_value="y"):
+            status, output = self.invoke("--full")
+        self.assertIn("Keep", output)
+        self.assertTrue(backup.exists())
+
     def test_full_keeps_unignored_files_in_build_directory(self):
         self.put(self.project / "python-package/.gitignore", b"!/build/\n!/build/notes.txt\n")
         notes = self.put(self.project / "python-package/build/notes.txt")

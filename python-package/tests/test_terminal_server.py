@@ -84,7 +84,8 @@ class TerminalServerSettingsTests(unittest.TestCase):
             self.assertEqual(compose.variables()["LOAF_TERMINAL_WEBUI_ACCESS"], "admins")
             for mode in ("online", "offline", "build", "stop"):
                 with self.subTest(mode=mode), redirect_stdout(io.StringIO()) as output:
-                    self.assertEqual(cli.main([mode, "--project-dir", folder, "--dry-run", "-v"]), 0)
+                    command = ["run", mode] if mode in cli.SERVING else [mode]
+                    self.assertEqual(cli.main([*command, "--project-dir", folder, "--dry-run", "-v"]), 0)
                     self.assertIn("--profile terminal", output.getvalue())
                     # Open WebUI receives the bearer key for its preset connection.
                     self.assertIn("compose.terminal-webui.yml", output.getvalue())
@@ -141,19 +142,19 @@ class TerminalServerSettingsTests(unittest.TestCase):
             settings = project / "config/config.ini"
             settings.write_text("[terminal_server]\nenabled=true\n")
             with patch.object(cli.Compose, "execute") as execute, redirect_stderr(io.StringIO()) as errors:
-                self.assertEqual(cli.main(["offline", "--project-dir", folder]), 1)
+                self.assertEqual(cli.main(["run", "offline", "--project-dir", folder]), 1)
                 self.assertIn("Terminal server key file is missing", errors.getvalue())
                 execute.assert_not_called()
             invalid = "a" * 32 + " b"
             (project / config.TERMINAL_SECRET).write_text(invalid)
             with patch.object(cli.Compose, "execute") as execute, redirect_stderr(io.StringIO()) as errors:
-                self.assertEqual(cli.main(["offline", "--project-dir", folder]), 1)
+                self.assertEqual(cli.main(["run", "offline", "--project-dir", folder]), 1)
                 self.assertIn("Invalid terminal server key", errors.getvalue())
                 self.assertNotIn(invalid, errors.getvalue())
                 execute.assert_not_called()
             settings.write_text("[webui]\nauth=false\n[terminal_server]\nenabled=true\n")
             with redirect_stderr(io.StringIO()) as errors, self.assertRaises(SystemExit):
-                cli.main(["online", "--project-dir", folder])
+                cli.main(["run", "online", "--project-dir", folder])
             self.assertIn("auth = true", errors.getvalue())
 
     def test_terminal_key_uses_the_current_path_and_validates_its_maximum_size(self):
@@ -181,9 +182,30 @@ class TerminalServerSettingsTests(unittest.TestCase):
                 "[terminal_server]\nenabled=true\napt_source_file=config/missing.list\n",
             )
             with patch.object(cli.Compose, "execute") as execute, redirect_stderr(io.StringIO()) as errors:
-                self.assertEqual(cli.main(["offline", "--project-dir", folder]), 1)
+                self.assertEqual(cli.main(["run", "offline", "--project-dir", folder]), 1)
             self.assertIn("APT source file is missing", errors.getvalue())
             execute.assert_not_called()
+
+    def test_runtime_scripts_stay_at_one_project_path_across_releases(self):
+        with TemporaryDirectory() as folder:
+            project = Path(folder)
+            source = project / "mirror.list"
+            source.write_text("deb http://mirror.invalid/debian trixie main\n")
+            compose = cli.Compose(project, files=[DATA / "compose.yml"], settings=config.Settings(
+                terminal_server_enabled=True, terminal_server_apt_source_file=source))
+            step = cli.Step(("terminal",), ("up", "-d", "terminal-server"))
+            runtime = project / cli.TERMINAL_RUNTIME_DIR
+            self.assertEqual(compose.variables(step)["LOAF_TERMINAL_RUNTIME_DIR"], str(runtime))
+            compose.stage_terminal_runtime()
+            for name in cli.TERMINAL_RUNTIME_FILES:
+                self.assertEqual((runtime / name).read_bytes(), (DATA / "docker/terminal-server" / name).read_bytes())
+            # Another release replaces changed files at the same path, so chat containers keep their mounts.
+            (runtime / "runner.py").write_text("# an earlier release\n")
+            inode = (runtime / "provisioner.py").stat().st_ino
+            compose.stage_terminal_runtime()
+            self.assertEqual((runtime / "runner.py").read_bytes(), (DATA / "docker/terminal-server/runner.py").read_bytes())
+            self.assertEqual((runtime / "provisioner.py").stat().st_ino, inode)
+            self.assertEqual(sorted(path.name for path in runtime.iterdir()), sorted(cli.TERMINAL_RUNTIME_FILES))
 
     def test_terminal_key_format_preserves_the_file_bytes(self):
         with TemporaryDirectory() as folder:
@@ -461,6 +483,21 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
                 str(etc / "sources.list"), str(etc / "sources.list.d/loaf-terminal.list"),
                 str(etc / "sources.list.d/debian.sources"),
             ])
+
+    def test_runtime_revision_follows_the_mounts_and_not_the_file_contents(self):
+        def control(directory):
+            targets = {"/etc/apt/sources.list.d/loaf-terminal.list": "mirror.list",
+                       self.module.RUNTIME_RUNNER: "runner.py", self.module.NO_APT_SOURCE: "no-apt-source.list"}
+            return {"Mounts": [{"Destination": target, "Source": f"{directory}/{name}", "Type": "bind", "RW": False}
+                               for target, name in targets.items()]}
+
+        # The files are not read: a new loaf release changes them at the same stable paths.
+        mounts, revision = self.module.workspace_runtime_mounts(control("/project/.loaf-terminal-runtime"), "list")
+        self.assertEqual(self.module.workspace_runtime_mounts(control("/project/.loaf-terminal-runtime"), "list"),
+                         (mounts, revision))
+        self.assertNotEqual(self.module.workspace_runtime_mounts(control("/elsewhere"), "list")[1], revision)
+        self.assertEqual(mounts[1], {"Type": "bind", "Source": "/project/.loaf-terminal-runtime/runner.py",
+                                     "Target": self.module.RUNTIME_RUNNER, "ReadOnly": True})
 
     async def test_open_resumes_a_stopped_container_or_recreates_it_after_a_change(self):
         module = self.module
@@ -773,7 +810,7 @@ run('printf temporary > /home/chat/note.txt', chat='temporary:first')
                          f"SHA256: {hashlib.sha256(payload).hexdigest()}\n\n")
         (repository / "Packages.xz").write_bytes(lzma.compress("".join(index).encode()))
 
-    def test_runtime_apt_source_is_read_only_and_updates_on_recreate(self):
+    def test_runtime_apt_source_is_read_only_and_updates_without_replacing_the_container(self):
         self.bridge_options()
         project_name = f"loaf-test-runtime-{uuid4().hex}"
         control = f"{project_name}_terminal-control"
@@ -838,10 +875,9 @@ with urlopen(request, timeout=45) as response:
                 replacement = source.with_name("replace.sources")
                 replacement.write_text(source.read_text().replace("live-edit.invalid", "second.invalid"))
                 replacement.replace(source)
-                # A changed source needs a new container; the one with the old mount is removed.
+                # The chat keeps its container, files and packages; its next start binds the replaced file.
                 invoke(*start)
-                self.assertNotEqual(check_workspace(), first)
-                self.assertEqual(command(["docker", "ps", "-aq", "--filter", f"id={first}"]).strip(), "")
+                self.assertEqual(check_workspace(), first)
             finally:
                 invoke("down", "--volumes", "--timeout", "45")
 

@@ -65,14 +65,31 @@ def markdown_links(path):
         yield urlsplit(target.strip("<>"))
 
 
-def local_link_problems(path):
+# GitHub and VS Code line references: #L12 or #L12-L20.
+LINE_FRAGMENT = re.compile(r"L([1-9][0-9]*)(?:-L([1-9][0-9]*))?")
+
+
+def link_target(path, link_path, root=ROOT):
+    """A link starting with / is relative to the repository root, as on GitHub; others to the file's directory."""
+    if not link_path:
+        return path
+    link_path = unquote(link_path)
+    return root / link_path.lstrip("/") if link_path.startswith("/") else path.parent / link_path
+
+
+def local_link_problems(path, root=ROOT):
     problems = []
     for link in markdown_links(path):
         if link.scheme or link.netloc:
             continue
-        target = path.parent / unquote(link.path) if link.path else path
+        target = link_target(path, link.path, root)
+        lines = LINE_FRAGMENT.fullmatch(link.fragment)
         if not target.exists():
             problems.append(f"Missing target: {link.geturl()}")
+        elif lines:
+            last = int(lines[2] or lines[1])
+            if not target.is_file() or int(lines[1]) > last or last > len(target.read_bytes().splitlines()):
+                problems.append(f"Missing line: {link.geturl()}")
         elif link.fragment and target.suffix.lower() == ".md":
             if unquote(link.fragment) not in heading_anchors(target.read_text(encoding="utf-8")):
                 problems.append(f"Missing heading: {link.geturl()}")
@@ -97,7 +114,8 @@ class DocumentationTests(unittest.TestCase):
                 self.assertIn(f"`{flag}", reference)
 
     def test_root_readme_links_every_guide(self):
-        targets = {unquote(link.path) for link in markdown_links(ROOT / "README.md") if not (link.scheme or link.netloc)}
+        targets = {unquote(link.path).lstrip("/") for link in markdown_links(ROOT / "README.md")
+                   if not (link.scheme or link.netloc)}
         self.assertTrue(guides())
         for path in guides():
             self.assertIn(path.relative_to(ROOT).as_posix(), targets)
@@ -106,18 +124,28 @@ class DocumentationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             (root / "my guide.md").write_text("# Real title\n", encoding="utf-8")
-            guide = root / "source.md"
+            (root / "docs").mkdir()
+            guide = root / "docs/source.md"
             guide.write_text(
                 "# Start\n"
-                "[good](my%20guide.md#real-title)\n"
+                "[good](../my%20guide.md#real-title)\n"
                 "[local](#start)\n"
                 "[bad](missing.md)\n"
-                "[bad heading](my%20guide.md#absent)\n"
-                "[external](https://example.invalid/#not-checked)\n",
+                "[bad heading](../my%20guide.md#absent)\n"
+                "[external](https://example.invalid/#not-checked)\n"
+                "[root](/my%20guide.md#real-title)\n"
+                "[root line](/docs/source.md#L2)\n"
+                "[root lines](/docs/source.md#L1-L3)\n"
+                "[root missing](/source.md)\n"
+                "[root bad heading](/my%20guide.md#absent)\n"
+                "[past the end](/my%20guide.md#L2)\n"
+                "[reversed](/docs/source.md#L3-L1)\n",
                 encoding="utf-8",
             )
-            self.assertEqual(local_link_problems(guide), [
-                "Missing target: missing.md", "Missing heading: my%20guide.md#absent",
+            self.assertEqual(local_link_problems(guide, root), [
+                "Missing target: missing.md", "Missing heading: ../my%20guide.md#absent",
+                "Missing target: /source.md", "Missing heading: /my%20guide.md#absent",
+                "Missing line: /my%20guide.md#L2", "Missing line: /docs/source.md#L3-L1",
             ])
 
     def test_fences_hide_headings_and_links_and_require_matching_closures(self):

@@ -141,7 +141,11 @@ def possible_archive(path: Path) -> bool:
     return gzip_magic and first_gzipped_tar_member(path) is not None
 
 
-def contains_saved_data(path: Path, runtime: Path) -> bool:
+def contains_saved_data(path: Path, runtime: Path, downloads: Path | None = None) -> bool:
+    """Whether a cleanup target holds Git work, backups, credentials or a mount.
+
+    downloads is the directory of checked runtime downloads, whose archives are not backups.
+    """
     if path.name in PROTECTED_NAMES or possible_archive(path):
         return True
     if path.is_symlink() or not path.is_dir():
@@ -159,10 +163,12 @@ def contains_saved_data(path: Path, runtime: Path) -> bool:
                 part.startswith((".loaf-backup-", ".loaf-restore-")) for part in current.parts
             ):
                 continue
-            # These are the pinned runtime inputs inside a private build stage.
+            # These are the pinned runtime inputs inside a private build stage, and their cached downloads.
             if current.parent == runtime and current.name.startswith(".build-") and name in (
                 "python.tar.gz", "licenses.tar.gz", "payload.tar.gz",
             ):
+                continue
+            if current == downloads and name.endswith(".tar.gz"):
                 continue
             if possible_archive(current / name) and not release_source_archive(current / name):
                 return True
@@ -197,7 +203,8 @@ def clean(project: Path, *, full: bool, dry_run: bool, confirm: Callable[[Path],
         for path in sorted(targets, key=lambda path: (path == runtime, len(path.parts), path)):
             if not (path.exists() or path.is_symlink()) or any(path.is_relative_to(item) for item in planned):
                 continue
-            if any(item.is_relative_to(path) for item in protected) or contains_saved_data(path, runtime):
+            if any(item.is_relative_to(path) for item in protected) or contains_saved_data(
+                    path, runtime, project / setup.PYTHON_RUNTIME_DIR):
                 print(f"Keep {path} (protected Git work, backup, credentials or mount).")
                 continue
             if path in {project / name for name in OFFLINE_ONLY_PATHS}:

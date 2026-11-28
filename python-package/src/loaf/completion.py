@@ -38,6 +38,7 @@ def words() -> tuple[dict[str, list[str]], dict[str, list[str]], dict[str, str |
         "package": list(cli.PACKAGE_SCRIPTS),
         "backup": [*transfer.TYPES, *transfer.ALIASES], "restore": [*transfer.TYPES, *transfer.ALIASES],
         "docs": [*docs.guides(), docs.MANUAL],
+        "run": list(cli.SERVING), "stop": list(cli.SERVING),
         "docker rm": list(resources.SELECTABLE),
     }
     options = {TOP: list(cli.GLOBAL_OPTIONS)}

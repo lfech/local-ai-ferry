@@ -6,7 +6,8 @@ GitHub and Gitea create a draft release when you push a version tag.
 Each draft gets the `loaf` executable for Linux amd64, a separate
 `loaf-v<version>-source.tar.gz` of the tagged repository, an optional Python
 wheel, the `loaf_<version>_all.deb` Debian package, the standalone
-`LICENSE.txt`, and `SHA256SUMS`.
+`LICENSE.txt`, and `SHA256SUMS`. The wheel and the Debian package carry the
+same standalone executable, which backups from them include.
 [GitHub releases](https://docs.github.com/en/repositories/releasing-projects-on-github)
 
 ## Quick release
@@ -68,18 +69,39 @@ recreates the runtime after `loaf clean` and uses `flock` to coordinate
 cleanup with other invocations. Generated systemd units refer to the
 original executable. [Python Build Standalone release](https://github.com/astral-sh/python-build-standalone/releases/tag/20261110)
 
-Setup creates `config/config.ini` and `config/models.ini` if missing,
-creates the terminal server key, and links the packaged Docker project.
-Use the same setup command with a binary carried in a backup. Follow it
-with `loaf restore`, which also recovers an archived source checkout into a
-new project directory.
-For a fresh deployment, use `../loaf build` from the project directory.
-[Backup recovery](transfer.md#debian-restore)
+Continue with the [Quick Setup](../README.md#quick-setup) for a fresh
+deployment, or restore a backup as [Debian restore](transfer.md#debian-restore)
+shows. [What setup prepares](cli-help.md#setup) · [Debian setup](debian.md)
 
-On Debian 12 or 13, run `../loaf setup --with-docker-deps` to have setup prepare
-and install Docker. The host supplies the NVIDIA driver for GPU inference.
-Use a connected machine for uncached Debian packages, Docker images, and
-models. [Debian setup](debian.md) · [Disconnected installation](installation.md#disconnected-debian-installation)
+## Executable size
+
+The executable holds a compressed runtime: CPython, pip, the setuptools
+wheel, the launcher and its deployment data. The build leaves out what loaf
+never runs, which shrinks it from about 40 MB to about 22.5 MB:
+
+| Left out | Uncompressed | Why loaf does not need it |
+| --- | --- | --- |
+| `lib/libpython3.13.so` | 31 MB | `bin/python3.13` links libpython statically. |
+| Tcl/Tk, `tkinter`, IDLE, turtle | 10 MB | They need a desktop session. |
+| `share/terminfo`, manual pages, `include/`, `python3-config` | 10 MB | They serve interactive terminals and C extension builds. |
+| `ensurepip` | 2 MB | The runtime creates no virtualenvs with pip. |
+
+The build checks that the launcher, `unittest`, `sqlite3`, `ssl`, `venv`,
+`urllib` and pip still import, and runs its usual setup, guide and dry-run
+checks with the result. The payload uses gzip at level 9.
+
+These steps would shrink it further but break something, so the build does
+not take them:
+
+| Step | Size | What it breaks |
+| --- | --- | --- |
+| xz instead of gzip | about 15.5 MB | The launcher unpacks with `tar`, and minimal Debian systems such as the `debian:12-slim` and `debian:13-slim` images lack `xz`. |
+| Leave out pip and setuptools | about 18.2 MB | The executable builds the launcher wheel offline for `installers` in a source checkout whose `.venv` is missing. |
+| Leave out further standard library modules | below 1 MB each | pip, `loaf test` and the transfer code use most of them. |
+
+The remaining bulk is `bin/python3.13` itself, about 12 MB compressed. A
+smaller interpreter needs a custom CPython build instead of the pinned Python
+Build Standalone release.
 
 ## Standalone license
 
@@ -156,10 +178,10 @@ so later builds work offline. The `installers` backup type carries them.
 Source checkout backups run this build automatically.
 
 `debian` builds `dist/loaf_<version>_all.deb` with
-[`scripts/build-deb.sh`](../scripts/build-deb.sh). It needs `dpkg-deb`, so
-run it on Debian or Ubuntu. It builds the launcher wheel into
-`install-cache/wheels/` like `loaf setup`, or reuses the cached wheel when the
-source files are unchanged.
+`scripts/build-release.sh --debian-only`: the standalone executable, a wheel
+that carries it, and the package from that wheel with
+[`scripts/build-deb.sh`](../scripts/build-deb.sh). It needs `dpkg-deb` and a
+Linux amd64 machine, so run it on Debian or Ubuntu.
 
 Both targets use compatible build wheels, including setuptools, from
 `install-cache/wheels/` when available. They fetch the build requirements
@@ -176,9 +198,10 @@ bash scripts/build-release.sh v0.1.0 dist/release
 (cd dist/release && sha256sum -c SHA256SUMS)
 ```
 
-The release build also creates the Debian package from the wheel with
-[`scripts/build-deb.sh`](../scripts/build-deb.sh), as `loaf package debian`
-does. It runs `lintian` when available. Set `LOAF_DEB_MAINTAINER` to the name and address for the
+The release build also creates the Debian package from the release wheel,
+which carries the standalone executable, as `loaf package debian` does. It
+runs `lintian` when available; the package's lintian overrides explain the
+expected tags. Set `LOAF_DEB_MAINTAINER` to the name and address for the
 package's `Maintainer` field. The release workflows install the package in
 the disconnected handoff destination. [Debian package](installation.md#debian-package)
 
@@ -193,7 +216,7 @@ downloaded wheel against `SHA256SUMS`, then run:
 sha256sum --check --ignore-missing SHA256SUMS
 python3 -m venv .venv
 .venv/bin/python -m pip install --no-index ./local_ai_ferry-0.1.0-py3-none-any.whl
-./loaf link-docker-project
+.venv/bin/loaf setup
 ```
 
 For source-based development, extract the separate archive:

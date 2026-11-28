@@ -13,7 +13,7 @@ Create the first admin account locally and keep Open WebUI sign-in enabled.
 The examples use HTTP and are intended for a trusted local network.
 
 Edit the `config/config.ini` for your deployment. To apply changes, rerun the
-serving command you normally use, `loaf offline` or `loaf online`, with your
+serving command you normally use, `loaf run offline` or `loaf run online`, with your
 usual flags such as `--cpu`. [Configuration](configuration.md#applying-changes)
 
 ## Native Debian

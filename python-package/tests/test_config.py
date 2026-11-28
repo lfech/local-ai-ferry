@@ -209,7 +209,7 @@ class ConfigTests(unittest.TestCase):
                     redirect_stderr(io.StringIO()) as diagnostics,
                     self.assertRaises(SystemExit) as result,
                 ):
-                    cli.main(["--project-dir", str(self.project), "offline"])
+                    cli.main(["--project-dir", str(self.project), "run", "offline"])
                 run.assert_not_called()
                 self.assertEqual(result.exception.code, 2)
                 self.assertIn("config.ini", diagnostics.getvalue())
@@ -246,7 +246,7 @@ class ConfigTests(unittest.TestCase):
     def test_serving_applies_webui_settings(self):
         self.path.write_text("[webui]\nbind_address = ::1\nport = 3100\nauth = false\n", encoding="utf-8")
         with patch("loaf.cli.subprocess.run") as run, redirect_stdout(io.StringIO()) as output:
-            self.assertEqual(cli.main(["--project-dir", str(self.project), "online"]), 0)
+            self.assertEqual(cli.main(["--project-dir", str(self.project), "run", "online"]), 0)
         self.assertIn("http://[::1]:3100", output.getvalue())
         env = run.call_args.kwargs["env"]
         self.assertEqual(env["LOAF_WEBUI_BIND_ADDRESS"], "::1")

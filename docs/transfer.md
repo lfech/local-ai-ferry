@@ -3,8 +3,8 @@
 [Project overview](../README.md)
 
 Run `loaf backup` on the source and copy the entire dated backup folder to the
-destination. The folder holds the archive, the standalone Linux amd64
-launcher that can restore it, and their checksums. Run `./loaf setup` and
+destination. The folder holds the archive and the standalone Linux amd64
+launcher that can restore it. Run `./loaf setup` and
 `./loaf restore` inside the folder. The folder becomes the project, and the
 backup moves unchanged to its `backup/` directory. To keep the backup on
 read-only media, run its `loaf` from the project directory instead.
@@ -28,7 +28,7 @@ available type and restore recovers everything in the archive.
 | Alias | Types |
 | --- | --- |
 | `project` | `config`, `installers` |
-| `volumes` | `models`, `webui`, and `terminal` when the terminal server is enabled |
+| `volumes` | `models`, `webui`, and `terminal` when the terminal server is enabled. Restore selects those that the archive contains. |
 
 `source` exists only in a source checkout. Backups without names include
 `terminal` when the terminal server is enabled and `[terminal_server]
@@ -52,8 +52,9 @@ loaf backup project images
 loaf restore config --archive /media/transfer/YYYYMMDD-HHMM_local-ai-ferry
 ```
 
-Restore verifies every member before it changes anything and reports any
-requested type missing from the archive. A backup that includes `webui` or
+Restore verifies every member before it changes anything and reports a
+named type that the archive lacks. An alias restores the types of its group
+that the archive contains. A backup that includes `webui` or
 `terminal` stops the project services. A backup of `models` alone stops only
 the downloader. Restoring Docker types without `images` requires the matching
 local `loaf/ollama-online` helper image.
@@ -85,12 +86,17 @@ with matching names. A same-size damaged layer can pass these checks and
 fail inference. Use a clean model store when recovering from suspected
 blob damage.
 
-Both directions use `rsync` in a disposable container without networking.
-Build or upgrade the downloader image while connected to obtain `rsync`.
-Keep the model catalog stable during transfer by avoiding model pulls,
+Both directions run in a disposable container from the downloader image
+without networking. Backup streams the store with `tar`, reading the manifests
+and saved Modelfiles before the immutable blobs they name; it copies nothing
+first. Restore unpacks the archive into a scratch directory inside the model
+volume and moves new blobs into place by renaming them, so the volume needs
+room for the new blobs only once. `rsync` then updates manifests and
+Modelfiles; build or upgrade the downloader image while connected to obtain
+it. Keep the model catalog stable during transfer by avoiding model pulls,
 creation and deletion through the Ollama API.
 
-Restore copies missing blobs first and updates matching manifests and
+Restore moves missing blobs first and updates matching manifests and
 Modelfiles. It preserves destination-only data by default. Add `--delete`
 to remove blobs, manifests and Modelfiles absent from the archive. This can
 remove models currently in use. Use `--dry-run` to check which deployment
@@ -107,19 +113,22 @@ Each backup is a folder named `YYYYMMDD-HHMM_local-ai-ferry`. Use
 backup/YYYYMMDD-HHMM_local-ai-ferry/
   loaf
   YYYYMMDD-HHMM_local-ai-ferry.tar.gz
-  SHA256SUMS
 ```
 
-`SHA256SUMS` lists the launcher and the archive. Check both without loaf
-with `sha256sum -c SHA256SUMS` inside the folder. In a source checkout,
-backup builds `dist/loaf` from the current working files before accessing
-Docker and includes the result in the folder. The first build needs a
-connected machine; later builds reuse the downloads cached in
-`install-cache/python/`. A standalone
-deployment includes the binary that launched it.
+The archive's first member, `loaf.json`, records the size and SHA-256 hash of
+every member and of the launcher. Verify and restore check the members against
+it; a launcher with another hash only gets a warning, because the running loaf
+restores the archive. A backup folder from a release before 0.5.0 also holds
+a `SHA256SUMS` file, which loaf moves with the folder and no longer reads; a
+release download keeps its own `SHA256SUMS` for the release files.
+[Which executable a backup carries](cli-help.md#backup)
+
+In a source checkout, backup builds `dist/loaf` from the current working
+files before accessing Docker. The first build needs a connected machine;
+later builds reuse the downloads cached in `install-cache/python/`.
 [Local binary build](releases.md#build-and-check-locally)
 
-The archive's first member, `loaf.json`, lists its types. loaf reads it
+`loaf.json` also lists the archive's types. loaf reads it
 before any payload, so it can refuse an unsupported archive or a missing type
 without unpacking the rest. Then each type has one plain tar member.
 `terminal` has two: `terminal/users.tar` with the user volume, absent before
@@ -133,6 +142,7 @@ made with `--no-terminal-server` adds `"skip_terminal_server": true`.
   "created": "2026-11-26T18:30:00+01:00",
   "loaf": "0.2.2",
   "deployment": "",
+  "launcher": {"size": 22501263, "sha256": "…"},
   "items": [
     {"type": "config", "members": [{"path": "config.tar", "size": 20480, "sha256": "…"}]},
     {"type": "images", "images": ["loaf/ollama-online:latest", "…"],
@@ -181,7 +191,9 @@ the checkout work offline; `installers` carries them.
 
 On Debian, run `loaf setup` while connected to fill `install-cache/deb/nvidia/`.
 Backup includes packages matching the installed NVIDIA toolkit or a complete
-prepared set for the host architecture. On Debian 13, add
+prepared set for the host architecture. Without them, backup warns that the
+destination needs the toolkit for GPU inference and names the command that
+caches its packages for each installation type. On Debian 13, add
 `--with-docker-deps` to include Docker's cached `.deb` files and local APT
 index under `install-cache/deb/docker/`. Use compatible wheels and Debian
 packages on the destination. [Disconnected installation](installation.md#disconnected-debian-installation)
@@ -192,7 +204,8 @@ minute gets numbered suffixes such as `-2`. Archives use gzip level 4 by
 default. Set `compression_level` under `[transfer]` in `config/config.ini` to
 choose a level from 0 through 9. Allow disk space for the uncompressed members
 and the compressed archive during backup. Restore stages the selected
-members in the writable project directory.
+members in the writable project directory, and the model volume needs room
+for the new blobs.
 
 Both commands report per-member progress on standard error. Interactive
 terminals show a live bar and ETA when the total is known. Docker exports
@@ -210,8 +223,8 @@ Verification checks every member against `loaf.json` and runs the same
 content checks as restore: paths and links, model manifests and their blobs,
 volume payloads, image tags and the bearer key. It lists the types and their
 sizes and reports the operating system and architecture of any saved images.
-For a backup folder, it also checks the launcher and the archive against
-`SHA256SUMS`. It performs no Docker operations and needs no temporary disk
+For a backup folder, it reports whether the launcher matches the hash that
+`loaf.json` records. It performs no Docker operations and needs no temporary disk
 space: it reads the archive once as a stream and keeps only small manifest
 files in memory. Without `--archive`, it checks the newest backup in the
 configured directory. Select the backup's namespace with `--namespace` when
@@ -242,7 +255,7 @@ warns about differing definitions, missing referenced blobs, and
 definitions it cannot check. It writes the archive with the captured files.
 
 The normal offline transfer sequence is `loaf backup`, `loaf restore`,
-then `loaf offline`. Offline startup applies saved Modelfiles, so a
+then `loaf run offline`. Offline startup applies saved Modelfiles, so a
 reported difference can affect the model that starts on the destination.
 
 ## Export cached models during backup
@@ -261,7 +274,7 @@ and still checks the saved definitions.
 
 ```bash
 ./loaf backup
-./loaf offline
+./loaf run offline
 ```
 
 Use the account that created the backup when copying it. New backups are
@@ -280,11 +293,11 @@ cp -r /media/transfer/YYYYMMDD-HHMM_local-ai-ferry ~/loaf
 cd ~/loaf
 ./loaf setup
 ./loaf restore
-./loaf offline
+./loaf run offline
 ```
 
 The first setup or restore in a backup folder makes it the project. It moves
-the archive, the launcher and `SHA256SUMS` unchanged to
+the archive and the launcher unchanged to
 `backup/YYYYMMDD-HHMM_local-ai-ferry/` and keeps a copy of `loaf` in the
 folder. The archive's name gives the directory name, even if you renamed the
 folder. Restores find the newest backup of the namespace in the settings.
@@ -308,7 +321,7 @@ backup's `loaf` by its full path from there:
 mkdir -p ~/loaf && cd ~/loaf
 /media/transfer/YYYYMMDD-HHMM_local-ai-ferry/loaf setup
 /media/transfer/YYYYMMDD-HHMM_local-ai-ferry/loaf restore
-./loaf offline
+./loaf run offline
 ```
 
 To recover a source checkout, restore `source`, or everything. Restore
@@ -327,13 +340,13 @@ rebuild `.venv` from the restored wheels when you develop there.
 
 ## Restore behavior
 
-Restore checks the archive's structure, every member's hash and content
-before calling Docker. For a backup folder, it also checks the launcher and
-the archive against `SHA256SUMS`. Before the first change it also checks the
-target volumes: an existing WebUI or terminal user volume must be unused and
-empty, and the user volume must carry the deployment's ownership labels and
-storage settings. The emptiness check runs the local downloader image without
-network; restore `images` first where it is missing. Restore applies the
+Restore first checks the Docker preconditions that `loaf.json` determines,
+so that a large archive is not read in vain: the helper image, and that an
+existing WebUI or terminal user volume is unused and empty. The emptiness
+check runs the local downloader image without network; restore `images` first
+where it is missing. Then it checks every member's hash and content, and the
+user volume's ownership labels and storage settings against the settings in
+effect after the restore. Nothing changes before all checks pass. Restore applies the
 selected types in this order: `source`, `config`, `installers`, `images`,
 `models`, `webui`, `terminal`. Restoring `config` keeps the backup's
 namespace and changes only the lines it needs in `config.ini`, so comments
@@ -357,16 +370,18 @@ settings file at the key's path.
 Restore starts services only when Modelfile replay is enabled. A project
 without a Compose file gets the `docker-project` link to the packaged
 deployment, as standalone setup creates it. On a recovered host, run the
-printed next command, normally `loaf offline`, and open the printed address
+printed next command, normally `loaf run offline`, and open the printed address
 to sign in or create the first account. When the restored settings enable the
-terminal server but its key is missing, the next command is `loaf setup`,
-which creates a key.
+terminal server but its key is missing, the next command is
+`loaf setup --terminal-server-key`. A restored `apt_repository_dir` setting
+needs its repository directory, which no archive type carries; copy it or
+create it again with `loaf setup --create-file-repository`.
 
 Add `--import` or set `import_models = true` under `[transfer]` to start offline
 Ollama and import all saved Modelfiles after restoring `models`.
 The default uses NVIDIA container access. Add `--cpu` to run the import on CPU.
 This step leaves WebUI stopped. Run
-`loaf offline` to start WebUI. If import fails, the restored data remains in
+`loaf run offline` to start WebUI. If import fails, the restored data remains in
 place. Fix the problem and start the desired serving mode. Use `--no-import`
 to skip a configured import.
 

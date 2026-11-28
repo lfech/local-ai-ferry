@@ -41,6 +41,9 @@ x-webui: &webui
   environment: &webui-settings
     OLLAMA_BASE_URL: http://ollama-offline:11434
     WEBUI_AUTH: "${LOAF_WEBUI_AUTH:-true}"
+    # Keep the session signing key with the accounts, so that sign-ins survive new containers and profile
+    # switches and move with the webui backup type. Open WebUI's start.sh creates the file when it is missing.
+    WEBUI_SECRET_KEY_FILE: /app/backend/data/.webui_secret_key
   ports:
     - target: 8080
       published: "${LOAF_WEBUI_PORT:-3000}"

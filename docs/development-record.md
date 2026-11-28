@@ -7,6 +7,126 @@ Git milestones use commit timestamps. Working-tree milestones use the
 associated verification time where it was recorded.
 Earlier entries use the current names for commands, paths and artifacts.
 
+## 2026-11-28 04:15 CET — loaf run, profile stops and compressed documentation
+
+The author asked for the core task in [Development](instructions/development.md),
+for documentation that states each fact once and matches the current
+behavior, and for a shorter `AGENTS.md` with an unchanged development style.
+
+- **loaf run.** `loaf run offline` and `loaf run online` replace the
+  top-level `offline` and `online` commands; the old names fail with a
+  pointer to the new one. Starting one profile still stops the other. The
+  systemd units, the follow-up hints, completion and the build checks use the
+  new form.
+- **loaf stop PROFILE.** `loaf stop offline` or `loaf stop online` stops and
+  removes only that profile's Ollama and WebUI. The terminal server serves
+  both profiles, so it stops with them only when Compose reports no running
+  container of the other profile; a dry run cannot ask Docker and says so.
+  Without a profile, `stop` stops every service as before.
+- **Documentation.** The guides use `loaf run`. The installation, Debian,
+  release and terminal guides link to the restore flow in
+  [Debian restore](transfer.md#debian-restore) instead of repeating it, and
+  the README links to the model guide instead of repeating its tables.
+  `docs/instructions/architecture.md` now matches the implementation: the
+  release wheel and package carry the executable, backup folders without
+  `SHA256SUMS`, model transfer without a staging copy, chat containers at
+  stable runtime paths, the explicit key step, and a link to the command
+  reference in place of its command table. The implemented decisions and the
+  core task left `development.md`; `problems.md` keeps only the README badges.
+- **AGENTS.md.** The development style stays word for word. The rest became
+  one list of working rules, with the rule to read `cli.py` only in parts and
+  the rule to explain each behavior in one place, and a shorter map that names
+  the owner of each topic. `CLAUDE.md` imports `AGENTS.md`.
+
+## 2026-11-28 04:00 CET — Fixes for the audit of commit 7263cf5
+
+The author decided how to resolve the problems in
+[Problems](instructions/problems.md) in [Development](instructions/development.md)
+and asked for them to be fixed, with the audit's proposals where no decision
+was given. The numbers are those of the problem list.
+
+- **Backup folders (1).** The setup bug still existed in the current code:
+  `is_bundle()` took any folder with `loaf` and `SHA256SUMS`, such as a
+  release download, for a backup folder. A backup folder is now a `loaf` and
+  one `*.tar.gz` whose first member is `loaf.json`; the check decompresses only
+  the first tar header. Backups no longer write `SHA256SUMS`. `loaf.json`
+  records the launcher's size and SHA-256, and verify and restore check every
+  member against `loaf.json` alone; another launcher only gets a warning. A
+  folder from before 0.5.0 keeps working, and its `SHA256SUMS` moves with it.
+  A truncated archive reports that it is truncated or damaged.
+- **Documentation (2).** [cli-help.md](cli-help.md) is the one place for
+  command and option behavior: it took over `cli.md`, the command tables of
+  the README, and the stop, docker, status, clean, completion and option
+  details of the launcher guide, which link there now. The removed
+  `link-docker-project` command became `setup --link-docker-project` in the
+  guides and in the Verify workflow, and `--test-local-repository` became
+  `--create-file-repository`. Each `setup` option does only its own step.
+- **Sign-ins (3).** Compose sets Open WebUI's `WEBUI_SECRET_KEY_FILE` to
+  `/app/backend/data/.webui_secret_key`, so the key that signs sessions lives
+  in the WebUI volume and moves with `webui`. Outside the volume, Open WebUI
+  writes only Python bytecode, so nothing else moved.
+- **Restore (4, 6).** An alias restores the types of its group that the
+  archive contains; named types must exist. Docker preconditions that need
+  only `loaf.json` run before the archive is read: helper image, unused and
+  empty target volumes, the WebUI image for removing the terminal connection
+  and the model volume's consumers.
+- **Executable (5).** The release wheel and the Debian package carry the
+  standalone executable as `loaf/data/standalone/loaf`, which backups from
+  them include. `loaf package debian` runs `build-release.sh --debian-only`.
+  A backup dry run checks for the executable. The build leaves out the
+  static interpreter's second libpython copy, Tcl/Tk, IDLE, turtle, terminfo,
+  headers and `ensurepip`, and compresses with gzip level 9: 39.7 MB became
+  22.5 MB. [releases.md](releases.md#executable-size) records the plan, with
+  xz and the removal of pip as rejected steps. A lintian override covers the
+  self-extracting script.
+- **Terminal key (7).** Only `setup --terminal-server-key` creates the key;
+  in a backup folder it takes the backup's key. Restore brings the key of the
+  `terminal` type, suggests `setup --terminal-server-key` when it is missing,
+  and names the remedy for a different existing key.
+- **Toolkit (9).** Missing NVIDIA toolkit packages no longer fail a backup.
+  It warns that GPU inference needs the toolkit and names the caching command
+  for the source checkout, the standalone executable and the Debian package.
+- **Setup files (12, 15).** Setup creates `config.ini` with commented
+  defaults and a copy of the model list in effect in the selected
+  configuration directory, also with `--config-dir`, and never replaces a file.
+- **Smaller fixes (8, 10, 11, 13, 14, 17).** `clean --full` ignores the
+  checked downloads in `install-cache/python/` when it looks for backups. The
+  Docker test uses `--no-remove-containers`. The "holds data" error no longer
+  suggests `--namespace`. `integration systemd --cpu` writes a CPU unit. The
+  follow-up commands keep `--cpu` after a CPU replay, name `--namespace` only
+  when the settings select another one, and backup names the command that
+  resumes serving. `status` names `loaf download` for a missing model volume.
+- **Chat containers (16).** The audit's proposal, a revision from contents
+  only, would leave stopped containers with stale or missing bind sources.
+  The launcher now copies the runner and helper files to
+  `.loaf-terminal-runtime/` in the project, and the revision covers the mount
+  paths but not the contents. A new release or a replaced APT source file
+  reaches a chat on its next start without replacing its container.
+- **Models (18).** Backup streams the store with `tar`, manifests and
+  Modelfiles before blobs, without the copy into an anonymous volume. Restore
+  unpacks into a scratch directory in the model volume and renames new blobs
+  into place; `--delete` removes blobs that the archive lacks.
+- **Left open.** The core task `loaf run [offline|online]` in
+  [Development](instructions/development.md) is not part of this change.
+  `docs/instructions/architecture.md` still describes the earlier setup key,
+  `SHA256SUMS`, model staging and runtime mounts; it only got link targets
+  updated. The problem and decision lists stay for the author to clear.
+
+## 2026-11-27 23:25 CET — Repository-root links in the documentation checks
+
+The author asked for `test_fences_and_local_links` to accept the
+repository-root links that [Problems](instructions/problems.md) uses.
+
+- **Link checks.** A link that starts with `/` resolves from the repository
+  root, as GitHub resolves it; other links stay relative to their file. A
+  `#L12` or `#L12-L20` fragment must name lines that exist in the target.
+  Heading fragments of Markdown targets are checked as before. The README
+  index check accepts both forms of a guide link.
+- **Bundled guides.** `loaf docs` and the guides that setup exports rewrite a
+  repository-root link like a relative one, so such a link in a bundled guide
+  points into the exported `docs/` or the release instead of a path with a
+  double slash.
+
 ## 2026-11-27 22:30 CET — Fixes for the audit of commit 0c47cf0
 
 The author decided how to resolve the 23 audit problems in
@@ -176,7 +296,7 @@ design and for `apt` that works as naturally as possible.
 The author decided that every Docker resource name starts with `loaf`, that
 `loaf docker` works on the selected deployment, and that loaf suppresses the
 Compose warning about volumes it did not create.
-[Docker resources](launcher.md#list-and-remove-docker-resources)
+[Docker resources](cli-help.md#docker)
 
 - **Names.** The deployment namespace is the Compose project `loaf`, or
   `loaf-VERSION`, replacing `local-inference` and `VERSION-local-inference`.
@@ -458,7 +578,7 @@ The author's decisions D1 to D5 replace the terminal design.
   examples. `loaf docs` lists and prints them, and `loaf docs loaf.1`
   prints the generated manual page. Standalone setup exports them to a
   stamped `docs/` with links into `docker-project/` or to the release.
-  [Bundled guides](launcher.md#read-the-bundled-guides)
+  [Bundled guides](cli-help.md#docs)
 - Debian package: `scripts/build-deb.sh` turns the wheel into
   `loaf_<version>_all.deb` for Debian 12 and 13, with a conffile in
   `/etc/loaf`, maintainer scripts, a disabled `loaf.service`, the manual
@@ -575,7 +695,7 @@ The author's decisions D1 to D5 replace the terminal design.
   [Release acceptance](verification.md#check-a-release-candidate)
 - Made cleanup refuse an invalid configuration so it can protect a custom
   terminal key. Added a shared compatibility test matrix for launcher and
-  provisioner key readers. [Cleanup](launcher.md#clean-generated-files) ·
+  provisioner key readers. [Cleanup](cli-help.md#clean) ·
   [Terminal key format](terminal-server.md#enable-and-connect)
 
 ## 2026-11-25 20:58 CET — Documentation and architecture audit
@@ -667,7 +787,7 @@ The author's decisions D1 to D5 replace the terminal design.
 
 - Limited `loaf clean --full` to current installation and build paths.
   Updated the cleanup fixture to use `install-cache/` and check Git work
-  inside generated directories. [Cleanup](launcher.md#clean-generated-files)
+  inside generated directories. [Cleanup](cli-help.md#clean)
 
 ## 2026-11-23 22:33 CET — GitHub quick release guide
 
@@ -732,7 +852,7 @@ The author's decisions D1 to D5 replace the terminal design.
 
 - Top-level help lists commands before global flags. Each command and host
   integration has scoped help based on the launcher's flag definitions.
-- Added a short [CLI overview](cli.md) and a complete [command reference](cli-help.md).
+- Added a short CLI overview, merged into the [command reference](cli-help.md) since 2026-11-28, and that reference.
   The launcher guide focuses on installation and deployment workflows.
 
 ## 2026-11-23 15:32 CET — One-command release tagging
@@ -748,7 +868,7 @@ The author's decisions D1 to D5 replace the terminal design.
 - Added `loaf clean` for temporary files and the shared runtime cache.
   `--full` also clears installation caches and generated installation
   files. Both modes preserve Git, backup archives and deployment data.
-  [Cleanup](launcher.md#clean-generated-files)
+  [Cleanup](cli-help.md#clean)
 - Shared the runtime lock between packing and launching. Hardened project
   locks against links and kept standalone systemd commands tied to the
   original executable so they can recreate the runtime after cleanup.
@@ -807,7 +927,7 @@ The author's decisions D1 to D5 replace the terminal design.
 
 - Shortened the NVIDIA probe failure in `loaf status` to one line and
   included the CPU readiness command.
-  [Readiness checks](launcher.md#check-readiness-with-status)
+  [Readiness checks](cli-help.md#status)
 
 ## 2026-11-23 10:48 CET — Refresh badges from the test runner
 
@@ -929,42 +1049,42 @@ The author's decisions D1 to D5 replace the terminal design.
 
 - Grouped launcher and Compose configuration with the terminal bearer key.
   Moved the Open Terminal image into the common local image checks.
-  [Status report](launcher.md#check-readiness-with-status)
+  [Status report](cli-help.md#status)
 
 ## 2026-11-22 11:52 CET — Short flag for keeping stopped containers
 
 - Added `loaf stop -n` as the short form of `--no-remove-containers`.
-  [Launcher](launcher.md#stop-and-remove-containers)
+  [Launcher](cli-help.md#stop)
 
 ## 2026-11-22 11:52 CET — Remove service containers by default
 
 - Made container removal the default for `loaf stop` and added
-  `--no-remove-containers` to keep stopped containers. [Launcher](launcher.md#stop-and-remove-containers)
+  `--no-remove-containers` to keep stopped containers. [Launcher](cli-help.md#stop)
 
 ## 2026-11-22 11:51 CET — Compose compatibility warning
 
 - Changed Compose 2.26.1 through 2.29.x from a readiness failure to a
-  compatibility warning. [Status compatibility](launcher.md#check-readiness-with-status)
+  compatibility warning. [Status compatibility](cli-help.md#status)
 
 ## 2026-11-22 11:50 CET — Optional container removal
 
 - Added opt-in container removal to `loaf stop` using Compose `rm --force`
-  after stopping the deployment. [Launcher](launcher.md#stop-and-remove-containers)
+  after stopping the deployment. [Launcher](cli-help.md#stop)
 
 ## 2026-11-22 11:48 CET — Docker Engine and Open Terminal status
 
 - Made `loaf status` warn on Docker Engine 26 and 27 and report Open Terminal
-  as `-`, `BUILT`, or `OK`. [Readiness guide](launcher.md#check-readiness-with-status)
+  as `-`, `BUILT`, or `OK`. [Readiness guide](cli-help.md#status)
 
 ## 2026-11-22 11:44 CET — Ollama model catalog readiness
 
 - Updated `loaf status` to detect Ollama's `manifests-v2` catalog and follow
-  manifest links to existing blobs. [Readiness guide](launcher.md#check-readiness-with-status)
+  manifest links to existing blobs. [Readiness guide](cli-help.md#status)
 
 ## 2026-11-22 11:39 CET — Status report layout
 
 - Added deployment details, grouped readiness checks, a container heading and
-  a preflight summary to `loaf status`. [Launcher](launcher.md#check-readiness-with-status)
+  a preflight summary to `loaf status`. [Launcher](cli-help.md#status)
 
 ## 2026-11-22 11:32 CET — Tether installation command
 
@@ -1100,7 +1220,7 @@ The author's decisions D1 to D5 replace the terminal design.
   Import merges by default and mirrors the archive with `--delete`.
   [Model transfer](transfer.md#transfer-models-between-existing-deployments)
 - Implemented readiness checks in `loaf status` and Docker-free archive checks
-  in `loaf backup --verify`. [Readiness](launcher.md#check-readiness-with-status) ·
+  in `loaf backup --verify`. [Readiness](cli-help.md#status) ·
   [Archive verification](transfer.md#verify-a-backup)
 - The overlap between stored Ollama manifests and reapplying saved Modelfiles
   at serving startup is open for a design decision.
@@ -1112,7 +1232,7 @@ The author's decisions D1 to D5 replace the terminal design.
   Import merges by default. `--delete` removes destination-only model data.
   [Model transfer](transfer.md#transfer-models-between-existing-deployments)
 - Added Compose, image, GPU, volume and port checks to `loaf status`.
-  [Readiness checks](launcher.md#check-readiness-with-status)
+  [Readiness checks](cli-help.md#status)
 - Added SHA-256 digests to full backups and Docker-free verification with
   image platform reporting. [Archive verification](transfer.md#verify-a-backup)
 

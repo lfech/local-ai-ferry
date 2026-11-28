@@ -14,7 +14,8 @@ Linux amd64 executable supplies its own Python and deployment files.
 
 Three channels deliver the same launcher: the repository for development,
 the standalone executable for portable deployment directories, and the
-Debian package for the system deployment. A deployment directory is the
+Debian package for the system deployment. The release wheel and the Debian
+package carry the standalone executable, which every backup folder includes. A deployment directory is the
 current directory or `--project-dir`. The system deployment uses `/etc/loaf`
 for settings and `/var/lib/loaf` for data, backups and the lock. The Debian
 package selects it by default, and `--system` selects it from any channel.
@@ -34,27 +35,12 @@ the bundled CPU, CUDA 12 and CUDA 13 recipes. Each Dockerfile and default build 
 stays inside its context, which Compose always allows Buildx to read.
 [Ollama build selection](../configuration.md#select-an-ollama-build-recipe) ·
 [Terminal server](../terminal-server.md)
-`loaf link-docker-project` exposes the deployment tree for direct Compose calls.
+`loaf setup --link-docker-project` exposes the deployment tree for direct Compose calls.
 [Direct Compose commands](../launcher.md#link-the-docker-project)
 
-| Command | Behavior |
-| --- | --- |
-| `loaf setup` / `loaf install` | Standalone setup copies missing configuration and links the packaged deployment; a wheel-installed launcher does the same outside a source checkout. Source checkout setup prepares the Python wheel cache, virtualenv and NVIDIA Container Toolkit on Debian. As root, it refuses a checkout that another user owns unless `--allow-root` is given. Both create the terminal bearer key if needed. `setup tests` adds the pinned test packages to the wheel cache and the running virtualenv. `--test-local-repository` downloads a few command-line tools into a local APT repository for `apt` in chat containers. [Installation](../installation.md) |
-| `loaf package binary debian` | Build the selected targets from the current source files into `dist/`: `binary` is the standalone Linux amd64 executable `dist/loaf`, `debian` the Debian package `dist/loaf_<version>_all.deb`. [Local builds](../releases.md#build-and-check-locally) |
-| `loaf clean` | Clear the user runtime cache and project temporaries. `--full` also clears generated installation files and asks before it removes `install-cache/`, whose installers an offline host cannot download again; `--yes` skips the question. Git, backups, settings, credentials and Docker data are preserved. [Cleanup](../launcher.md#clean-generated-files) |
-| `loaf build` | Builds the downloader, Ollama serving and Open WebUI images. Includes the terminal image when enabled. |
-| `loaf upgrade` | Builds the same images with Compose's `--pull` option to refresh their base images. |
-| `loaf download` | Stops serving services, starts the downloader in the `download` profile and pulls each selected model. |
-| `loaf online` | Switches to connected Ollama and WebUI with outbound access. |
-| `loaf offline` | Switches to Ollama on an internal network and WebUI with offline settings. |
-| `loaf backup` / `loaf restore` | Create or recover a backup folder with selectable archive types: source, config, installers, images, models, webui and terminal. The aliases `project` and `volumes` group them. |
-| `loaf version` / `loaf docs` | Shows the release, installation and default deployment, or prints the bundled guides and manual page. |
-| `loaf completion install` / `remove` / `print` | Manages per-user Bash completion generated from the command tables. The Debian package installs the same script system-wide. [Bash completion](../launcher.md#bash-completion) |
-| `loaf status` | Checks deployment readiness and lists the project's containers. [Readiness checks](../launcher.md#check-readiness-with-status) |
-| `loaf stop` | Stops services and removes their Compose containers by default. Use `--no-remove-containers` to keep stopped service containers and their logs. Images and volumes persist. [Shutdown options](../launcher.md#stop-and-remove-containers) |
-| `loaf docker ps` / `loaf docker rm` | Lists the selected deployment's containers, images, volumes and networks, or removes the selected types: `all`, `containers`, `images`, `volumes` or `networks`. Removal asks for confirmation unless `--yes` is given, stops the services first and needs a deployment without containers before it removes networks, volumes or images. [Docker resources](../launcher.md#list-and-remove-docker-resources) |
-| `loaf integration <name>` | Prints a systemd unit, Continue configuration or Tether installation instructions. [Host integrations](../installation.md#host-integrations) |
-| `loaf test [-v]` | Runs the selected project's unittest suite. [Verification guide](../verification.md) |
+The [command reference](../cli-help.md) explains every command and option.
+`loaf run offline` and `loaf run online` start a serving profile, and
+`loaf stop` stops one profile or, without one, every service.
 
 Both `loaf` and `python -m loaf` use the current directory by default.
 `--project-dir` selects another deployment. The launcher looks for Compose
@@ -106,7 +92,7 @@ commands use the namespace name when naming backup folders and checking
 restored images. Volumes that loaf creates carry Compose's labels, so Compose uses
 them without a warning.
 [Separate namespaces](../launcher.md#run-a-separate-namespace) ·
-[Docker resources](../launcher.md#list-and-remove-docker-resources)
+[Docker resources](../cli-help.md#docker)
 
 All three Ollama services mount the Compose volume `ollama`, named
 `loaf-ollama` by default, at `/ollama`. Its
@@ -176,17 +162,20 @@ limits and an unpublished API on its own internal bridge. Docker Engine 26 and
 Engine 28 and newer use the `isolated` gateway mode. `[terminal_server]
 network` decides further access: `isolated` keeps containers on their bridge
 alone, and `connected` also attaches them to a shared bridge with outbound
-access and inter-container traffic disabled. `loaf offline` prints a note,
-not a warning, about that access.
+access and inter-container traffic disabled. `loaf run offline` prints a
+note, not a warning, about that access.
 [Workspace isolation and limits](../terminal-server.md#workspace-policy)
 
 A configured `apt_source_file` replaces inherited sources during an image
-build, and in chat containers at runtime. At startup, a Compose override mounts the source file and the
-launcher's bundled provisioner and runner scripts read-only. The provisioner
-mounts the source file in every chat container, and an `apt_repository_dir`
-read-only at `/run/loaf-apt/repository`. A container records the runtime
-mounts, the repository and the network setting it was created with; a change
-replaces it on the next start.
+build, and in chat containers at runtime. At startup, the launcher copies its
+provisioner and runner scripts to `.loaf-terminal-runtime/` in the project,
+a path that stays the same across loaf releases, and a Compose override
+mounts them and the source file read-only. The provisioner mounts the source
+file and the runner in every chat container, and an `apt_repository_dir`
+read-only at `/run/loaf-apt/repository`. A container records the paths of
+its runtime mounts, the repository and the network setting it was created
+with; a change replaces it on the next start. Changed contents at the same
+paths apply on its next start, so a new loaf release keeps chat containers.
 [Package mirror](../terminal-server.md#package-mirror-for-image-builds) ·
 [Install packages in a chat](../terminal-server.md#install-packages-in-a-chat)
 
@@ -216,11 +205,12 @@ Releases before v1.0.0 migrate no terminal data from earlier layouts.
 ## Backup and restore
 
 `loaf backup` publishes one `YYYYMMDD-HHMM_local-ai-ferry/` folder per
-successful run in the default deployment. The folder has the archive, the
-standalone `loaf` launcher that can restore it, and `SHA256SUMS` with both
-files' SHA-256 hashes. The archive is a gzip-compressed tar. Its first member,
-`loaf.json`, records the archive format, the namespace name and one item
-per type with each member's path, size and SHA-256 hash. Each type adds one
+successful run in the default deployment. The folder has the archive and the
+standalone `loaf` launcher that can restore it; a folder is recognized by an
+archive whose first member is `loaf.json`. The archive is a gzip-compressed
+tar. `loaf.json` records the archive format, the namespace name, the
+launcher's size and SHA-256 hash, and one item per type with each member's
+path, size and SHA-256 hash. Each type adds one
 plain tar member; `terminal` adds its volume and the bearer key as separate
 members. A backup made with `--no-terminal-server` records that in
 `loaf.json`. Readers learn the types from `loaf.json` before any payload.
@@ -231,7 +221,7 @@ members. A backup made with `--no-terminal-server` records that in
 | `config` | Settings, saved Modelfiles and APT source files, without the terminal key. Links stay links and must point to another archived configuration file. | Into the configuration directory by single-line edits, keeping the backup's namespace and, in the system deployment, its terminal key path. |
 | `installers` | Python wheels, NVIDIA and Docker Debian packages, and the standalone Python runtime downloads of a source checkout's executable builds, the same for every channel. | Into `install-cache/`. |
 | `images` | The three core Docker images and the matching shared Open Terminal image when available locally. | `docker image load`. |
-| `models` | A consistent snapshot of the Ollama blobs, manifests and saved Modelfiles. | Merged by `rsync`; `--delete` mirrors. |
+| `models` | The Ollama manifests and saved Modelfiles, streamed before the blobs they name. | Unpacked inside the volume, new blobs renamed into place, the rest merged by `rsync`; `--delete` mirrors. |
 | `webui` | The Open WebUI volume. | Into a new or empty volume. |
 | `terminal` | The user volume with each account's `/home/user` folder and the terminal bearer key. Chat containers stay behind. | A new or empty user volume with its ownership labels, and the key. Implies `webui`. |
 
@@ -247,13 +237,15 @@ with the network-less WebUI image. Restore recovers everything in the archive. B
 capturing `webui` or `terminal`, and only the downloader for `models`. Model
 snapshots tolerate the selected deployment's serving backend. All Docker
 operations use disposable, network-disabled containers from the local
-downloader image.
+downloader image; neither direction copies the model store first.
 [Model transfer](../transfer.md#transfer-models-between-existing-deployments)
 
 Restore reads `loaf.json`, refuses formats outside `[transfer]
-backup_version_min` to the release's format and types missing from the
-archive, then checks every member and the archive's `SHA256SUMS` entry before
-any change. It validates volume paths, links, image tags and model manifests
+backup_version_min` to the release's format and named types missing from the
+archive; an alias selects the types of its group that the archive contains.
+It checks the Docker preconditions that `loaf.json` determines before it reads
+the archive, then every member against `loaf.json` before any change. A
+launcher with another hash than the recorded one only gets a warning. It validates volume paths, links, image tags and model manifests
 while reading each member once, refuses target volumes that are in use, hold
 data or carry other ownership labels, and a different existing terminal key,
 and applies types in the order of the table. `backup --verify` runs the same
@@ -278,7 +270,7 @@ that group, reads it. A settings file is never restored at the key's path.
 [Restore behavior](../transfer.md#restore-behavior)
 
 Setup and restore run in a backup folder make it the project. They move the
-archive, its launcher and `SHA256SUMS` unchanged to
+archive and its launcher unchanged to
 `backup/<archive name>/`, where later restores find it, and keep a copy of
 the launcher at the root. Restore links the packaged deployment into a
 project without a Compose file. Both end with the command to run next. Other
@@ -287,9 +279,10 @@ print the typical next steps with a pointer to `loaf docs`. With the loaf
 Debian package installed, setup and restore still use the folder and also
 print the `--system` restore command; loaf never selects the system
 deployment by itself. To keep the backup on its media, run its launcher from
-the project directory. Standalone setup reuses the archived bearer key when available,
-recovers `installers` with `--with-docker-deps`, and copies the launcher into
-the project. Restoring `source` replaces existing files with the archived
+the project directory. Only `setup --terminal-server-key` creates a bearer
+key, from the backup when run in its folder; restore brings the key of the
+`terminal` type. Standalone setup recovers `installers` with
+`--with-docker-deps` and copies the launcher into the project. Restoring `source` replaces existing files with the archived
 ones and puts them back if publishing fails.
 [Backup recovery](../transfer.md#debian-restore)
 

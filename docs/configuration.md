@@ -20,10 +20,12 @@ volume at `/ollama`, with `OLLAMA_MODELS=/ollama/models`. Its `models/` director
 contains weights and manifests, including newer Ollama catalog entries under
 `models/manifests-v2/`. The volume's `config/` contains exported text Modelfiles.
 The `loaf-open-webui` volume mounts at `/app/backend/data` for accounts, chats,
-settings and caches. Stopping containers preserves both volumes.
+settings, caches and the key that signs sign-in sessions. Stopping containers
+preserves both volumes. The `loaf-terminal-users` volume holds each account's
+`/home/user` folder of the [terminal server](terminal-server.md#offline-transfer-and-shutdown).
 Separate namespaces use separate volume names such as `loaf-v1-2-3-ollama`
 with the same mount paths. [Separate namespaces](launcher.md#run-a-separate-namespace) ·
-[Docker resources](launcher.md#list-and-remove-docker-resources)
+[Docker resources](cli-help.md#docker)
 
 ## Project configuration
 
@@ -47,21 +49,20 @@ a different project directory. `loaf` validates every layer before Docker
 starts. `loaf status` lists the settings files in use.
 [System deployment](installation.md#debian-package)
 
-Standalone setup writes a `config/config.ini` with every key commented out,
-so system settings and later packaged defaults stay in effect. When
+`loaf setup` creates the project's settings when they are missing and never
+replaces an existing file. It writes a `config.ini` with every key commented
+out, so system settings and later packaged defaults stay in effect, and a copy
+of the model list in effect, from `/etc/loaf` or else the packaged one. With
+`--config-dir PATH`, setup writes both into that directory. A copied
+`models.ini` keeps its selection when `/etc/loaf/models.ini` changes later. When
 `/etc/loaf` has settings and the project uses the same namespace, both
 operate the same Docker containers and volumes. `setup` and `status` warn
 about this. Set `[launcher] namespace` in the project for a separate
 deployment. A `[launcher] version` line from an earlier release fails with a
 pointer to its new name. Tests replace the system directory with `LOAF_SYSTEM_CONFIG_DIR`.
 
-In a linked workspace with no local `config/`, copy the defaults to customize them.
-
-```bash
-loaf link-docker-project
-mkdir config
-cp docker-project/config/config.ini docker-project/config/models.ini config/
-```
+In a workspace that has only the `docker-project` link, run `loaf setup` to
+create the settings files.
 
 This example selects a separate deployment, a different model list and port,
 and an external backup directory.
@@ -119,7 +120,7 @@ The same values work with the `OLLAMA_IMAGE` override for direct Compose use.
 | --- | --- |
 | `loaf-ollama-cuda13` | Default. CPU and CUDA 13. GPU serving requires NVIDIA driver 580 or newer and a working container runtime. |
 | `loaf-ollama-cuda12` | CPU and CUDA 12 for NVIDIA drivers from 550 to 579. GPUs with compute capability 5.0 to 6.2 need driver 570 or newer. Debian 13's own driver package qualifies. |
-| `loaf-ollama-cpu` | CPU only. Serve with `loaf offline --cpu` or `loaf online --cpu`. |
+| `loaf-ollama-cpu` | CPU only. Serve with `loaf run offline --cpu` or `loaf run online --cpu`. |
 | `ollama/ollama:latest` | Full upstream Ollama image with CUDA 12 and 13 and the same driver requirements. Other image references also work. |
 
 The compact recipes copy runtime files from Ollama 0.40.18. The first
@@ -192,7 +193,7 @@ restore.
 
 ## WebUI settings
 
-Open the address printed by `loaf online` or `loaf offline`. The default is
+Open the address printed by `loaf run online` or `loaf run offline`. The default is
 **http://localhost:3000**. With authentication enabled, create the first admin
 account or sign in. Check the Ollama connection and select your model.
 
@@ -217,10 +218,17 @@ Enable the optional tool history filter in WebUI's model settings when an
 Ollama model rejects a follow-up after tool results.
 [Conversation roles must alternate](troubleshooting.md#conversation-roles-must-alternate)
 
+Open WebUI signs sign-in sessions with a key that loaf keeps in the WebUI
+volume as `.webui_secret_key`, through Open WebUI's `WEBUI_SECRET_KEY_FILE`.
+Sign-ins therefore survive new containers, switches between the `online` and
+`offline` profiles, and a restore of the `webui` type on another host. Open WebUI
+creates the key on its first start. Outside its volume, Open WebUI writes only
+Python bytecode, which needs no backup.
+
 ### Run without signing in
 
 `auth = true` is the default. To run without sign-in, set `auth = false` under
-`[webui]` in `config.ini` and run `loaf offline` or `loaf online`. This sets
+`[webui]` in `config.ini` and run `loaf run offline` or `loaf run online`. This sets
 `WEBUI_AUTH=false` when Compose creates the WebUI container.
 
 Choose the authentication mode before creating users in a fresh WebUI volume.
@@ -232,7 +240,7 @@ this mode on a connected host. [Open WebUI single-user mode](https://docs.openwe
 
 ## Networking and offline operation
 
-The downloader uses a bridge with internet access. In `loaf online`, both Ollama
+The downloader uses a bridge with internet access. In `loaf run online`, both Ollama
 and WebUI use the `connected` bridge. By default, `ollama_cloud` and
 `webui_downloads` are enabled in the online profile. Turning off
 `webui_downloads` enables WebUI's offline settings for automatic downloads

@@ -60,9 +60,11 @@ def check_volume(compose: Compose, image: str, volume: str, *, models: bool) -> 
     try:
         docker_output(compose, ["docker", "volume", "inspect", volume])
     except subprocess.CalledProcessError as exc:
-        if not models and "no such volume" in (exc.stderr or "").lower():
-            return "will be created on first startup"
-        raise
+        if "no such volume" not in (exc.stderr or "").lower():
+            raise
+        if models:
+            raise ValueError("The model volume does not exist yet. Run loaf download or loaf restore models.") from exc
+        return "will be created on first startup"
     mount = f"type=volume,source={volume},target=/check,volume-nocopy,readonly"
     script = "ls -A /check >/dev/null"
     if models:

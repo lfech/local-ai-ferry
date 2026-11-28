@@ -6,7 +6,7 @@ Run commands from the project directory unless a step says otherwise.
 
 Use Debian 12 or 13, amd64, with Python 3.10 or newer. The default serving
 mode requires a compatible NVIDIA GPU. A preparation host can serve on CPU
-with `loaf online --cpu` or `loaf offline --cpu`. [CPU serving](launcher.md#serve-on-cpu)
+with `loaf run online --cpu` or `loaf run offline --cpu`. [CPU serving](launcher.md#serve-on-cpu)
 These steps use the native, system-wide Docker Engine. Use `sudo` for package
 installation, runtime configuration and service administration. Debian 12
 ships Docker 20.10 and Compose 1.29, so it needs Docker's repository. The
@@ -143,19 +143,9 @@ and give your login [Docker access](#docker-access).
 
 ## Use a prepared archive
 
-Copy the complete backup folder to Debian and enter it. Run `./loaf setup`
-and `./loaf restore` to make the folder the project with the images, volumes
-and saved settings. Then start or resume inference there.
-[Debian restore](transfer.md#debian-restore)
-
-```bash
-./loaf offline
-```
-
-Backend startup applies saved Modelfiles automatically. To add only the
-models of a backup to an existing deployment, use
-`./loaf restore models --archive PATH`.
-[Model transfer](transfer.md#transfer-models-between-existing-deployments)
+Restore a backup folder as [Debian restore](transfer.md#debian-restore)
+shows, or add only its models to an existing deployment with
+[model transfer](transfer.md#transfer-models-between-existing-deployments).
 
 ## Verify and open WebUI
 
@@ -178,34 +168,12 @@ To publish WebUI directly to the LAN, follow the [local network guide](local-net
 
 ## Prepare models directly on online Debian
 
-On a connected Debian host, choose your models in a local `config/models.ini`
-or use the packaged selection. Prepare them after installing `loaf`.
-
-```bash
-./loaf build
-./loaf download
-./loaf offline
-```
-
-To try the 8 GB example, set `models_file = model-examples/models.8gb.ini`
-in the `[launcher]` section of `config/config.ini` before downloading.
-[Model selection](launcher.md#select-models) · [Quick Setup](../README.md#quick-setup)
-
-No archive or restore is needed when this same host also runs inference. For
-another computer, use [Debian backup](transfer.md#debian-backup).
+A connected host that also serves follows the [Quick Setup](../README.md#quick-setup)
+and needs no backup. [Model selection](launcher.md#select-models) ·
+[Debian backup](transfer.md#debian-backup)
 
 ## Stop and inspect
 
-```bash
-./loaf link-docker-project
-(
-    cd docker-project
-    docker compose --profile offline exec ollama-offline ollama ps
-    docker compose --profile offline logs --tail 50 ollama-offline
-)
-./loaf stop
-```
-
-The final command removes service containers. Collect their logs first or use
-`./loaf stop --no-remove-containers` to keep them. Start again with `./loaf offline`.
-Data remains in the volumes. [Stop options](launcher.md#stop-and-remove-containers)
+The [Debian smoke checks](verification.md#debian-smoke-checks) inspect the
+running services. [`loaf stop`](cli-help.md#stop) stops them; the data stays
+in the volumes.

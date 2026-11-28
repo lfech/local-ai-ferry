@@ -59,9 +59,9 @@ jobs:
             tests.test_package.PackageTests.test_installed_package_contains_repository_license_files)
           mkdir "$RUNNER_TEMP/wheel-project"
           cd "$RUNNER_TEMP/wheel-project"
-          "$wheel_env/bin/loaf" link-docker-project
+          "$wheel_env/bin/loaf" setup --link-docker-project
           test -f docker-project/compose.yml
           test -f docker-project/docker/terminal-server/provisioner.py
           "$wheel_env/bin/loaf" download --dry-run
-          "$wheel_env/bin/loaf" offline --cpu --dry-run
+          "$wheel_env/bin/loaf" run offline --cpu --dry-run
           "$wheel_env/bin/loaf" integration tether

@@ -11,7 +11,8 @@ and later layers override earlier ones:
 
 Root, members of the docker group and the loaf systemd service can operate the
 system deployment. Backups in /var/lib/loaf/backup are readable by that group,
-so any member can restore them. Restoring settings into /etc/loaf needs root:
+so any member can restore them. Each backup folder includes the standalone
+executable that the package carries, so it restores on hosts without loaf. Restoring settings into /etc/loaf needs root:
 'sudo loaf restore --archive PATH'. Restored settings, installers and the
 terminal server key stay readable by the docker group. The terminal server key
 is /etc/loaf/terminal-server.key.
@@ -19,6 +20,10 @@ is /etc/loaf/terminal-server.key.
 Start the offline deployment at boot after building or restoring its images:
 
   sudo systemctl enable --now loaf.service
+
+On a host without NVIDIA GPU access, replace the unit with a CPU one first:
+
+  loaf --system integration systemd --cpu | sudo tee /etc/systemd/system/loaf.service
 
 Read the guides with 'loaf docs' and the manual page with 'man loaf'.
 Bash completion for loaf is in /usr/share/bash-completion/completions/loaf and

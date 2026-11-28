@@ -62,6 +62,7 @@ class ReadinessTests(unittest.TestCase):
         terminal_built = True
         fail_gpu = False
         webui_running = True
+        models_missing = False
         calls = []
 
         def output(compose, command):
@@ -78,7 +79,7 @@ class ReadinessTests(unittest.TestCase):
                     raise subprocess.CalledProcessError(1, command, stderr="No such image")
                 return "linux/amd64"
             if command[1:3] == ["volume", "inspect"]:
-                if command[-1] == webui:
+                if command[-1] == webui or (models_missing and command[-1] == models):
                     raise subprocess.CalledProcessError(1, command, stderr="no such volume")
                 self.assertEqual(command[-1], models)
                 return "[]"
@@ -122,6 +123,14 @@ class ReadinessTests(unittest.TestCase):
                     self.assertIn(f"{expected:<4}  Docker Engine — {engine_version}", status.getvalue())
             self.assertIn("127.0.0.1:3100/tcp belongs to this deployment", status.getvalue())
             self.assertIn(f"Volume {webui} — will be created", status.getvalue())
+            # Before the first download, the model volume's check names the commands that create it.
+            models_missing = True
+            status.seek(0)
+            status.truncate()
+            self.assertEqual(cli.main(options), 1)
+            self.assertIn(f"FAIL  Volume {models} — The model volume does not exist yet. Run loaf download",
+                          status.getvalue())
+            models_missing = False
             self.assertEqual({call[-1] for call in calls if call[1:3] == ["image", "inspect"]},
                              {downloader, backend, frontend})
             for compose_version, expected, exit_code in (

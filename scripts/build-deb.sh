@@ -80,6 +80,10 @@ find "$root" -path "$root/DEBIAN" -prune -o -type d -exec chmod 755 {} +
 find "$root" -path "$root/DEBIAN" -prune -o -type f -exec chmod 644 {} +
 chmod 755 "$root/usr/bin/loaf"
 find "$site/loaf/data/docker" -name "*.sh" -exec chmod 755 {} +
+# The standalone executable from the release wheel, which backups of the system deployment include.
+if [[ -f "$site/loaf/data/standalone/loaf" ]]; then
+    chmod 755 "$site/loaf/data/standalone/loaf"
+fi
 (cd "$root" && find . -path ./DEBIAN -prune -o -path ./etc -prune -o -type f -printf '%P\0' | sort -z |
     xargs -0 md5sum) > "$root/DEBIAN/md5sums"
 installed_size=$(du -sk --exclude=DEBIAN "$root" | cut -f1)

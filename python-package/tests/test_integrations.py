@@ -47,7 +47,7 @@ class IntegrationTests(unittest.TestCase):
         for arguments, message in (
             (["integration"], "integration requires a name"),
             (["integration", "unknown"], "invalid choice"),
-            (["offline", "continue"], "with loaf integration"),
+            (["status", "continue"], "with loaf integration"),
         ):
             with self.subTest(arguments=arguments), redirect_stderr(StringIO()) as errors:
                 with self.assertRaises(SystemExit) as failure:
@@ -73,6 +73,9 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn("TimeoutStopSec=90\n", unit)
         packaged = (ROOT / "packaging/debian/loaf.service").read_text(encoding="utf-8")
         self.assertIn("TimeoutStopSec=90\n", packaged)
+        # A host without NVIDIA GPU access serves on CPU.
+        start, = [line for line in self.generate("systemd", "--cpu").splitlines() if line.startswith("ExecStart=")]
+        self.assertTrue(start.endswith(" offline --cpu --attach"), start)
 
     def test_continue_uses_the_webui_url_and_selected_ollama_ids(self):
         (self.config / "models.ini").write_text(

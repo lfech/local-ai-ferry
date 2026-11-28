@@ -31,8 +31,8 @@ any required system packages before disconnecting.
 
 ## Connect to your deployment
 
-1. Start the prepared deployment with `./loaf offline` or
-   `./loaf online` and note the printed WebUI address.
+1. Start the prepared deployment with `./loaf run offline` or
+   `./loaf run online` and note the printed WebUI address.
 2. Open the address in a browser on the Tether computer and confirm you can
    sign in. For a local deployment the default is `http://localhost:3000`.
    From another computer, forward the port using the

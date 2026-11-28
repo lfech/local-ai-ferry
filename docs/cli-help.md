@@ -1,114 +1,172 @@
 # loaf command reference
 
-[CLI overview](cli.md) · [Project overview](../README.md)
+[Project overview](../README.md)
+
+This page is the one place that explains each command and option. The other
+guides describe workflows and link here.
 
 ```text
 loaf [GLOBAL OPTIONS] COMMAND [OPTIONS]
 ```
 
-`loaf --help` lists commands and global flags. `loaf COMMAND --help` shows the
-flags for that command. Flags can appear before or after the command. Relative
-paths given on the command line start at the shell's current directory.
+Run `loaf` from the project directory, or select another one with
+`--project-dir PATH`. `loaf --help` lists commands and global options, and
+`loaf COMMAND --help` the options of a command. Options can appear before or
+after the command. Relative paths start at the shell's current directory.
 Write option names in full; `loaf` does not accept abbreviations.
 
-## Global flags
+```bash
+loaf --help
+loaf run offline --help
+loaf integration systemd --help
+```
 
-| Flag | Effect |
+## Global options
+
+| Option | Effect |
 | --- | --- |
 | `-h`, `--help` | Print help for `loaf`, a command, an integration or a `docker` command and exit. |
-| `--project-dir PATH` | Select the checkout or deployment. Defaults to the current directory. Setup and restore make a backup folder the project; other commands refuse one. [Debian restore](transfer.md#debian-restore) |
+| `--project-dir PATH` | Select the checkout or deployment. Defaults to the current directory. Setup and restore make a backup folder the project; other commands refuse one and print the typical next steps. [Debian restore](transfer.md#debian-restore) |
 | `--system` | Operate the system deployment with settings in `/etc/loaf` and data in `/var/lib/loaf`. The Debian package uses it unless `--project-dir` or `--config-dir` selects a project. [Debian package](installation.md#debian-package) |
 | `-v`, `--verbose` | Show external commands where available. With `test`, show individual test names. |
 
 The standalone executable also accepts `./loaf --license` to print its
 bundled license notices and source locations. [Standalone license](releases.md#standalone-license)
 
-## Shared command flags
+## Shared options
 
-Each command lists the shared flags it uses.
+Each command lists the shared options it uses.
 
-| Flag | Effect |
+| Option | Effect |
 | --- | --- |
-| `--config-dir PATH` | Override the project's `config/` directory. Packaged defaults supply unset values. |
+| `--config-dir PATH` | Use PATH for the project's settings instead of `config/`. Packaged defaults supply unset values. [Settings layers](configuration.md#project-configuration) |
 | `--namespace NAME` | Select the separate deployment namespace `loaf-NAME`. Use `--namespace=` for the default namespace `loaf` instead of the configured one. [Separate namespaces](launcher.md#run-a-separate-namespace) |
-| `--dry-run` | Preview the operation without invoking Docker or taking a project lock. Add `-v` to see planned Compose commands. |
-| `-a`, `--attach` | Follow new Compose logs after a successful operation. Press Ctrl+C to leave the log view with services still running. |
-| `--wait-timeout SECONDS` | Override the readiness wait for service startup. `0` waits without a limit; negative values are refused. The packaged default is 300 seconds. |
+| `--dry-run` | Preview the operation without invoking Docker or taking a project lock. It refuses what a real run would refuse. Add `-v` to see the planned Compose commands. |
+| `-a`, `--attach` | Follow new Compose logs after a successful operation. Commands that start services follow those services; others follow the selected deployment. Press Ctrl+C to leave the log view with services still running. |
+| `--wait-timeout SECONDS` | Override `[launcher] wait_timeout`, the readiness wait for service startup. `0` waits without a limit; negative values are refused. The packaged default is 300 seconds. On a terminal, Compose shows each service's elapsed time; other output gets a line every 10 seconds. |
 | `--models-file PATH` | Select a model INI for this run. It overrides `[launcher] models_file`. [Model selection](launcher.md#select-models) |
 | `--backup-dir PATH` | Override `[transfer] backup_dir`. The packaged default is `backup/` relative to the project. Use either `--backup-dir` or `--archive`. |
 | `--archive PATH` | Select an explicit archive or backup folder, as specified by the command. |
+
+During a run, `loaf` reports the major steps and keeps the progress of Docker
+and Ollama visible. Transfers report bytes and throughput.
 
 ## Commands
 
 ### setup
 
-Prepare configuration and link the Docker project with the standalone
-executable, or install `loaf` in the checkout's virtualenv and prepare the
-installer cache from source. Outside a source checkout, a wheel-installed
-`loaf` sets up like the standalone executable. Setup also creates the
-configured terminal server key when it is missing. [Installation](installation.md)
+Prepare a deployment. Every option below does only its own step.
 
-Uses `--config-dir PATH` and `--dry-run`.
+- Without options, setup creates the project's missing settings: a
+  `config.ini` with every key commented out and a copy of the model list in
+  effect. It never replaces an existing file. [Settings files](configuration.md#project-configuration)
+  - From a source checkout, it also installs `loaf` into the checkout's
+    `.venv`, caches the Python wheels and prepares the NVIDIA Container
+    Toolkit packages in `install-cache/`. [Debian host setup](debian.md#install-the-loaf-command)
+  - With the standalone executable, or a wheel-installed `loaf` outside a
+    checkout, it links the packaged Docker project and writes the guides of
+    the release to `docs/`.
+  - Run in a backup folder, setup makes the folder the project, moves the
+    backup to `backup/` and prints the restore command to run next. It copies
+    the backup's launcher into the project. [Debian restore](transfer.md#debian-restore)
+  - When the terminal server is enabled but its key is missing, setup prints
+    the command that creates it.
+- `--terminal-server-key` only creates the configured terminal server key, with
+  owner-only permissions. It keeps an existing key. Run in or with a backup
+  folder, it takes the backup's key, which the backup's Open WebUI data uses.
+  [Terminal server key](terminal-server.md#enable-and-connect)
+- `--create-file-repository` only creates a local APT file repository for
+  testing `apt` in chat containers. It downloads a fixed set of command-line
+  tools with the dependencies that the terminal image lacks into
+  `apt-test-repository/`, writes `config/apt-test-repository.list` and prints
+  the settings that use them. It needs the built terminal image and network
+  access. [Install packages in a chat](terminal-server.md#install-packages-in-a-chat)
+- `--link-docker-project` only links the packaged Docker project as
+  `docker-project` for direct Compose use. [Direct Compose use](launcher.md#link-the-docker-project)
+- `--with-docker-deps` caches Docker Engine, Compose and Buildx packages on
+  Debian 12 or 13 and installs them as needed. The standalone executable also
+  prepares the NVIDIA toolkit packages with it. In a backup folder, it uses the
+  backup's `installers`. [Docker packages](debian.md#install-docker-and-cache-its-packages)
+- `--archive PATH` selects the backup folder or archive for setup outside the
+  backup folder.
+- `--allow-root` lets source setup run as root in a checkout that another user
+  owns. Without it, setup refuses, because root would own the virtualenv and
+  caches. Run setup as the owner instead; the APT steps use `sudo`.
 
-- `--allow-root` lets source setup run as root in a checkout that another user owns. Without it, setup refuses, because root would own the virtualenv and caches. Run setup as the owner instead; the APT steps use `sudo`.
-- `--with-docker-deps` caches Docker Engine, Compose and Buildx packages on Debian 12 or 13 and installs them as needed. [Docker packages](debian.md#install-docker-and-cache-its-packages)
-- `--archive PATH` selects a backup folder or archive when running standalone setup. Inside a backup folder, setup makes the folder the project, uses the backup without this flag and prints the restore command to run next. With `--with-docker-deps`, setup recovers the backup's `installers` first. Setup reuses the backup's terminal key from `terminal` and copies the launcher into the project. [Debian restore](transfer.md#debian-restore)
-- `--terminal-server-key` creates the configured key only, with owner-only permissions. It preserves an existing key and reuses a key from the selected backup.
-- `--test-local-repository` downloads three command-line tools, chosen at random from a fixed list, with the dependencies that the terminal image lacks into `apt-test-repository/`. It writes `config/apt-test-repository.list` and prints the tools and the settings that use them for `apt` in chat containers. It needs the built terminal image and network access. [Install packages in a chat](terminal-server.md#install-packages-in-a-chat)
-
-In the system deployment, setup creates the terminal server key, readable by
-root and the `docker` group. The Debian package's dependencies replace
-`--with-docker-deps`. `tests`, `--test-local-repository` and `--archive` need a project.
+Uses `--config-dir PATH` and `--dry-run`. In the system deployment, the Debian
+package prepares the directories and key; `--terminal-server-key` there makes
+the key readable by root and the `docker` group. `tests`,
+`--create-file-repository`, `--with-docker-deps` and `--archive` need a project.
 
 `loaf setup tests` caches the pinned test packages as wheels and installs
 them into the virtualenv that runs `loaf`. It needs Python 3.11 or newer and
-a source checkout, and accepts only `--dry-run` and the global flags.
+a source checkout, and accepts only `--dry-run` and the global options.
 [Test packages](launcher.md#test-packages)
 
 ### install
 
-Alias for [`setup`](#setup) with the same flags.
+Alias for [`setup`](#setup) with the same options.
 
 ### package
 
 Build release files from the working source checkout into `dist/`. Name one
 or both targets; they run in the given order and stop at the first failure.
-Uses `--dry-run`. [Local builds](releases.md#build-and-check-locally)
+Both run `scripts/build-release.sh` and need Linux on amd64. Uses `--dry-run`.
+[Local builds](releases.md#build-and-check-locally)
 
 - `binary` builds or replaces the standalone executable `dist/loaf` and its `dist/LICENSE.txt`.
-- `debian` builds `dist/loaf_<version>_all.deb` from the launcher wheel in `install-cache/wheels/`. It needs `dpkg-deb`.
+- `debian` builds `dist/loaf_<version>_all.deb` with the standalone executable that system backups carry. It needs `dpkg-deb`.
 
 ### clean
 
-Remove the runtime cache and recognized generated temporary files. Uses
-`--dry-run`. [Cleanup and preserved files](launcher.md#clean-generated-files)
+Remove loaf's runtime cache under `~/.local/share/loaf/`, or
+`$XDG_DATA_HOME/loaf/`, and recognized temporary files and Python bytecode in
+the selected project. Uses `--dry-run`.
 
-- `--full` also removes generated installation files, including the project virtualenv, when eligible for cleanup. It asks before it removes the install cache, whose installers an offline host cannot download again, and keeps the cache without a terminal.
-- `-y`, `--yes` with `--full` removes the install cache without asking.
+- `--full` also removes the project virtualenv, generated build and release
+  files and the packaged Docker link. It asks before it removes
+  `install-cache/`, whose installers an offline host cannot download again,
+  and keeps it without a terminal.
+- `-y`, `--yes` with `--full` removes `install-cache/` without asking.
+
+Both modes keep Git history and working files, saved backups, settings,
+credentials and Docker data. A generated directory that holds Git work, a
+backup archive or a mount stays, with a note; the checked Python downloads in
+`install-cache/python/` are no backups. Lock files stay so that commands can
+coordinate. Cleanup resolves the configured terminal key path first, so an
+invalid configuration stops it. After a full clean, run setup again with the
+original standalone executable, or the source setup command in a checkout.
 
 ### version
 
 Print the loaf release, how it was installed, the Python interpreter, the
-deployment data directory and the default deployment. Takes the global flags.
+deployment data directory and the default deployment. Takes the global options.
 
 ### docs
 
 List the guides bundled with this release, or print one with
 `loaf docs NAME`. `loaf docs loaf.1` prints the manual page, for example
-`loaf docs loaf.1 | man -l -`. Standalone setup also writes the guides to
-`docs/` in the deployment. [Bundled guides](launcher.md#read-the-bundled-guides)
+`loaf docs loaf.1 | man -l -`. Standalone setup writes the guides to `docs/`
+in the deployment, with links into `docker-project/`, and keeps a `docs/`
+directory that it did not create. The Debian package also installs the manual
+page for `man loaf`.
 
 ### completion
 
-Manage Bash completion for `loaf`. Takes the global flags.
-[Bash completion](launcher.md#bash-completion)
+Manage Bash completion for `loaf`. It completes commands, subcommands,
+archive and resource types, guide names and options. Option values complete
+as directories for `--project-dir`, `--config-dir` and `--backup-dir`, and as
+files for `--models-file` and `--archive`. Takes the global options.
+[Bash completion setup](launcher.md#bash-completion)
 
 #### completion install
 
 Write the completion script for the current user to bash-completion's
 per-user directory, normally `~/.local/share/bash-completion/completions/loaf`.
-It replaces an earlier loaf script and refuses a file that loaf did not write.
-With the Debian package, it reports the system script and writes nothing.
+`XDG_DATA_HOME` and `BASH_COMPLETION_USER_DIR` move it as they do for
+bash-completion. It replaces an earlier loaf script and refuses a file that
+loaf did not write. With the Debian package, it reports the system script and
+writes nothing.
 
 #### completion remove
 
@@ -119,61 +177,79 @@ script stays until the package is removed.
 
 Print the completion script to standard output.
 
-### link-docker-project
-
-Create the `docker-project` symlink to the packaged Compose project. Uses
-`--dry-run`. [Direct Compose use](launcher.md#link-the-docker-project)
-
 ### build
 
 Build the local Ollama and WebUI images and the terminal image when enabled.
 Uses `--config-dir PATH`, `--namespace NAME`, `--dry-run`, and `-a` or
-`--attach`.
+`--attach`. [Image recipes](configuration.md#select-an-ollama-build-recipe)
 
 ### upgrade
 
 Pull updated upstream base images and rebuild the same local images as
-`build`. Uses `--config-dir PATH`, `--namespace NAME`, `--dry-run`, and `-a`
-or `--attach`.
+`build`. Restart the serving profile to use them. Uses `--config-dir PATH`,
+`--namespace NAME`, `--dry-run`, and `-a` or `--attach`.
 
 ### download
 
-Start the downloader and pull the selected models into the shared Ollama
-store. Uses `--models-file PATH`, `--config-dir PATH`, `--namespace NAME`,
+Stop the serving services, start the downloader and pull the selected models
+into the shared Ollama store. A model with a `name` gets that name, and its
+long `hf.co/…` name is removed. Prints the command that starts offline serving
+next. Uses `--models-file PATH`, `--config-dir PATH`, `--namespace NAME`,
 `--dry-run`, `--wait-timeout SECONDS`, and `-a` or `--attach`.
+[Model selection](launcher.md#select-models)
 
-### online
+### run
 
-Start Ollama and WebUI on the connected profile. Uses `--config-dir PATH`,
-`--namespace NAME`, `--dry-run`, `--wait-timeout SECONDS`, and `-a` or
-`--attach`.
+`loaf run offline` or `loaf run online` starts Ollama and WebUI with the
+saved model store, and the terminal server when enabled. Starting one profile
+stops the other, because both use the same volumes.
 
-- `--cpu` selects CPU inference. The default uses NVIDIA GPU acceleration.
+- `offline` puts Ollama on an internal network and gives WebUI its offline
+  settings. With `[terminal_server] network = connected`, it notes that chat
+  containers that models drive can reach every address the Docker host reaches.
+  [Offline operation](configuration.md#networking-and-offline-operation)
+- `online` gives Ollama and WebUI internet access.
 
-### offline
-
-Start Ollama and WebUI with the offline profile and the saved model store.
 Uses `--config-dir PATH`, `--namespace NAME`, `--dry-run`,
-`--wait-timeout SECONDS`, and `-a` or `--attach`.
-With the terminal server enabled and `[terminal_server] network = connected`,
-it notes that chat containers that models drive can reach every address the
-Docker host reaches.
+`--wait-timeout SECONDS`, and `-a` or `--attach`. The former commands
+`loaf offline` and `loaf online` point to this one.
 
-- `--cpu` selects CPU inference. The default uses NVIDIA GPU acceleration.
+- `--cpu` selects CPU inference. The default uses NVIDIA GPU acceleration. [CPU serving](launcher.md#serve-on-cpu)
 
 ### status
 
-Check serving readiness and list containers across the selected deployment's
-profiles. Uses `--config-dir PATH`, `--namespace NAME`, `--dry-run`, and `-a`
-or `--attach`. [Readiness checks](launcher.md#check-readiness-with-status)
+Check serving readiness and list the containers across the selected
+deployment's profiles. The report opens with the deployment name, project
+directory, WebUI URL and settings files, then checks:
+
+- Docker and Compose: Compose 2.26.1 through 2.29.x warn and use the NVIDIA
+  device reservation; older versions fail. Docker Engine 26 and 27 warn about
+  Open Terminal's legacy bridge isolation.
+- Configuration: the launcher settings, the resolved Compose configuration
+  and, with the terminal server enabled, its key and APT source settings.
+- Local images and NVIDIA GPU access from a disposable container.
+- Storage and networking: volume readability, local model data including
+  Ollama's `manifests-v2` catalog, and the WebUI host ports. A missing model
+  volume names `loaf download` and `loaf restore models`; a missing WebUI
+  volume is created on first startup. Host port checks need a local Docker
+  endpoint.
+
+A failure gives a nonzero exit status. Uses `--config-dir PATH`,
+`--namespace NAME`, `--dry-run`, and `-a` or `--attach`.
 
 - `--cpu` checks CPU serving readiness and skips the NVIDIA probe.
 
 ### stop
 
-Stop the selected deployment's services and remove their containers. Uses
-`--config-dir PATH`, `--namespace NAME`, `--dry-run`, and `-a` or `--attach`.
-[Container removal](launcher.md#stop-and-remove-containers)
+Stop the selected deployment's services and remove their Compose containers.
+`loaf stop offline` or `loaf stop online` stops only that profile's Ollama and
+WebUI; the terminal server stops with them unless the other profile still
+serves. Without a profile, `stop` stops every service, the downloader and the
+terminal server included. Named volumes, bind-mounted files, images and
+networks stay; container logs and files only in a container's writable layer
+go. Uses `--config-dir PATH`, `--namespace NAME`, `--dry-run`, and `-a` or
+`--attach`. A dry run cannot ask Docker and says how a real run decides.
+[Compose container removal](https://docs.docker.com/reference/cli/docker/compose/rm/)
 
 - `--no-remove-containers` keeps the stopped containers and their logs.
 
@@ -182,7 +258,13 @@ Stop the selected deployment's services and remove their containers. Uses
 List or remove the selected deployment's Docker resources. Every name starts
 with the deployment namespace, `loaf` or `loaf-NAME`. Both commands use
 `--config-dir PATH` and `--namespace NAME`.
-[Docker resources](launcher.md#list-and-remove-docker-resources)
+
+| Type | Names in the default deployment |
+| --- | --- |
+| Containers | Compose services such as `loaf-open-webui-1`, and the terminal server's chat containers `loaf-terminal-KEY`. |
+| Images | `loaf/ollama-online`, `loaf/ollama-offline`, `loaf/open-webui` and `loaf/open-terminal`, tagged `latest` or the namespace name. |
+| Volumes | `loaf-ollama` holds the models, `loaf-open-webui` the Open WebUI accounts and chats, and `loaf-terminal-users` the terminal user folders. |
+| Networks | Compose networks such as `loaf_inference`, and the terminal server's chat networks `loaf-terminal-KEY`. |
 
 #### docker ps
 
@@ -192,49 +274,86 @@ content or purpose.
 #### docker rm
 
 Remove the resources of one or more types: `all`, `containers`, `images`,
-`volumes` or `networks`. `rm` lists them and asks for confirmation, then
-stops the running services and removes containers, networks, volumes and
-images in that order. Networks, volumes and images require a deployment
-without containers. Removed volumes lose the models, Open WebUI accounts and
-chats, and terminal user folders. Uses `--dry-run`.
+`volumes` or `networks`. `rm` lists them and asks for confirmation, stops the
+running services within their grace periods, and then removes containers,
+networks, volumes and images in that order. Networks, volumes and images can
+go only once the deployment has no containers; otherwise `rm` refuses and
+prints the command that includes `containers`. A removed image tag that
+another deployment also uses keeps the image for that deployment. Base
+images, build cache and other projects' resources stay. Uses `--dry-run`.
 
 - `-y`, `--yes` removes without asking. Without a terminal, `rm` requires it.
 
+Removed volumes cannot be recovered; save them first with `loaf backup volumes`.
+An offline host cannot rebuild removed images; `loaf restore images` brings
+them back.
+
 ### backup
 
-Create a dated backup folder containing the archive, its checksums and the
-standalone launcher. Name the types `source`, `config`, `installers`,
-`images`, `models`, `webui` and `terminal`, or the aliases `project` and
-`volumes`, or omit them to save every available type. `source` is available
-in a source checkout; `terminal` adds `webui`. Without type names, `terminal`
-is included when the terminal server is enabled and `[terminal_server]
-include_in_backup` is true, the default. Uses `--config-dir PATH`,
-`--namespace NAME`, `--dry-run`, and `--backup-dir PATH`. Use `-a` or
-`--attach` when creating a backup. [Archive types](transfer.md#select-archive-types) ·
-[Backup contents](transfer.md#archive-contents)
+Create a dated backup folder with the archive and the standalone `loaf`
+executable that can restore it. The archive's first member, `loaf.json`,
+records the hash of every member and of the executable.
+[Archive contents](transfer.md#archive-contents)
 
-- `--verify` runs restore's checks on every member without Docker or temporary copies, lists the types and reports any image platforms. `--archive PATH` selects the backup to verify.
-- `--no-terminal-server` leaves out the terminal server: the Open Terminal image, the `terminal` type with its user volume and bearer key. A restore of such a backup disables the terminal server in the restored settings and removes loaf's saved terminal connection from the restored WebUI data. Without the flag, backup includes the matching local terminal image when it exists.
-- `--export`, `--no-export` enable or disable refreshing selected Modelfiles from cached models before saving `models`. The default comes from `[transfer] export_models`.
+Name the types `source`, `config`, `installers`, `images`, `models`, `webui`
+and `terminal`, or the aliases `project` and `volumes`, or omit them to save
+every available type. `source` is available in a source checkout; `terminal`
+adds `webui`. Without type names, `terminal` is included when the terminal
+server is enabled and `[terminal_server] include_in_backup` is true, the
+default. [Archive types](transfer.md#select-archive-types)
+
+A source checkout builds the executable from its working files first. Other
+installations include the running standalone executable, or the one that the
+release wheel and the Debian package carry, or else `loaf` or `dist/loaf` in
+the project; the dry run checks this too. Backing up `webui` or `terminal`, or
+refreshing Modelfiles, stops the deployment's services, and backup then prints
+the command that resumes serving. An `installers` type without NVIDIA toolkit
+packages only gets a warning that names the command that caches them.
+
+Uses `--config-dir PATH`, `--namespace NAME`, `--dry-run`, `--backup-dir PATH`,
+and `-a` or `--attach`.
+
+- `--verify` runs restore's checks on every member against the hashes in
+  `loaf.json`, without Docker or temporary copies, lists the types and reports
+  the image platforms. A launcher with another hash than `loaf.json` records
+  only gets a warning. `--archive PATH` selects the backup to verify.
+- `--no-terminal-server` leaves out the terminal server: the Open Terminal
+  image, the `terminal` type with its user volume and bearer key. Restoring
+  such a backup disables the terminal server in the restored settings and
+  removes loaf's saved terminal connection from the restored WebUI data.
+  Without the option, backup includes the matching local terminal image when
+  it exists.
+- `--export`, `--no-export` enable or disable refreshing the selected
+  Modelfiles from the cached models before saving `models`. The default comes
+  from `[transfer] export_models`.
 - `--models-file PATH`, `--wait-timeout SECONDS` apply when refreshing Modelfiles.
 
 ### restore
 
-Restore types from a verified backup. Name them as for `backup`, or omit them
-to restore everything in the archive. `models` merge into the Ollama store.
-`webui` and `terminal` require new or empty volumes; `terminal` adds `webui`.
-`source` replaces existing files with the archived ones and keeps the
-others. Run in a backup folder, restore makes it the project and moves the
-backup to `backup/`. A project without a Compose file gets the packaged
-Docker project link. Restore ends with the command to run next: `setup` when
-the terminal server is enabled but its key is missing, else `offline`. Uses `--config-dir PATH`,
-`--namespace NAME`, `--dry-run`, and `-a` or `--attach`. `--archive PATH`
-selects a specific backup folder or archive. `--backup-dir PATH` selects the
-newest backup for the namespace in that directory; without one, restore
-names a backup of another namespace to select with `--archive`. A dry run
-reports a missing backup and missing types like a real restore. A selected
-backup supplies its saved namespace. Only `source`, `installers` and `models`
-restore into another `--namespace`. [Restore behavior](transfer.md#restore-behavior)
+Check a backup and restore its types. All members are checked against the
+hashes in `loaf.json` before the first change, and Docker preconditions, such
+as empty target volumes, before the archive is read. Name the types as for
+`backup`, or omit them to restore everything in the archive. A named type
+must be in the archive; an alias selects the types of its group that the
+archive contains. [Restore behavior](transfer.md#restore-behavior)
+
+- `models` merge into the Ollama store; `--delete` mirrors them.
+- `webui` and `terminal` need new or empty volumes; `terminal` adds `webui`.
+- `source` replaces existing files with the archived ones and keeps the others.
+
+Run in a backup folder, restore makes it the project and moves the backup to
+`backup/`. A project without a Compose file gets the packaged Docker project
+link. Restore ends with the command to run next: `setup --terminal-server-key`
+when the terminal server is enabled but its key is missing, else `run offline`,
+with `--cpu` after a CPU replay. A selected backup supplies its saved
+namespace. Only `source`, `installers` and `models` restore into another
+`--namespace`.
+
+Uses `--config-dir PATH`, `--namespace NAME`, `--dry-run`, and `-a` or
+`--attach`. `--archive PATH` selects a backup folder or archive.
+`--backup-dir PATH` selects the newest backup for the namespace in that
+directory; without one, restore names a backup of another namespace to select
+with `--archive`.
 
 - `--delete` mirrors the archived models by removing destination-only blobs, manifests and Modelfiles.
 - `--import`, `--no-import` enable or disable starting offline Ollama to apply saved Modelfiles after restoring `models`. The default comes from `[transfer] import_models`.
@@ -247,8 +366,10 @@ Choose an integration to print. `loaf integration --help` lists the names.
 
 #### integration systemd
 
-Print a systemd unit for offline serving. Uses `--config-dir PATH` and
-`--namespace NAME`. [Systemd setup](installation.md#systemd)
+Print a systemd unit that starts offline serving and stops the deployment.
+Uses `--config-dir PATH` and `--namespace NAME`. [Systemd setup](installation.md#systemd)
+
+- `--cpu` makes the unit serve with CPU inference.
 
 #### integration continue
 
@@ -257,7 +378,7 @@ Print Continue YAML for the selected models. Uses `--config-dir PATH` and
 
 #### integration tether
 
-Print Open WebUI Tether installation instructions. Takes the global flags.
+Print Open WebUI Tether installation instructions. Takes the global options.
 [Tether setup](tether.md)
 
 ### test

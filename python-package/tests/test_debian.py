@@ -1,5 +1,6 @@
 """Build the Debian package and install it in clean Debian 12 and 13 containers."""
 
+import os
 import shutil
 import subprocess
 import sys
@@ -18,13 +19,9 @@ class DebianPackageTests(unittest.TestCase):
         folder = TemporaryDirectory(prefix="loaf-deb-")
         cls.addClassCleanup(folder.cleanup)
         cls.output = Path(folder.name)
-        pip = [sys.executable, "-m", "pip", "wheel", "--quiet", "--no-deps", "--wheel-dir", str(cls.output)]
-        cache = ROOT / "install-cache/wheels"
-        if cache.is_dir():
-            pip += ["--find-links", str(cache)]
-        command([*pip, str(ROOT / "python-package")], timeout=300)
-        wheel, = cls.output.glob("*.whl")
-        command(["bash", str(ROOT / "scripts/build-deb.sh"), str(wheel), str(cls.output)], timeout=300)
+        # The release build gives the package the standalone executable that system backups carry.
+        command(["bash", str(ROOT / "scripts/build-release.sh"), "--debian-only", str(cls.output)], timeout=900,
+                env={**os.environ, "LOAF_BUILD_PYTHON": sys.executable})
         package, = cls.output.glob("loaf_*_all.deb")
         shutil.copyfile(package, cls.output / "loaf.deb")
         cls.package = package
@@ -38,6 +35,7 @@ class DebianPackageTests(unittest.TestCase):
                      "./usr/share/bash-completion/completions/loaf",
                      "./usr/lib/systemd/system/loaf.service", "./usr/share/doc/loaf/copyright",
                      "./usr/lib/python3/dist-packages/loaf/data/debian-package",
+                     "./usr/lib/python3/dist-packages/loaf/data/standalone/loaf",
                      "./usr/lib/python3/dist-packages/loaf/data/docs/installation.md"):
             self.assertIn(path, files)
         self.assertNotIn("__pycache__", files)

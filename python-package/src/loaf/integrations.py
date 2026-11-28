@@ -12,13 +12,13 @@ TETHER_INSTRUCTIONS = """Install Open WebUI Tether
 2. On Debian, Ubuntu or Mint, run sudo apt install ./tether_amd64.deb
    (use ./tether_arm64.deb on ARM64). On Windows, run the setup .exe.
    On macOS, open the .dmg and move Open WebUI Tether to Applications.
-3. Start your WebUI deployment with loaf offline or loaf online. Open Tether,
+3. Start your WebUI deployment with loaf run offline or loaf run online. Open Tether,
    enter the WebUI address under Connect to Open WebUI (the local default
    is http://localhost:3000), and sign in. Open Terminal setup is optional.
 """
 
 
-def systemd_unit(project: Path, launcher: Sequence[str], uid: int) -> str:
+def systemd_unit(project: Path, launcher: Sequence[str], uid: int, *, cpu: bool = False) -> str:
     directory = str(project).replace("%", "%%")
     if "\n" in directory or "\r" in directory:
         raise ValueError("systemd cannot use a working directory containing a line break.")
@@ -29,6 +29,7 @@ def systemd_unit(project: Path, launcher: Sequence[str], uid: int) -> str:
     # The colon disables systemd's dollar expansion in the argument list.
     args = (":" + launcher[0], *launcher[1:])
     command = " ".join(json.dumps(arg.replace("%", "%%"), ensure_ascii=False) for arg in args)
+    serve = "run offline --cpu" if cpu else "run offline"
     return f"""\
 [Install]
 WantedBy=multi-user.target
@@ -43,7 +44,7 @@ Wants=network-online.target
 Type=exec
 User={uid}
 WorkingDirectory={directory}
-ExecStart={command} offline --attach
+ExecStart={command} {serve} --attach
 ExecStop={command} stop
 StandardOutput=null
 StandardError=journal

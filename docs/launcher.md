@@ -17,10 +17,8 @@ PYTHONPATH=python-package/src python3 -m loaf install
 ./loaf --help
 ```
 
-The release executable includes Python. Its setup prepares default
-configuration and links the packaged Docker project. Both forms of setup
-create the configured terminal server key when it is missing. After source setup,
-run `source .venv/bin/activate` or call `./loaf` directly. Source setup
+The release executable includes Python. [What setup prepares](cli-help.md#setup)
+After source setup, run `source .venv/bin/activate` or call `./loaf` directly. Source setup
 links `./loaf` to `.venv/bin/loaf` unless that path exists, so a checkout uses
 the same command as standalone and restored deployments.
 [Release executable](releases.md#run-the-executable)
@@ -51,8 +49,8 @@ output when the step fails. Backup bundles the wheels and their cache record
 for recovery. [Backup and transfer](transfer.md)
 
 After updating an older checkout, run the source setup command to install
-`loaf`. Run `loaf link-docker-project` to refresh a link created by an earlier
-release. Existing Compose project names, image tags and volume names carry
+`loaf`. Run `loaf setup --link-docker-project` to refresh a link created by an
+earlier release. Existing Compose project names, image tags and volume names carry
 over to the new launcher.
 
 After recovering a Debian checkout, run the same bootstrap command. A
@@ -71,12 +69,11 @@ launcher wheel into an existing virtualenv, activate that environment and run:
 python -m pip install --no-index --find-links install-cache/wheels local-ai-ferry
 ```
 
-Run `loaf link-docker-project` in the directory where you want to work.
 Outside a source checkout, `loaf setup` from a wheel installation prepares a
-deployment like the standalone executable: it copies the missing
-configuration, links the packaged Docker project and creates the terminal
-key. Use the source checkout for host setup and full backups when installing
-from a wheel. [Release executable setup](releases.md#run-the-executable)
+deployment like the standalone executable. The release wheel carries the
+standalone executable that backups include; a wheel built from the checkout
+does not. Use the source checkout for host setup when installing from a wheel.
+[Release executable setup](releases.md#run-the-executable)
 
 ### Test packages
 
@@ -114,7 +111,7 @@ images were `local/NAME:latest`, its volumes `ollama` and `open-webui`, and
 the terminal user volume `loaf-tools-HASH-users`. Every name now starts with
 the deployment namespace `loaf`, or `loaf-NAME` for a separate namespace.
 Docker cannot rename volumes or images, so the new release starts with empty
-volumes until you move the data. [Docker names](#list-and-remove-docker-resources)
+volumes until you move the data. [Docker names](cli-help.md#docker)
 
 1. Before you replace `loaf`, save the volumes with the old release and stop
    the old deployment:
@@ -184,11 +181,6 @@ images.
 
 ## Bash completion
 
-`loaf` completes its commands, subcommands, archive and resource types,
-guide names and options with the Tab key. Option values complete as
-directories for `--project-dir`, `--config-dir` and `--backup-dir`, and as
-files for `--models-file` and `--archive`.
-
 | Setup | Install | Remove |
 | --- | --- | --- |
 | Local: source checkout, standalone executable or wheel | `loaf completion install` writes the script for the current user to `~/.local/share/bash-completion/completions/loaf`. | `loaf completion remove` |
@@ -204,41 +196,27 @@ first time you press Tab after `loaf` or `./loaf`. Debian's default
 `~/.bashrc` enables bash-completion; install the Debian package
 `bash-completion` if it is missing. Without it, add
 `source ~/.local/share/bash-completion/completions/loaf` to `~/.bashrc`.
-`XDG_DATA_HOME` and `BASH_COMPLETION_USER_DIR` move the per-user directory
-as they do for bash-completion.
 
-`install` replaces an earlier loaf script, so run it again after updating a
-local installation. Neither command touches a file it did not write. With the
-Debian package, `install` reports the system script and writes nothing.
-`loaf completion print` writes the script to standard output for another
-location.
-
-## Read the bundled guides
-
-Every installation carries the guides of its release. `loaf docs` lists them
-and `loaf docs NAME` prints one. Standalone setup writes them to `docs/` in the
-deployment, with links into `docker-project/`. A `docs/` directory that setup
-did not create stays untouched. The Debian package also installs the manual
-page for `man loaf`.
+Run `install` again after updating a local installation.
+[completion commands](cli-help.md#completion)
 
 ## Link the Docker project
 
 Run this from the directory where you want the link.
 
 ```bash
-loaf link-docker-project
+loaf setup --link-docker-project
 (cd docker-project && docker compose --profile offline config)
 ```
 
 From a fresh checkout, you can create the link before setup with
-`PYTHONPATH=python-package/src python3 -m loaf link-docker-project`.
+`PYTHONPATH=python-package/src python3 -m loaf setup --link-docker-project`.
 
 `docker-project` is a symlink to the installed package's data directory. It
 exposes `compose.yml`, `docker/`, and the [packaged configuration](../python-package/src/loaf/data/config/).
 Repeating the command reuses the same link. A link to another loaf release
 is updated in place. `loaf` always uses its own deployment files, even
-before that update. Any other existing path is reported as a conflict. Use `--dry-run` to preview the link or `--project-dir PATH`
-to place it elsewhere.
+before that update. Any other existing path is reported as a conflict.
 
 From a source checkout, `loaf build` and the other launcher commands find the
 deployment files automatically. From a wheel installation, use the directory
@@ -278,24 +256,10 @@ before Docker starts. [Example selections](models.md)
 
 ## Quick Setup
 
-From the project directory on Debian, run setup with system Python.
-
-```bash
-PYTHONPATH=python-package/src python3 -m loaf setup
-```
-
-The command prepares the virtualenv, Python wheel cache, NVIDIA toolkit
-packages and terminal key under the checkout lock. `install` runs the same
-preparation. Run it as the checkout's owner: the APT steps use `sudo`. As
-root, setup refuses a checkout that another user owns, because root would own
-the virtualenv and caches and link them to its own Python. Add `--allow-root`
-to prepare the checkout as root anyway. If an earlier root setup left a
-`.venv` that your user cannot replace, setup names the `sudo rm -rf` command
-that removes it. Use `setup --terminal-server-key` to prepare only the key. Use
-`setup --dry-run` to preview it. Once installed, run `build` or `upgrade`, then
-`download`, `offline` to check the deployment, and `backup` to archive it.
-[Host prerequisites](debian.md) · [Quick Setup](../README.md#quick-setup) ·
-[Failure guide](../README.md#if-a-command-fails)
+The [README's Quick Setup](../README.md#quick-setup) lists the steps. Source
+setup runs under the checkout lock; run it as the checkout's owner, because
+the APT steps use `sudo`. [What setup prepares](cli-help.md#setup) ·
+[Host prerequisites](debian.md)
 
 ## Modes
 
@@ -307,7 +271,7 @@ apply the rebuild. [Command reference](cli-help.md#commands)
 loaf build
 loaf download --models-file config/model-examples/models.16gb.ini
 loaf status
-loaf offline
+loaf run offline
 ```
 
 The downloader pulls each selected model. Both serving modes apply saved
@@ -316,10 +280,9 @@ edited definitions, run `loaf stop` and then start the desired serving mode.
 Removing a model from the selection leaves its weights, manifests and
 Modelfiles in the store.
 
-`online` and `offline` also start the provisioner when the terminal server is
+`loaf run` also starts the provisioner when the terminal server is
 enabled. The provisioner uses the Compose profile `terminal` and service
-`terminal-server`. Serving and status commands check the configured bearer
-key file when the feature is enabled. [Terminal server setup](terminal-server.md#enable-and-connect)
+`terminal-server`. [Terminal server setup](terminal-server.md#enable-and-connect)
 [Upgrade an existing terminal deployment](terminal-server.md#upgrade-an-existing-terminal-deployment)
 
 ### Serve on CPU
@@ -329,112 +292,29 @@ when preparing or testing the deployment on a machine without GPU access.
 
 ```bash
 loaf status --cpu
-loaf offline --cpu
+loaf run offline --cpu
 ```
 
-Use `loaf online --cpu` when you want the connected serving profile. CPU
+Use `loaf run online --cpu` when you want the connected serving profile. CPU
 serving uses the same images, volumes, model imports, and optional terminal
 server. CPU inference uses system RAM and can take longer than GPU inference.
-Run `loaf backup` as usual and start the destination with `loaf offline` for
+Run `loaf backup` as usual and start the destination with `loaf run offline` for
 NVIDIA inference.
 
-### Stop and remove containers
+### Stop and inspect the deployment
 
-Run `loaf stop` to stop the selected deployment and remove its Compose service
-containers. The command keeps named volumes, bind-mounted files, images
-and networks. It removes container logs and files stored only in a container's
-writable layer. Use `loaf stop --no-remove-containers` to keep stopped
-containers and their logs. Preview either form with `--dry-run`.
-To remove networks, volumes or images as well, use
-[`loaf docker rm`](#list-and-remove-docker-resources).
-[Compose container removal](https://docs.docker.com/reference/cli/docker/compose/rm/)
-
-### List and remove Docker resources
-
-Every Docker resource of a deployment starts with its namespace: `loaf` for
-the default deployment, or `loaf-NAME` with `--namespace NAME`. `loaf docker ps`
-lists the selected deployment's containers, images, volumes and networks.
-
-```bash
-loaf docker ps
-loaf docker rm containers
-loaf docker rm all
-```
-
-| Type | Names in the default deployment |
-| --- | --- |
-| Containers | Compose services such as `loaf-open-webui-1`, and the terminal server's chat containers `loaf-terminal-KEY`. |
-| Images | `loaf/ollama-online`, `loaf/ollama-offline`, `loaf/open-webui` and `loaf/open-terminal`, tagged `latest` or the version. |
-| Volumes | `loaf-ollama` holds the models, `loaf-open-webui` the Open WebUI accounts and chats, and `loaf-terminal-users` the terminal user folders. |
-| Networks | Compose networks such as `loaf_inference`, and the terminal server's chat networks `loaf-terminal-KEY`. |
-
-`loaf docker rm` takes one or more of `all`, `containers`, `images`,
-`volumes` and `networks`. It lists the resources and asks for confirmation.
-Add `--yes` to skip the question, for example in a script. Without a
-terminal, `rm` requires `--yes`. Removal stops the running services within
-their grace periods. The terminal server then stops its chat containers.
-Next, `rm` removes the containers, networks, volumes and images in that
-order. Networks, volumes and images can go only once the deployment has no
-containers. In that case, `rm` refuses and prints the command that includes
-`containers`. `--dry-run` describes the removal without Docker. Removing an
-image tag that another deployment also uses keeps the image for that
-deployment.
-
-Removed volumes cannot be recovered. Save them first with
-`loaf backup volumes`. An offline host cannot rebuild removed images; they
-come back with `loaf restore images`. Base images, build cache and other
-projects' resources are not affected.
-
-### Check readiness with status
-
-Run `loaf status` to check serving readiness. The report opens with the deployment
-name, project directory and configured WebUI URL. Configuration covers the
-launcher settings and resolved Compose configuration. Local images and GPU
-covers image presence and NVIDIA access from a disposable container. Storage
-and networking covers volume readability, the presence of local model data
-(including Ollama's `manifests-v2` catalog), and the configured WebUI host ports.
-If Docker cannot verify GPU access, the report points to `loaf status --cpu`.
-That command checks CPU serving readiness and skips the NVIDIA probe.
-
-Compose 2.26.1 through 2.29.x produces a warning and uses the NVIDIA device
-reservation for GPU access. Versions below 2.26.1 fail the version check.
-Docker Engine 26 and 27 produce a warning about Open Terminal's legacy
-bridge isolation. When Open Terminal is enabled, Configuration also checks
-its bearer key. Its image appears with the other local images. Image checks
-show `OK` when the image exists locally or `FAIL` when it is missing. The
-container list shows state and health.
-
-A running WebUI from the selected deployment can own its configured port.
-A missing WebUI volume can be created on first startup. Host port checks
-require a local Docker endpoint. The final line summarizes whether preflight
-passed. A failure produces a nonzero exit status.
-[Verification guide](verification.md#debian-smoke-checks)
+[`loaf stop`](cli-help.md#stop) stops the deployment, [`loaf status`](cli-help.md#status)
+checks its readiness, and [`loaf docker`](cli-help.md#docker) lists or removes
+its containers, images, volumes and networks.
 
 ## Options
 
-Use `loaf COMMAND --help` to look up a flag. To see the exact Compose
-commands that would run for the 8 GB selection, preview it with `-v`.
-[Command and flag reference](cli-help.md)
+To see the exact Compose commands that would run for the 8 GB selection,
+preview it with `-v`. [Shared options](cli-help.md#shared-options)
 
 ```bash
 loaf -v download --models-file config/model-examples/models.8gb.ini --dry-run
 ```
-
-During a run, `loaf` reports the major steps and keeps Docker and Ollama's
-progress visible. While service startup waits for readiness, Compose's
-terminal display shows each service's elapsed time. In logs and other output
-that is not a terminal, `loaf` reports the elapsed time every 10 seconds. Transfers report bytes and throughput. Add `-v` to a
-dry run to see the planned Compose commands.
-
-Use `loaf offline --attach` or `loaf -a status` to follow logs. The flag is
-available for Compose commands and full backup and restore. Commands that start
-services follow those services. Other commands follow the selected deployment.
-Press **Ctrl+C** to leave the log view with services still running. `loaf stop`
-can run from another terminal.
-[Docker Compose logs](https://docs.docker.com/reference/cli/docker/compose/logs/)
-
-The startup command printed after a download retains the selected project,
-override directory and namespace. [Configuration guide](configuration.md#project-configuration)
 
 ## Run a separate namespace
 
@@ -448,7 +328,7 @@ underscores. A release number works well, for example `v1-2-3` for 1.2.3.
 loaf --namespace v1-2-3 build
 loaf --namespace v1-2-3 download
 loaf --namespace v1-2-3 backup models
-loaf --namespace v1-2-3 offline
+loaf --namespace v1-2-3 run offline
 ```
 
 This uses Compose project `loaf-v1-2-3`, image tags such as
@@ -468,27 +348,7 @@ loaf clean --full --dry-run
 loaf clean --full
 ```
 
-`loaf clean` removes loaf's runtime cache under `~/.local/share/loaf/`,
-or `$XDG_DATA_HOME/loaf/` when configured. It also clears recognized
-temporary files and Python bytecode from the selected project.
-
-`--full` also clears the project virtualenv, generated build and release
-files, and the packaged Docker link. It asks before it removes
-`install-cache/`, because an offline host cannot download those installers
-again. Without a terminal it keeps the cache; add `--yes` to remove it
-without asking. Both modes preserve
-Git history and working files, saved backups, configuration, credentials,
-and Docker data. A generated directory that contains Git work or a
-backup archive is kept. Lock files stay in place so commands can coordinate
-cleanup with active work.
-
-If cleanup reports an invalid project configuration, correct it and retry.
-Cleanup needs to resolve the configured terminal key path before deleting
-anything, including a key stored inside a generated directory.
-
-Use the original standalone executable to run setup again after a full
-clean. In a source checkout, run the source setup command to recreate
-the virtualenv. [Quick Setup](../README.md#quick-setup)
+[What clean removes and keeps](cli-help.md#clean)
 
 ## Run tests
 
@@ -512,7 +372,7 @@ status 130. There is no automatic deletion or rollback of model data.
 
 If a definition fails during backend startup, import returns a nonzero status
 and WebUI stays stopped. Earlier successful registrations can remain. Fix the
-definitions/blobs, then retry `import` and start WebUI with `offline`.
+definitions/blobs, then retry the import and start WebUI with `loaf run offline`.
 
 ## Export details
 
@@ -532,7 +392,7 @@ on both hosts and transfer the model blobs/manifests along with these files.
 To export all installed models manually while the downloader is running:
 
 ```bash
-loaf link-docker-project
+loaf setup --link-docker-project
 (cd docker-project && docker compose --profile download exec ollama-online export-modelfiles)
 ```
 

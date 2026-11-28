@@ -884,6 +884,8 @@ def workspace_runtime_mounts(container, source_format):
     apt_source = f"/etc/apt/sources.list.d/loaf-terminal.{source_format}"
     actual = {mount["Destination"]: mount for mount in container["Mounts"]}
     sources = {}
+    # The launcher keeps these sources at paths that stay the same across loaf releases. A container binds them
+    # when it starts, so changed contents apply on its next start; only changed mounts replace it.
     revision = hashlib.sha256()
     for target in (apt_source, RUNTIME_RUNNER, NO_APT_SOURCE):
         mount = actual.get(target, {})
@@ -891,11 +893,6 @@ def workspace_runtime_mounts(container, source_format):
         if mount.get("Type") != "bind" or mount.get("RW") is not False or not Path(source).is_absolute():
             raise ValueError(f"Expected a read-only runtime bind mount at {target}.")
         revision.update(os.fsencode(source) + b"\0" + os.fsencode(target) + b"\0")
-        content = hashlib.sha256()
-        with Path(target).open("rb") as payload:
-            for block in iter(lambda: payload.read(65536), b""):
-                content.update(block)
-        revision.update(content.digest())
     # The runtime source replaces the image's own sources, as an image build with it does.
     hidden = inherited_apt_sources(apt_source)
     revision.update(json.dumps(hidden).encode())

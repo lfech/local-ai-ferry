@@ -6,6 +6,8 @@ __pycache__/
 .venv-before-install-*/
 /python-package/build/
 /python-package/dist/
+# Release builds add the standalone executable to the package data of their own copy.
+/python-package/src/loaf/data/standalone/
 /dist/
 /loaf
 
@@ -13,6 +15,7 @@ __pycache__/
 /install-cache/
 /docker-project
 .run.lock
+/.loaf-terminal-runtime/
 .test-artifacts/
 
 # Environment overrides and terminal credentials
@@ -33,3 +36,6 @@ local-ai-ferry.tar.gz
 # Generated test APT repository
 /apt-test-repository/
 /config/apt-test-repository.list
+
+# Other agent related config files
+CLAUDE.md

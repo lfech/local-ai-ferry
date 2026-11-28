@@ -160,7 +160,7 @@ class SystemModeTests(unittest.TestCase):
 
     def test_system_mode_uses_the_system_settings_and_state_directory(self):
         (self.system_config / "config.ini").write_text("[webui]\nport = 3111\n", encoding="utf-8")
-        status, execute, _, _ = self.run_cli("--system", "offline")
+        status, execute, _, _ = self.run_cli("--system", "run", "offline")
         self.assertEqual(status, 0)
         compose = execute.call_args.args[0]
         self.assertEqual(compose.project_dir, self.state)
@@ -174,10 +174,10 @@ class SystemModeTests(unittest.TestCase):
         (project / "config/config.ini").touch()
         (project / "compose.yml").touch()
         with patch.object(assets, "debian_package", return_value=True):
-            status, execute, _, errors = self.run_cli("offline", cwd=project)
+            status, execute, _, errors = self.run_cli("run", "offline", cwd=project)
             self.assertEqual(execute.call_args.args[0].project_dir, self.state)
             self.assertIn("Add --project-dir .", errors)
-            status, execute, _, _ = self.run_cli("--project-dir", str(project), "offline")
+            status, execute, _, _ = self.run_cli("--project-dir", str(project), "run", "offline")
             self.assertEqual(execute.call_args.args[0].project_dir, project)
 
     def test_system_mode_refuses_project_options_and_a_missing_state_directory(self):
@@ -198,13 +198,17 @@ class SystemModeTests(unittest.TestCase):
         (self.system_config / "config.ini").write_text(
             f"[terminal_server]\nsecret_file = {self.system_config / 'terminal-server.key'}\n", encoding="utf-8",
         )
-        with patch.object(setup, "SYSTEM_GROUP", group):
-            status, _, output, _ = self.run_cli("--system", "setup")
         key = self.system_config / "terminal-server.key"
+        with patch.object(setup, "SYSTEM_GROUP", group):
+            # Plain setup leaves the key to setup --terminal-server-key, which the Debian package runs.
+            status, _, output, _ = self.run_cli("--system", "setup")
+            self.assertEqual(status, 0)
+            self.assertFalse(key.exists())
+            self.assertIn("prepared the system deployment", output)
+            status, _, output, _ = self.run_cli("--system", "setup", "--terminal-server-key")
         self.assertEqual(status, 0)
         self.assertEqual(stat.S_IMODE(key.stat().st_mode), 0o640)
         self.assertEqual(key.stat().st_gid, os.getgid())
-        self.assertIn("System deployment ready", output)
 
     def test_a_setgid_directory_shares_its_lock_with_the_group(self):
         shared = self.root / "shared"
@@ -252,7 +256,8 @@ class GuideTests(unittest.TestCase):
             guide = Path(folder) / "guide.md"
             guide.write_text(
                 "[R](../README.md) [S](launcher.md#select-models) [C](../python-package/src/loaf/data/compose.yml) "
-                "[W](../.github/workflows/verify.yml) [U](https://example.invalid/x) [A](#local)\n",
+                "[W](../.github/workflows/verify.yml) [U](https://example.invalid/x) [A](#local)\n"
+                "[RR](/README.md) [RS](/docs/launcher.md#L2) [RW](/.github/workflows/verify.yml#L3)\n",
                 encoding="utf-8",
             )
             files[PurePosixPath("docs/guide.md")] = guide
@@ -261,6 +266,7 @@ class GuideTests(unittest.TestCase):
             "[R](README.md) [S](launcher.md#select-models) [C](../docker-project/compose.yml) "
             "[W](https://git.example/loaf/blob/v1/.github/workflows/verify.yml) [U](https://example.invalid/x) "
             "[A](#local)\n"
+            "[RR](README.md) [RS](launcher.md#L2) [RW](https://git.example/loaf/blob/v1/.github/workflows/verify.yml#L3)\n"
         ))
 
     def test_export_writes_a_stamped_copy_and_keeps_user_directories(self):

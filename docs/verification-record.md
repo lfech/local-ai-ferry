@@ -4,6 +4,112 @@
 
 Older entries use the current command and project names in examples.
 
+## 2026-11-28 04:15:50 +0100 — loaf run and profile stops
+
+- Environment: Debian 13 in WSL2, Docker Engine 26.1.5, Compose 2.26.1-4,
+  Python 3.13.5 in the checkout's `.venv` and in a scratch virtualenv with
+  the test packages.
+- Docker-free suite: **334 tests, all passed**, 63 skipped without and 48
+  with the test packages. New tests cover the stop plan for one profile, the
+  kept terminal server while the other profile serves, the dry-run note, the
+  run profiles, the pointer from the former commands and their completion.
+- Real Docker run in the namespace `audit4` with images built from the cache
+  (CPU recipe, terminal server enabled): `run offline --cpu` started Ollama,
+  WebUI and the terminal server; `stop online` left all three running;
+  `run online --cpu` replaced the offline services and kept the terminal
+  server; `stop offline` left the online services and the terminal server
+  running; `stop online` then stopped everything; `loaf offline` named
+  `loaf run offline`. All resources were removed afterwards.
+- Not run: the Docker, Open Terminal and GPU suites, which the change touches
+  only through the command name.
+
+## 2026-11-28 04:10:00 +0100 — Fixes for the audit of commit 7263cf5
+
+- Environment: Debian 13 in WSL2, Docker Engine 26.1.5, Compose 2.26.1-4,
+  RTX 4070 Ti SUPER, Python 3.13.5. The checkout's `.venv` (repaired by the
+  author) and a scratch virtualenv with the pinned test packages. Docker work
+  used the namespaces `audit3` and the test suites' own names; all images,
+  containers and volumes were removed afterwards, the BuildKit cache stays.
+- Docker-free suite: **332 tests, all passed**, 48 skipped with the test
+  packages and 63 without them. All sources compile with Python 3.10.
+- With `RUN_DOCKER_TESTS=1`: the Docker classes **35 passed**; the Open
+  Terminal suites **32 passed**, including the APT source test that now keeps
+  the chat container; the GPU model workflows **6 passed**; the Debian package
+  tests **2 passed**, building with `build-release.sh --debian-only` and
+  installing on Debian 12 and 13.
+- Release builds: `--binary-only` produced a 22.5 MB executable, before
+  39.7 MB, and passed the build's own checks, including the new backup
+  preview. `--debian-only` produced a package with the executable; lintian
+  2.x in `debian:13-slim` reported no errors with the new override.
+- `release_handoff.py` with both artifacts: **Cold release handoff passed in
+  137.1 s**, with authenticated CPU inference, the disconnected destination's
+  `backup --verify` by the Debian package's launcher, restore, chat replay and
+  the corrupt-weight check.
+- Real workflows with the new executable, images built by `loaf build` (CPU
+  recipe, then CUDA 13): setup creating `config.ini` and `models.ini` but no
+  key, `offline` naming `setup --terminal-server-key`, sign-ins that survived
+  `stop`, restarts and both profile switches, the session key in the WebUI
+  volume, `setup --create-file-repository` and `apt-get install` from it in a
+  chat, the chat container, its file and package kept after switching to
+  another loaf installation, a full backup without `SHA256SUMS`, `--verify`
+  matching the recorded launcher hash, adopting and restoring the folder with
+  the pre-backup sign-in token still valid, `restore volumes` from a backup
+  without `terminal`, and `restore models` merge and `--delete` without
+  scratch leftovers.
+- Observed and documented: a restored `apt_repository_dir` setting needs its
+  directory, which no archive type carries.
+- Not run: the catalog check and the CPU variant of the model workflows.
+
+## 2026-11-27 23:25:39 +0100 — Independent audit of commit 7263cf5
+
+- Environment: Debian 13 in WSL2, Docker Engine 26.1.5, Compose 2.26.1-4,
+  RTX 4070 Ti SUPER, Python 3.13.5 in a scratch virtualenv with the checkout
+  installed editable and the pinned packages from `tests/requirements.txt`.
+  The checkout's `.venv` and `install-cache/` still belong to root and were
+  not used. The Docker daemon started with no images, containers or volumes.
+  A standalone executable was built with `scripts/build-release.sh
+  --binary-only` in a scratch clone. All Docker work used the namespaces
+  `audit1`, `audit2` and `other` and port 3999, and was removed afterwards;
+  only the BuildKit cache (3.2 GB) remains.
+- Docker-free suite: **323 tests, 1 failed, 48 skipped** before the change in
+  the next point: `test_fences_and_local_links` for
+  `docs/instructions/problems.md`. After the author's edit of that file and
+  the link-checker change, `tests.test_documentation` and
+  `tests.test_deployment` passed (25 tests).
+- With `RUN_DOCKER_TESTS=1`, `ComposeContractTests`, `BuiltImageTests`,
+  `ShellHelperTests` and `DockerTests` ran **35 tests: 34 passed, 1 failed**.
+  `test_stop_keeps_container_when_removal_is_disabled` still calls
+  `loaf stop -n`, which the 22:30 change removed.
+- With `RUN_TERMINAL_SERVER_TESTS=1`, `tests.test_terminal_server` and
+  `tests.test_open_webui_filter` passed **30 tests**.
+- With `RUN_GPU_TESTS=1`, `tests.test_docker_gpu` passed **6 tests** after
+  `/tmp` was enlarged to 20 GB; the first run failed with `No space left on
+  device` while writing an archive.
+- Real workflows with the standalone executable and images built by
+  `loaf build` (CPU recipe, then CUDA 13): standalone setup, `status`,
+  `download` of the default model, `offline --cpu` and `offline` with an
+  authenticated Open WebUI chat (100% GPU placement for the GPU run),
+  terminal draft and chat workspaces through the provisioner (isolation
+  probes, idle stop after closing a detached shell, removal after the chat
+  was deleted, refusal of another account's chat), `backup --export`,
+  `loaf docker rm`, and `restore --import --cpu` into a fresh folder followed
+  by sign-in, chat and the restored user folder. All passed.
+- Transfer workflows with stand-in images: full backup with a linked
+  `models.ini`, `backup --verify`, adopting the folder with `setup`, refusal
+  of a WebUI volume with data before any change, full restore,
+  `--no-terminal-server` backup and restore (terminal disabled, connection
+  row removed), `restore models --delete`, `restore models --namespace
+  other`, and corrupted and truncated archives. All behaved as documented.
+- Problems found: setup next to a downloaded release `SHA256SUMS` fails;
+  `loaf link-docker-project` in the guides and the Verify workflow no longer
+  exists; `restore volumes` fails for backups without `terminal`; Open WebUI
+  sessions end whenever its container is recreated; backups from the Debian
+  package or a wheel need a release executable that dry runs do not check;
+  `clean --full` keeps `install-cache/` once it holds the Python runtime
+  downloads; and smaller CLI and documentation issues.
+- Not run: the catalog check, the Debian package checks and the release
+  handoff.
+
 ## 2026-11-27 22:29:54 +0100 — Fixes for the audit of commit 0c47cf0
 
 - Environment: Debian 13 in WSL2, Python 3.13.5 in a scratch virtualenv with

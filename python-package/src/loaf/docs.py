@@ -63,7 +63,9 @@ def render(path: PurePosixPath, files: dict[PurePosixPath, Path], base_url: str 
         link, _, anchor = match[2].partition("#")
         if not link or SCHEME.match(link):
             return match[0]
-        resolved = PurePosixPath(posixpath.normpath(posixpath.join(path.parent.as_posix(), link)))
+        # A link starting with / is relative to the repository root, as on GitHub.
+        base = "" if link.startswith("/") else path.parent.as_posix()
+        resolved = PurePosixPath(posixpath.normpath(posixpath.join(base, link.lstrip("/"))))
         if resolved in files:
             link = posixpath.relpath(export_path(resolved), target.parent)
         elif resolved.is_relative_to(assets.CHECKOUT_DATA.as_posix()):

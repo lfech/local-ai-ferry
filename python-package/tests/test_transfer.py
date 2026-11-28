@@ -242,12 +242,13 @@ class TransferTests(unittest.TestCase):
 
     def test_backup_writes_a_typed_archive_and_restore_applies_every_type(self):
         self.assertEqual(self.invoke("backup"), 0, self.progress.getvalue())
+        # loaf.json records the launcher's hash; SHA256SUMS belongs to release downloads.
         self.assertEqual(sorted(path.name for path in self.bundle.iterdir()),
-                         sorted([transfer.LAUNCHER, transfer.CHECKSUMS, self.archive.name]))
+                         sorted([transfer.LAUNCHER, self.archive.name]))
         self.assertEqual((self.bundle / "loaf").read_bytes(), self.executable.read_bytes())
         self.assertTrue(os.access(self.bundle / "loaf", os.X_OK))
-        self.assertEqual((self.bundle / transfer.CHECKSUMS).read_text(), (
-            f"{setup.file_digest(self.executable)}  loaf\n{setup.file_digest(self.archive)}  {self.archive.name}\n"))
+        self.assertEqual(self.manifest()["launcher"], {
+            "size": self.executable.stat().st_size, "sha256": setup.file_digest(self.executable)})
 
         members = read_members(self.archive)
         self.assertEqual(list(members), [transfer.MANIFEST, "source.tar", "config.tar", "installers.tar",
@@ -546,7 +547,85 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(self.invoke("restore", "--archive", str(self.bundle), custom=False, project=self.destination),
                          0, self.progress.getvalue())
         next_line, = [line for line in self.output.getvalue().splitlines() if line.startswith("Next: ")]
-        self.assertTrue(next_line.endswith(" setup"), next_line)
+        self.assertTrue(next_line.endswith(" setup --terminal-server-key"), next_line)
+
+    def test_a_release_download_folder_is_no_backup_folder(self):
+        # A release download holds loaf and the release's SHA256SUMS, but no archive that begins with loaf.json.
+        download = self.root / "release download"
+        project = download / "loaf-project"
+        project.mkdir(parents=True)
+        shutil.copyfile(self.executable, download / "loaf")
+        source = download / "loaf-v0.5.0-source.tar.gz"
+        with tarfile.open(source, "w:gz") as archive:
+            entry = tarfile.TarInfo("loaf-v0.5.0")
+            entry.type = tarfile.DIRTYPE
+            archive.addfile(entry)
+        (download / transfer.CHECKSUMS).write_text("".join(
+            f"{'0' * 64}  {name}\n" for name in ("loaf", "LICENSE.txt", "loaf_0.5.0_all.deb", source.name)))
+        self.assertFalse(transfer.is_bundle(download))
+        with patch.dict(os.environ, LOAF_RELEASE_EXECUTABLE=str(download / "loaf")):
+            self.assertIsNone(transfer.find_bundle(project, None))
+            with (patch.object(setup, "bundled_release", return_value=download / "runtime"),
+                  patch.object(setup, "setup_standalone") as prepared):
+                self.assertEqual(self.invoke("setup", custom=False, project=project), 0, self.progress.getvalue())
+        prepared.assert_called_once()
+        self.assertNotIn("restore", self.output.getvalue())
+
+    def test_a_backup_folder_from_before_0_5_0_moves_with_its_checksums(self):
+        self.assertEqual(self.invoke("backup", "config"), 0, self.progress.getvalue())
+        folder, before = self.copied_bundle("older backup")
+        (folder / transfer.CHECKSUMS).write_text(f"{'0' * 64}  loaf\n{'0' * 64}  {self.archive.name}\n")
+        self.assertTrue(transfer.is_bundle(folder))
+        moved = transfer.adopt_bundle(folder)
+        self.assertEqual(sorted(path.name for path in moved.iterdir()),
+                         sorted([transfer.LAUNCHER, transfer.CHECKSUMS, self.archive.name]))
+        self.assertEqual((folder / "loaf").read_bytes(), before["loaf"])
+
+    def test_restore_aliases_select_the_types_that_the_archive_contains(self):
+        self.assertEqual(self.invoke("backup", "config", "webui"), 0, self.progress.getvalue())
+        archive = transfer.open_archive(self.bundle)
+        self.assertEqual(transfer.requested_types(archive, ("volumes",)), ("webui",))
+        self.assertEqual(transfer.requested_types(archive, ("project",)), ("config",))
+        for types, message in ((("terminal",), "does not contain terminal"), (("models",), "does not contain models"),
+                               (("installers",), "does not contain installers")):
+            with self.subTest(types=types), self.assertRaisesRegex(transfer.TransferError, message):
+                transfer.requested_types(archive, types)
+        self.assertEqual(self.invoke("restore", "volumes", "--archive", str(self.bundle), custom=False,
+                                     project=self.destination), 0, self.progress.getvalue())
+        self.assertIn("Restored webui from", self.output.getvalue())
+
+    def test_restore_checks_docker_before_it_reads_the_archive(self):
+        self.assertEqual(self.invoke("backup", "config", "webui"), 0, self.progress.getvalue())
+        webui = next(name for name, role in transfer.volume_names(config.DEPLOYMENT).items() if role == "webui")
+        self.volumes[webui] = {"Name": webui, "Labels": {}, "Driver": "local", "Options": None}
+        self.populated.add(webui)
+        with patch.object(transfer, "unpack", side_effect=AssertionError("read the archive")) as unpack:
+            self.assertEqual(self.invoke("restore", "--archive", str(self.bundle), custom=False,
+                                         project=self.destination), 1)
+        unpack.assert_not_called()
+        self.assertIn(f"Restore needs a new or empty {webui} volume, but it holds data", self.progress.getvalue())
+        self.assertNotIn("--namespace", self.progress.getvalue())
+        self.assertFalse((self.destination / "config").exists())
+
+    def test_missing_toolkit_packages_only_warn(self):
+        with patch("loaf.transfer.toolkit_files", side_effect=setup.SetupError("packages are missing")):
+            options = ["--project-dir", str(self.project), "backup", "installers", "--backup-dir", str(self.backup_dir)]
+            with (patch("loaf.transfer.prepare_python_wheels", side_effect=self.export_wheels),
+                  redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as progress):
+                self.assertEqual(cli.main(options), 0, progress.getvalue())
+        warning = progress.getvalue()
+        self.assertIn("holds no NVIDIA Container Toolkit packages: packages are missing", warning)
+        for command in ("loaf setup\n", "loaf setup --with-docker-deps\n", "apt-get download nvidia-container-toolkit"):
+            self.assertIn(command, warning)
+        with tarfile.open(fileobj=io.BytesIO(read_members(self.archive)["installers.tar"])) as installers:
+            self.assertFalse([name for name in installers.getnames() if "/deb/nvidia/" in name])
+
+    def test_backup_names_the_command_that_resumes_serving(self):
+        self.assertEqual(self.invoke("backup", "config", "webui"), 0, self.progress.getvalue())
+        self.assertIn("The backup stopped the deployment's services. Resume serving with: ", self.output.getvalue())
+        self.assertTrue(self.output.getvalue().rstrip().endswith(" offline"))
+        self.assertEqual(self.invoke("backup", "config"), 0, self.progress.getvalue())
+        self.assertNotIn("Resume serving", self.output.getvalue())
 
     def test_installers_carry_the_cached_python_runtime(self):
         runtime = self.project / setup.PYTHON_RUNTIME_DIR / "cpython-runtime.tar.gz"
@@ -579,12 +658,20 @@ class TransferTests(unittest.TestCase):
         write_archive(self.archive, [(name, b"0" * len(data) if name == "images.tar" else data)
                                      for name, data in members.items()])
         attempt("SHA-256 verification failed for images.tar")
+        # loaf.json's member hashes decide: the same members compressed anew still verify.
         write_archive(self.archive, members.items())
-        attempt(f"SHA-256 verification failed for {self.archive.name}")
+        self.assertEqual(self.invoke("backup", "--verify", "--archive", str(self.bundle), custom=False), 0,
+                         self.progress.getvalue())
+        self.archive.write_bytes(original[:len(original) // 2])
+        attempt(f"{self.archive.name} is truncated or damaged")
         self.archive.write_bytes(original)
+        # Another launcher only gets a warning: the running loaf restores the archive.
         (self.bundle / "loaf").write_bytes(self.executable.read_bytes() + b"changed")
-        attempt("SHA-256 verification failed")
+        self.assertEqual(self.invoke("backup", "--verify", "--archive", str(self.bundle), custom=False), 0)
+        self.assertIn(f"differs from the launcher that {transfer.MANIFEST} records", self.progress.getvalue())
         shutil.copyfile(self.executable, self.bundle / "loaf")
+        self.assertEqual(self.invoke("backup", "--verify", "--archive", str(self.bundle), custom=False), 0)
+        self.assertIn(f"matches the hash that {transfer.MANIFEST} records", self.output.getvalue())
 
         loose = self.root / "loose.tar.gz"
         for name, data, message in (
@@ -625,12 +712,12 @@ class TransferTests(unittest.TestCase):
             patch.object(setup, "install_backup_host_packages") as host_packages,
             patch("loaf.cli.assets.system_deployment_installed", return_value=False),
         ):
-            for arguments in (("offline",), (None,)):
+            for arguments in (("status",), (None,)):
                 with self.subTest(arguments=arguments):
                     self.assertEqual(self.invoke(*arguments, custom=False, project=None), 2)
                     hints = self.progress.getvalue()
                     self.assertIn(f"{folder} is a backup folder. The typical next steps in it are:", hints)
-                    for step in ("./loaf setup ", "./loaf restore ", "./loaf offline ", "./loaf docs transfer"):
+                    for step in ("./loaf setup ", "./loaf restore ", "./loaf run offline ", "./loaf docs transfer"):
                         self.assertIn(step, hints)
                     self.assertIn(f"cd ~/loaf && {shlex.quote(str(folder / 'loaf'))} setup", hints)
                     self.assertNotIn("--system", hints)
@@ -645,18 +732,19 @@ class TransferTests(unittest.TestCase):
             self.assertIn("Next: ./loaf restore\nRead the guides with ./loaf docs, for example ./loaf docs transfer.\n",
                           self.output.getvalue())
             self.assertEqual(self.invoke("restore", "config", custom=False, project=None), 0, self.progress.getvalue())
-            self.assertIn("Next: ./loaf offline\n", self.output.getvalue())
+            self.assertIn("Next: ./loaf run offline\n", self.output.getvalue())
         self.assertEqual({path.name: path.read_bytes() for path in moved.iterdir()}, before)
         self.assertTrue(transfer.is_bundle(moved))
         self.assertFalse(transfer.is_bundle(folder))
-        prepared.assert_called_once_with(folder)
+        self.assertEqual(prepared.call_args.args[:2], (folder, folder / "config"))
         host_packages.assert_called_once_with(folder)
         self.assertEqual((folder / self.docker_cache.relative_to(self.project) / "Packages").read_bytes(),
                          b"fixture package index")
         self.assertEqual((folder / "loaf").read_bytes(), self.executable.read_bytes())
         self.assertTrue(os.access(folder / "loaf", os.X_OK))
         self.assertEqual(config.load(folder / "config").port, 8818)
-        self.assertTrue((folder / config.TERMINAL_SECRET).is_file())
+        # Only setup --terminal-server-key creates a key, and this backup has none.
+        self.assertFalse((folder / config.TERMINAL_SECRET).exists())
         self.assertFalse(list(folder.glob(".loaf-*")))
         self.assertEqual([call for call in self.docker_calls if call[:2] != ["docker", "compose"]], [])
 
@@ -719,7 +807,7 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(access(key), (0o640, os.getgid()))
         self.assertFalse((state / config.TERMINAL_SECRET).exists())
         self.assertIn("Next: ", self.output.getvalue())
-        self.assertIn("--system offline", self.output.getvalue())
+        self.assertIn("--system run offline", self.output.getvalue())
 
     def test_a_restored_settings_file_never_replaces_the_terminal_key(self):
         self.settings.unlink()
@@ -750,7 +838,7 @@ class TransferTests(unittest.TestCase):
             self.assertIn(f"Next: ./loaf restore --archive {shlex.quote(str(moved))}\n", self.output.getvalue())
             self.assertEqual(self.invoke("restore", "--archive", str(moved), custom=False, project=None), 0,
                              self.progress.getvalue())
-        self.assertIn("Next: ./loaf offline\n", self.output.getvalue())
+        self.assertIn("Next: ./loaf run offline\n", self.output.getvalue())
         self.assertEqual(config.load(folder / "config").namespace_name, "v2")
 
     def test_restore_inside_a_backup_folder_restores_into_it_or_changes_nothing(self):
@@ -782,7 +870,7 @@ class TransferTests(unittest.TestCase):
             self.assertEqual(self.invoke("restore", custom=False, project=folder), 0, self.progress.getvalue())
         output = self.output.getvalue()
         # Run from elsewhere, the follow-up names the project; the system hint names the moved backup.
-        self.assertIn(f"Next: {shlex.join(cli.project_command(folder, None, None))} offline\n", output)
+        self.assertIn(f"Next: {shlex.join(cli.project_command(folder, None, None))} run offline\n", output)
         self.assertIn("The loaf Debian package is installed. To restore into its system deployment instead, run:\n"
                       f"  sudo {shlex.join(cli.project_command(folder, None, None, system=True))} restore "
                       f"--archive {shlex.quote(str(moved))}\n", output)
@@ -871,6 +959,11 @@ class TransferTests(unittest.TestCase):
         started = self.docker_calls[self.docker_calls.index(importer) + 1:]
         self.assertTrue(any("up" in call and call[-1] == "ollama-offline" for call in started))
         self.assertIn("Open WebUI is stopped.", self.output.getvalue())
+        self.assertTrue(self.output.getvalue().rstrip().endswith(" offline"), self.output.getvalue())
+        # A CPU replay suggests CPU serving next.
+        self.assertEqual(self.invoke("restore", "models", "--import", "--cpu", project=self.destination), 0,
+                         self.progress.getvalue())
+        self.assertTrue(self.output.getvalue().rstrip().endswith(" offline --cpu"), self.output.getvalue())
 
     def test_backup_warns_about_modelfiles_and_keeps_the_snapshot(self):
         blob = "models/blobs/sha256-fixture"
@@ -915,7 +1008,7 @@ class TransferTests(unittest.TestCase):
                 self.assertEqual(self.invoke("backup", "project"), 0, self.progress.getvalue())
                 private, runnable = (0o640, 0o750) if shared else (0o600, 0o700)
                 self.assertEqual((mode(self.bundle), mode(self.bundle / "loaf")), (runnable, runnable))
-                self.assertEqual((mode(self.bundle / transfer.CHECKSUMS), mode(self.archive)), (private, private))
+                self.assertEqual(mode(self.archive), private)
 
     def test_backup_excludes_backup_folders_inside_the_checkout(self):
         self.backup_dir = self.project / "transfer disk"
@@ -1043,11 +1136,10 @@ class ModelTransferTests(unittest.TestCase):
                     payload.add(source / "models", arcname="models")
                 transfer.validate_model_archive(archive)
 
-            target, staging = root / "destination", root / "staging"
-            staging.mkdir()
+            target = root / "destination"
             (target / blob).parent.mkdir(parents=True)
             (target / blob).write_bytes(corrupt)
-            script = transfer.IMPORT_MODELS.replace("/ollama", str(target)).replace("/staging", str(staging))
+            script = transfer.IMPORT_MODELS.replace("/ollama", str(target))
             with archive.open("rb") as payload:
                 subprocess.run(["sh", "-c", script], stdin=payload, check=True)
             self.assertEqual((target / blob).read_bytes(), corrupt)
@@ -1076,10 +1168,8 @@ class ModelTransferTests(unittest.TestCase):
             (source / "config").mkdir()
             (source / "config/example.model").write_text("FROM local\n")
 
-            staging = project / "staging"
-            staging.mkdir()
             archive = project / "models.tar"
-            snapshot = transfer.SNAPSHOT_MODELS.replace("/ollama", str(source)).replace("/staging", str(staging))
+            snapshot = transfer.SNAPSHOT_MODELS.replace("/ollama", str(source))
             with archive.open("wb") as payload:
                 subprocess.run(["sh", "-c", snapshot], stdout=payload, check=True)
             transfer.validate_model_archive(archive)
@@ -1097,9 +1187,7 @@ class ModelTransferTests(unittest.TestCase):
             (target / "config/obsolete.model").touch()
             (target / "outside-model-store").touch()
 
-            staging = project / "import-staging"
-            staging.mkdir()
-            import_script = transfer.IMPORT_MODELS.replace("/ollama", str(target)).replace("/staging", str(staging))
+            import_script = transfer.IMPORT_MODELS.replace("/ollama", str(target))
             with archive.open("rb") as payload:
                 subprocess.run(["sh", "-c", import_script], stdin=payload, check=True)
             self.assertEqual((target / manifest).read_text(), definition)
@@ -1120,6 +1208,17 @@ class ModelTransferTests(unittest.TestCase):
             self.assertFalse((target / "models/blobs/obsolete").exists())
             self.assertFalse((target / "config/obsolete.model").exists())
             self.assertTrue((target / "outside-model-store").is_file())
+            # The import unpacks inside the store and moves blobs into place, without a second copy elsewhere.
+            self.assertEqual(list(target.glob(".loaf-transfer.*")), [])
+            self.assertNotIn("/staging", transfer.IMPORT_MODELS + transfer.SNAPSHOT_MODELS)
+
+            # A store without models/ still yields the directory that restore expects.
+            empty = project / "empty"
+            empty.mkdir()
+            script = transfer.SNAPSHOT_MODELS.replace("/ollama", str(empty)).replace("/tmp/empty", str(project / "e"))
+            with archive.open("wb") as payload:
+                subprocess.run(["sh", "-c", script], stdout=payload, check=True)
+            transfer.validate_model_archive(archive)
 
 
 def write_members(path, *members):

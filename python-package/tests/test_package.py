@@ -16,7 +16,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from loaf import badges, cli
+from loaf import badges, cli, transfer
 from tests import DATA, ROOT
 
 
@@ -87,10 +87,15 @@ class PackageTests(unittest.TestCase):
     def test_every_workflow_defaults_to_current_directory(self):
         with tempfile.TemporaryDirectory(prefix='loaf project with spaces ') as folder:
             root = self.project(folder)
+            # Backup previews need the standalone executable that the folder carries, like a real backup.
+            result = self.invoke(folder, 'backup', '--dry-run')
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn(f'put that executable at {root.resolve() / "loaf"}'.encode(), result.stderr)
+            (root / 'loaf').write_bytes(transfer.EXECUTABLE_HEADER + b"\n__LOAF_PAYLOAD__\n\x1f\x8bfixture")
             # Restore previews need a backup; without one they fail like a real restore.
-            for mode in (*cli.MODES, "backup"):
+            for mode in (*cli.COMPOSE_COMMANDS, "backup"):
                 with self.subTest(mode=mode):
-                    result = self.invoke(folder, mode, '--dry-run')
+                    result = self.invoke(folder, mode, *(('offline',) if mode == 'run' else ()), '--dry-run')
                     self.assertEqual(result.returncode, 0, result.stderr)
                     output = result.stdout.decode('utf-8')
                     self.assertIn(str(root.resolve()), output)
@@ -104,7 +109,7 @@ class PackageTests(unittest.TestCase):
     def test_verbose_dry_run_prints_copyable_compose_commands(self):
         with tempfile.TemporaryDirectory() as folder:
             root = self.project(folder)
-            result = self.invoke(folder, '-v', 'offline', '--dry-run')
+            result = self.invoke(folder, '-v', 'run', 'offline', '--dry-run')
             self.assertEqual(result.returncode, 0, result.stderr)
             commands = result.stdout.splitlines()
             self.assertEqual(len(commands), 3)
@@ -164,7 +169,7 @@ class PackageTests(unittest.TestCase):
 
     def test_missing_compose_fails_before_docker(self):
         with tempfile.TemporaryDirectory() as folder:
-            result = self.invoke(folder, 'offline', '--dry-run')
+            result = self.invoke(folder, 'run', 'offline', '--dry-run')
         self.assertEqual(result.returncode, 2)
         self.assertIn(b'No compose.yml', result.stderr)
         self.assertEqual(result.stdout, b'')
@@ -191,7 +196,7 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(link.resolve(), DATA)
             self.assertTrue((link / 'docker/open-webui/Dockerfile').is_file())
             self.assertTrue((link / 'config/models.ini').is_file())
-            cpu_plan = self.invoke(folder, 'offline', '--cpu', '--dry-run', '-v')
+            cpu_plan = self.invoke(folder, 'run', 'offline', '--cpu', '--dry-run', '-v')
             self.assertEqual(cpu_plan.returncode, 0, cpu_plan.stderr)
             self.assertIn(str(DATA / 'compose.cpu.yml').encode(), cpu_plan.stdout)
             again = self.invoke(folder, 'install', '--link-docker-project')

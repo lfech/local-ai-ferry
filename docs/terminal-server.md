@@ -37,16 +37,16 @@ enabled = true
 secret_file = config/terminal-server.key
 ```
 
-Setup creates the key at the configured path with owner-only permissions.
-For an existing deployment that only needs a key, run
-`loaf setup --terminal-server-key` from the project directory. Both commands
-preserve an existing key. For a new deployment, run these commands while
-connected.
+`loaf setup --terminal-server-key` creates the key at the configured path with
+owner-only permissions and keeps an existing key; plain setup creates no key.
+A restore of the `terminal` type brings the backup's key instead. For a new
+deployment, run these commands while connected.
 
 ```bash
 loaf setup
+loaf setup --terminal-server-key
 loaf build
-loaf offline
+loaf run offline
 ```
 
 Set `secret_file` to another path if needed. Relative paths start at the
@@ -88,7 +88,7 @@ connection there: a direct connection to `http://terminal-server:8000` with
 
 ## Upgrade an existing terminal deployment
 
-Rebuild with `loaf build`, then run `loaf online` or `loaf offline`.
+Rebuild with `loaf build`, then run `loaf run online` or `loaf run offline`.
 Use `[terminal_server]` in the INI and `http://terminal-server:8000` for the
 saved connection in Open WebUI. Direct Compose uses
 `LOAF_TERMINAL_SECRET_FILE` for a custom bearer key path.
@@ -175,7 +175,7 @@ All settings below belong to `[terminal_server]` in `config/config.ini`.
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `enabled` | `false` | Start the provisioner with `loaf online` and `loaf offline`. |
+| `enabled` | `false` | Start the provisioner with `loaf run online` and `loaf run offline`. |
 | `include_in_backup` | `true` | Include the `terminal` type in `loaf backup` without type names while the terminal server is enabled: the user volume and the bearer key that Open WebUI's saved connection uses. |
 | `secret_file` | `config/terminal-server.key` | Source for the Compose bearer secret. |
 | `apt_source_file` | blank | Use this APT source for terminal image builds and for `apt` in chat containers. [Package mirror](#package-mirror-for-image-builds) |
@@ -226,7 +226,7 @@ With `network = connected`, each container also joins the shared bridge
 reach each other. They reach
 every address the Docker host reaches: an APT mirror, the internet, other
 hosts on its network and the host's published ports, including Open WebUI.
-Use it only where that access is acceptable. `loaf offline` prints a note
+Use it only where that access is acceptable. `loaf run offline` prints a note
 about this access, since local network access can still be intended on an
 offline host. Changing the setting replaces
 existing chat containers on the next start, which removes their `/home/chat`
@@ -266,7 +266,7 @@ path in the project configuration. For example, place the file at
 apt_source_file = config/offline-mirror.sources
 ```
 
-Run `loaf offline` using the updated launcher and the loaded Open Terminal
+Run `loaf run offline` using the updated launcher and the loaded Open Terminal
 image. Loaf mounts the file read-only at
 `/etc/apt/sources.list.d/loaf-terminal.sources` in the provisioner and its
 chat containers. A `.list` file gets the corresponding `.list` destination.
@@ -277,10 +277,15 @@ keep Debian's mirrors next to a local repository with `network = connected`,
 list both in the file.
 
 Edit the source on the host. In-place writes are visible through the mount.
-Run `loaf offline` again after saving through an editor that replaces the
-file. On that run, Loaf recreates the terminal server if the source changed.
-The terminal server then replaces existing chat containers, which removes
-their `/home/chat` folders and installed packages.
+Run `loaf run offline` again after saving through an editor that replaces the
+file. On that run, Loaf recreates the terminal server if the source changed,
+and each chat container binds the new file on its next start. A chat keeps
+its container, `/home/chat` folder and installed packages.
+
+Chat containers also run the launcher's runner script. `loaf run offline` and
+`loaf run online` copy it to `.loaf-terminal-runtime/` in the project, a path that
+stays the same across loaf releases, so a new release changes the script that
+chat containers run without replacing them.
 [Docker bind mounts](https://docs.docker.com/engine/storage/bind-mounts/)
 
 ## Install packages in a chat
@@ -305,16 +310,16 @@ description names the update step.
 The packages stay in the chat's container while the chat exists, also while
 the container is stopped. Other chats and new chats start from the shared
 terminal image. Backups do not include installed packages; install them again
-after a restore. Changing `apt_source_file`, `apt_repository_dir` or
-`network` replaces existing chat containers on the next start, without their
-packages.
+after a restore. Moving `apt_source_file` or `apt_repository_dir` to another
+path, switching between `.list` and `.sources`, or changing `network`
+replaces existing chat containers on the next start, without their packages.
 
 The container must reach a package source. With `network = connected`, it
 uses the image's APT sources or a configured `apt_source_file` over the
 Docker host's network. With `network = isolated`, set `apt_repository_dir` to
 a repository stored on the Docker host and use a source URI rooted at
 `file:/run/loaf-apt/repository`. Relative paths in `config.ini` start at the
-project directory. `loaf online`, `loaf offline` and `loaf status` refuse a
+project directory. `loaf run online`, `loaf run offline` and `loaf status` refuse a
 directory without an APT index: `Packages` or one of its compressed forms,
 `Release` or `InRelease` at the root, or `dists/`. For example, after loading
 the terminal image, use the following settings and a flat repository's
@@ -330,12 +335,10 @@ apt_repository_dir = /media/transfer/apt-mirror
 deb [trusted=yes] file:/run/loaf-apt/repository ./
 ```
 
-To try this, run `loaf setup --test-local-repository` while connected after
-building the terminal image. It downloads three command-line tools, chosen at
-random from a fixed list, together with the dependencies that the terminal
-image lacks, into `apt-test-repository/`. It writes the source file above as
-`config/apt-test-repository.list` and prints the tools and the two settings.
-Then ask the model to install one of the tools.
+To try this, run `loaf setup --create-file-repository` while connected after
+building the terminal image. [What it creates](cli-help.md#setup) Then ask the
+model to install one of the tools that it prints. The repository directory is
+not part of any backup type.
 
 APT refuses an unsigned repository unless the source marks it trusted, as
 above. A flat repository built with `dpkg-scanpackages` has no signature.
@@ -347,35 +350,15 @@ read-only in every chat container.
 
 ## Offline transfer and shutdown
 
-`loaf backup` includes the matching Open Terminal image when capturing images
-if it exists locally. The `terminal` type transfers the user volume with every
-account's `/home/user` folder and the bearer key, together with the `webui`
-data that owns those accounts. Chat folders and installed packages stay
-behind. With the terminal server enabled, backups without type names include
-it while `[terminal_server] include_in_backup` is true, the default, so the
-restored WebUI keeps a working connection. Name it, as in
-`loaf backup terminal`, to save it on its own. The archive contains the bearer
-key in plaintext and is created with owner-only permissions.
-
-`loaf backup --no-terminal-server` leaves the terminal server out: the image,
-the user volume and the key. Restoring that backup disables the terminal
-server in the restored settings and removes loaf's saved `loaf-terminal`
-connection from the restored WebUI data, so Open WebUI starts without a
-terminal. Enable it again later as described in
-[Enable and connect](#enable-and-connect); Open WebUI then receives the preset
-connection on its next start.
-[Archive types](transfer.md#select-archive-types)
-
-`loaf restore` restores those assets. Restore with the matching namespace so
-the volume name and WebUI account IDs match. The destination's
-`volume_driver` and `volume_options` determine how the user volume is
-created. Restore writes the key to `secret_file` with owner-only permissions,
-reuses a matching key, and refuses to replace a different key or overwrite a
-populated user volume. It checks the user volume's data, ownership labels and
-storage settings before it changes anything. In the system deployment, the key stays at
-`/etc/loaf/terminal-server.key`, readable by root and the `docker` group,
-which runs Compose. Setup from the copied backup uses its saved key when
-creating the local file.
+Backups carry the Open Terminal image, the user volume with every account's
+`/home/user` folder and the bearer key, as the
+[archive types](transfer.md#select-archive-types) describe; chat folders and
+installed packages stay behind. After a restore of a backup made with
+`--no-terminal-server`, enable the server again as described in
+[Enable and connect](#enable-and-connect). Restore into the matching namespace,
+so that the volume name and the WebUI account IDs match; the destination's
+`volume_driver` and `volume_options` decide how the user volume is created.
+[Restore behavior](transfer.md#restore-behavior)
 
 For archives without the terminal image, save and load it separately before
 serving. Use the matching image tag for a separate namespace. If you also
@@ -392,20 +375,18 @@ account IDs still match the folders, which are named by a hash of the
 account ID. The user volume is `loaf-terminal-users`, or
 `loaf-NAME-terminal-users` in the namespace `loaf-NAME`. The chat containers
 and their networks are named `loaf-terminal-KEY`. `loaf docker ps` lists them.
-[Docker resources](launcher.md#list-and-remove-docker-resources)
+[Docker resources](cli-help.md#docker)
 
 ```bash
 docker volume inspect --format '{{json .Labels}}' loaf-terminal-users
 ```
 
-`loaf stop` stops the provisioner, which stops the chat containers and keeps
-them, and removes the Compose service containers. Use
-`loaf stop --no-remove-containers` to keep the stopped service containers and
-their logs. To disable the extension, set
+[`loaf stop`](cli-help.md#stop) stops the provisioner, which stops the chat
+containers and keeps them. To disable the extension, set
 `enabled = false` and run the desired serving command again. Disable the
 saved connection in Open WebUI to hide it from the terminal menu. The user
 volume and the stopped chat containers remain available for re-enabling.
-[Shutdown options](launcher.md#stop-and-remove-containers)
+[Shutdown options](cli-help.md#stop)
 
 ## Acceptance checks
 

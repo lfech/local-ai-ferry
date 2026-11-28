@@ -68,8 +68,11 @@ class CompletionScriptTests(unittest.TestCase):
                           "--verbose"])
         self.assertIn("--no-remove-containers", self.complete("stop", "-"))
         self.assertNotIn("-n", self.complete("stop", "-"))
-        # A command without positional words offers its options right away.
-        self.assertIn("--wait-timeout", self.complete("offline", ""))
+        # A command without positional words offers its options right away; run and stop offer profiles.
+        self.assertIn("--wait-timeout", self.complete("download", ""))
+        self.assertEqual(self.complete("run", ""), ["offline", "online"])
+        self.assertEqual(self.complete("stop", "on"), ["online"])
+        self.assertIn("--cpu", self.complete("run", "offline", "--c"))
         self.assertEqual(self.complete("--project-dir", "/tmp", "restore", "mo"), ["models"])
         self.assertEqual(self.complete("backup", "--namespace", "=", "v1", "vol"), ["volumes"])
         self.assertEqual(self.complete("frobnicate", "--h"), ["--help"])
@@ -79,7 +82,7 @@ class CompletionScriptTests(unittest.TestCase):
         self.assertEqual(self.complete("--project-dir", "mod"), [])
         self.assertEqual(self.complete("download", "--models-file", "mod"), ["models.ini"])
         self.assertEqual(self.complete("download", "--models-file", "=", "mod"), ["models.ini"])
-        self.assertEqual(self.complete("offline", "--namespace", ""), [])
+        self.assertEqual(self.complete("run", "--namespace", ""), [])
 
     @unittest.skipUnless(completion.BASH_COMPLETION.is_file(), "bash-completion is not installed.")
     def test_bash_completion_loads_the_user_file_on_first_use(self):

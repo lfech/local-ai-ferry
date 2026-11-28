@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 # --- Distribution metadata and command registration ---
 [project]
 name = "local-ai-ferry"
-version = "0.4.0"
+version = "0.5.0"
 description = "Local AI Ferry prepares, transfers and runs offline Ollama and Open WebUI deployments"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -45,6 +45,8 @@ loaf = [
     "data/docker/terminal-server/*.py",
     "data/docker/open-webui/*.py",
     "data/docker/terminal-server/*.list",
+    # Only release builds add the standalone executable, which backups carry.
+    "data/standalone/loaf",
     # Links to the repository's README.md, docs/ and config/model-examples/ in a checkout; the built package
     # holds the files.
     "data/config/model-examples/*.ini",

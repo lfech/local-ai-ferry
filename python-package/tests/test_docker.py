@@ -512,7 +512,7 @@ class DockerTests(unittest.TestCase):
         invoke, stop, project, _ = self.start_stop_fixture()
         container = invoke("ps", "--quiet", "worker").strip()
         self.assertTrue(container)
-        command([*stop, "-n"], cwd=project)
+        command([*stop, "--no-remove-containers"], cwd=project)
         self.assertEqual(invoke("ps", "--all", "--quiet", "worker").strip(), container)
         self.assertEqual(
             command(["docker", "inspect", "--format", "{{.State.Running}}", container]).strip(),

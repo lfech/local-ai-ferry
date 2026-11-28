@@ -1,2 +1,4 @@
 # loaf docs reads the bundled guides even where /usr/share/doc is excluded.
 loaf: package-contains-documentation-outside-usr-share-doc [usr/lib/python3/dist-packages/loaf/data/*]
+# The standalone executable that backups carry is a Bash launcher followed by its compressed runtime.
+loaf: shell-script-fails-syntax-check [usr/lib/python3/dist-packages/loaf/data/standalone/loaf]
