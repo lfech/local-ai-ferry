@@ -375,7 +375,8 @@ directory and the generated names.
 Keep the transfer folder private. The archive contains WebUI data and may
 include Git history. `config` carries `config.ini`, so keep credentials in
 the applications or host settings that own them. The release executable supplies the packaged defaults and
-Docker files. Copy required `.env` settings and other external data
+Docker files. Compose reads a project `.env` only with `[launcher]
+docker_env_enable = true`; copy such a file and other external data
 separately. The `config` type excludes the configured terminal key file. A
 link in `config/` stays a link when it points, relatively, to another
 configuration file there; backup refuses any other link and names it. Open

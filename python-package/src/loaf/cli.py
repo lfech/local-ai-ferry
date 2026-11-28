@@ -9,6 +9,7 @@ import argparse
 from configparser import ConfigParser, Error as INIError
 from contextlib import nullcontext
 from dataclasses import dataclass, field
+import json
 import os
 from pathlib import Path
 import re
@@ -310,6 +311,9 @@ class Compose:
             "docker", "compose", "--project-directory", str(self.project_dir),
             "--project-name", self.project_name,
         ]
+        if not self.settings.docker_env_enable:
+            # An empty env file replaces the project's .env, whose variables would override the settings.
+            command += ["--env-file", os.devnull]
         files = self.files
         if self.settings.terminal_server_enabled:
             # Open WebUI receives the bearer key to preset its terminal connection.
@@ -328,7 +332,7 @@ class Compose:
         variables = {"LOAF_NAMESPACE": config.namespace_name(self.namespace), **self.settings.compose_variables()}
         compose_dir = self.files[0].parent
         if compose_dir != self.project_dir:
-            # Keep the working project's .env while resolving the relocated build contexts.
+            # Relative build contexts start at the project directory; point them to the deployment files.
             variables["LOAF_DOCKER_DIR"] = str(compose_dir / "docker")
         if self.settings.cuda_visible_devices and "CUDA_VISIBLE_DEVICES" not in os.environ:
             variables["CUDA_VISIBLE_DEVICES"] = self.settings.cuda_visible_devices
@@ -438,8 +442,9 @@ class Compose:
 
 
 def execute_plan(
-    compose: Compose, steps: Sequence[Step], *, lock_path: Path, dry_run: bool = False
+    compose: Compose, steps: Sequence[Step], *, lock_path: Path | None, dry_run: bool = False
 ) -> None:
+    """Run or preview the steps. Without lock_path, the caller holds the project lock."""
     if dry_run:
         # No lock creation or Docker probing: preview works on an unprepared host.
         if steps and not compose.verbose:
@@ -449,17 +454,60 @@ def execute_plan(
         return
     # Hold one lock across the whole transition. check=True stops the sequence at
     # its first failure; successful downloads/exports remain available to retry.
-    with project_lock(lock_path):
+    with nullcontext() if lock_path is None else project_lock(lock_path):
         for step in steps:
             compose.execute(step)
 
 
-def serving_profile(compose: Compose, profile: str) -> bool:
-    """Whether a serving profile has running containers. A failed query counts as not running."""
-    step = Step((profile,), ("ps", "--status", "running", "--quiet", *SERVICES[profile]))
-    result = subprocess.run(compose.command(step), cwd=compose.project_dir, env=compose.environment(compose.variables(step)),
-                            capture_output=True, text=True, check=False)
-    return result.returncode == 0 and bool(result.stdout.strip())
+class DockerQueryError(RuntimeError):
+    """Docker could not report the deployment's running containers."""
+
+
+# compose.cpu.yml sets this in the Ollama services, which tells containers that serve on CPU apart.
+CPU_ENVIRONMENT = "NVIDIA_VISIBLE_DEVICES=void"
+
+
+@dataclass(frozen=True)
+class ServingState:
+    """The serving profiles with running containers, and whether a running Ollama service serves on CPU."""
+    profiles: tuple[str, ...]
+    cpu: bool
+
+
+def docker_query(command: list[str], environment: dict[str, str], cwd: Path | None = None) -> str:
+    result = subprocess.run(command, cwd=cwd, env=environment, capture_output=True, text=True, check=False)
+    if result.returncode:
+        lines = result.stderr.strip().splitlines()
+        raise DockerQueryError(lines[-1] if lines else f"{display_command(command[:3])} failed (exit {result.returncode}).")
+    return result.stdout
+
+
+def serving_state(compose: Compose) -> ServingState:
+    """Ask Docker which serving profiles run and whether Ollama serves on CPU; raise DockerQueryError if it cannot."""
+    step = Step(SERVING, ("ps", "--status", "running", "--format", "{{.Service}} {{.ID}}"))
+    environment = compose.environment(compose.variables(step))
+    try:
+        running = dict(line.split(maxsplit=1) for line in
+                       docker_query(compose.command(step), environment, compose.project_dir).splitlines() if line.strip())
+        backends = [running[service] for profile in SERVING for service in SERVICES[profile][:1] if service in running]
+        cpu = bool(backends) and any(
+            CPU_ENVIRONMENT in json.loads(line) for line in docker_query(
+                ["docker", "inspect", "--format", "{{json .Config.Env}}", *backends], environment).splitlines()
+            if line.strip())
+    except (OSError, ValueError, DockerQueryError) as exc:
+        detail = str(exc).rstrip()
+        detail += "" if detail.endswith((".", "?", "!")) else "."
+        raise DockerQueryError(f"Docker could not report which services of {compose.project_name} run: {detail} "
+                               "Check 'docker version'; docs/debian.md describes Docker access.") from exc
+    return ServingState(tuple(profile for profile in SERVING if any(service in running for service in SERVICES[profile])),
+                        cpu)
+
+
+def note_terminal_network(settings: config.Settings, mode: str, serving: str | None) -> None:
+    if serving == "offline" and mode in ("run", "restart") and settings.terminal_server_enabled \
+            and settings.terminal_server_network == "connected":
+        print("Note: [terminal_server] network = connected, so chat containers that models drive can reach every "
+              "address the Docker host reaches.", flush=True)
 
 
 def follow_logs(compose: Compose, mode: str, *, dry_run: bool, import_definitions: bool = False) -> None:
@@ -646,7 +694,7 @@ def add_options(parser, selected: tuple[str, ...] | None = None) -> None:
     add("--badges", action="store_true", help="Record test results and update badges for the groups that ran.")
     add("--full", action="store_true", help="Also remove generated installation files.")
     add("-f", "--force", action="store_true",
-        help="Replace what setup would keep, or remove without asking for confirmation.")
+        help="Replace what the named setup parts would keep, or remove without asking for confirmation.")
     add("--wait-timeout", type=wait_timeout_option, metavar="SECONDS",
         help="Override the service readiness wait from config.ini. 0 waits without a limit.")
     add("-a", "--attach", action="store_true", help="Follow live Compose logs after the workflow.")
@@ -663,39 +711,45 @@ def help_listing(heading: str, commands: dict[str, CommandHelp]) -> str:
     return "\n".join((heading, *rows))
 
 
+def command_arguments(command: str, subcommand: str | None = None) -> str:
+    """The arguments that a command or a subcommand takes after its name, for its usage line."""
+    if command in TRANSFER_MODES:
+        return "[OPTIONS] [TYPE ...]"
+    if command in INSTALL_MODES:
+        return "[OPTIONS] [PART ...]"
+    if command == "package":
+        return "[OPTIONS] TARGET ..."
+    if command == "run":
+        return "[OPTIONS] PROFILE"
+    if command in ("stop", "restart"):
+        return "[OPTIONS] [PROFILE]"
+    if command == "docs":
+        return "[NAME]"
+    if command == "integration" and subcommand is None:
+        return "INTEGRATION [OPTIONS]"
+    if command in SUBCOMMAND_HELP and subcommand is None:
+        return "COMMAND [OPTIONS]"
+    if subcommand == "rm":
+        return "[OPTIONS] TYPE ..."
+    return "[OPTIONS]"
+
+
 def show_help(command: str | None, subcommand: str | None) -> None:
     prog = " ".join(part for part in ("loaf", command, subcommand) if part)
-    usage = "%(prog)s [OPTIONS]"
+    usage = CLI_USAGE if command is None else f"%(prog)s {command_arguments(command, subcommand)}"
     options = ()
     if command is None:
-        usage = CLI_USAGE
         description = f"{__doc__}\n\n{help_listing('Commands', COMMAND_HELP)}"
         notes = "Run 'loaf COMMAND --help' for command options.\nSee docs/cli-help.md for the full reference."
     elif command == "integration" and subcommand is None:
-        usage = "%(prog)s INTEGRATION [OPTIONS]"
         description = f"{COMMAND_HELP[command].summary}\n\n{help_listing('Integrations', INTEGRATION_HELP)}"
         notes = "Run 'loaf integration INTEGRATION --help' for integration options."
     elif command in SUBCOMMAND_HELP and subcommand is None:
-        usage = "%(prog)s COMMAND [OPTIONS]"
         description = f"{COMMAND_HELP[command].summary}\n\n{help_listing('Commands', SUBCOMMAND_HELP[command])}"
         notes = f"Run 'loaf {command} COMMAND --help' for command options."
     else:
         details = COMMAND_HELP[command] if subcommand is None else SUBCOMMAND_HELP[command][subcommand]
         description, options, notes = details.summary, details.options, details.notes
-        if command in TRANSFER_MODES:
-            usage = "%(prog)s [OPTIONS] [TYPE ...]"
-        elif command in INSTALL_MODES:
-            usage = "%(prog)s [OPTIONS] [PART ...]"
-        elif command == "package":
-            usage = "%(prog)s [OPTIONS] TARGET ..."
-        elif command == "run":
-            usage = "%(prog)s [OPTIONS] PROFILE"
-        elif command in ("stop", "restart"):
-            usage = "%(prog)s [OPTIONS] [PROFILE]"
-        elif command == "docs":
-            usage = "%(prog)s [NAME]"
-        elif subcommand == "rm":
-            usage = "%(prog)s [OPTIONS] TYPE ..."
     parser = argparse.ArgumentParser(
         prog=prog, usage=usage, description=description, epilog=notes, add_help=False,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -818,8 +872,11 @@ def version_report() -> str:
     )
 
 
-def report_settings(layers: Sequence[Path], namespace_name: str, config_dir: Path) -> None:
+def report_settings(layers: Sequence[Path], namespace_name: str, config_dir: Path, env_file: Path | None) -> None:
+    """List the settings files in effect; env_file is the project's .env when docker_env_enable lets Compose read it."""
     files = [str(directory / config.CONFIG_NAME) for directory in layers[1:] if (directory / config.CONFIG_NAME).is_file()]
+    if env_file is not None and env_file.is_file():
+        files.append(str(env_file))
     print("Settings    " + ", ".join(["packaged defaults", *files]), flush=True)
     warn_shared_deployment(layers, namespace_name, config_dir)
 
@@ -928,7 +985,8 @@ def setup_command(args, parts: Sequence[str], *, project: Path, config_dir: Path
             "venv": f"Prepare {project / '.venv'} and cache the Python wheels.",
             "toolkit": f"Cache and, if needed, install the NVIDIA Container Toolkit packages{source}.",
             "config": f"Create {config_dir / config.CONFIG_NAME} and the model list in effect"
-                      + (", replacing existing files." if force else " if missing."),
+                      + (f", replacing existing files; a replaced file stays as NAME{setup.PREVIOUS_SUFFIX}."
+                         if force else " if missing."),
             "docs": f"Write the guides for loaf {assets.release_version()} to {project / docs.EXPORT_DIR}"
                     + (", replacing an existing directory." if force else " if missing."),
         }
@@ -1174,6 +1232,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     ):
         parser.error("The Debian package prepares the system deployment. Name only all or terminal-server-key "
                      "and omit --archive, or select a project with --project-dir.")
+    if args.force and "all" in parts:
+        # Replacing settings or guides needs the part named, so a plain setup never discards them.
+        parser.error("--force replaces only what the parts named on the command line would keep. Name the parts "
+                     "instead of all, for example: loaf setup "
+                     + ("terminal-server-key" if system_mode else "config") + " --force")
     adopt_backup = False
     if system_mode:
         project_dir = assets.SYSTEM_PROJECT_DIR
@@ -1192,8 +1255,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         if adopt_backup and args.mode not in (*INSTALL_MODES, "restore"):
             print(f"loaf: error: {args.mode} needs a project.\n{backup_folder_hints(project_dir)}", file=sys.stderr)
             return 2
-        if args.mode in (*INSTALL_MODES, "restore") and not args.dry_run:
-            project_dir.mkdir(parents=True, exist_ok=True)
     if args.mode in ("package", "clean") or setup_tests:
         if unexpected:
             parser.error(f"Unexpected option for {args.mode}. See 'loaf {args.mode} --help'.")
@@ -1381,23 +1442,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             or args.mode in (*INSTALL_MODES, "restore") or system_mode or project_ready(project_dir, config_dir)):
         parser.error(f"{project_dir} has no settings in {config_dir}. Run loaf setup there, or select a project "
                      "with --project-dir.")
-    if args.mode == "restart" and serving is None:
-        # Restart the profile that serves now.
-        probe = Compose(project_dir, files=(compose_file,), namespace=namespace, settings=settings)
-        running = [profile for profile in SERVING if serving_profile(probe, profile)]
-        if len(running) != 1:
-            override = args.config_dir.resolve() if args.config_dir is not None else None
-            parser.error(("Both serving profiles have running containers. " if running else
-                          f"No serving profile of {namespace} runs. ") + "Name the profile to start, for example: "
-                         + next_command(project_dir, override, args.namespace_name, "restart", "offline",
-                                        system=system_mode))
-        serving = workflow_mode = running[0]
-    compose_files = (compose_file,)
-    if args.cpu:
-        cpu_file = assets.DATA_DIR / "compose.cpu.yml"
-        if not cpu_file.is_file():
-            parser.error(f"The CPU Compose override is missing: {cpu_file}.")
-        compose_files += (cpu_file,)
+    # restart, and stop PROFILE with the terminal server, ask Docker what runs. A real run asks and plans under the
+    # project lock, so that a concurrent loaf command cannot change the answer before the steps run.
+    ask_docker = not args.dry_run and (args.mode == "restart" or (
+        args.mode == "stop" and serving is not None and settings.terminal_server_enabled))
+    cpu_file = assets.DATA_DIR / "compose.cpu.yml"
+    if (args.cpu or args.mode == "restart") and not cpu_file.is_file():
+        parser.error(f"The CPU Compose override is missing: {cpu_file}.")
+    # restart also serves on CPU when Ollama serves on CPU now; it decides under the lock.
+    cpu = args.cpu
+    compose_files = (compose_file, *((cpu_file,) if cpu else ()))
     if args.mode in INSTALL_MODES and args.namespace_name is not None:
         parser.error(f"{args.mode} prepares the checkout and host. Omit --namespace.")
     override_dir = config_dir if args.config_dir is not None else None
@@ -1418,24 +1472,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         if continue_integration:
             print(integrations.continue_config(settings.webui_url(), ((m.name, m.source) for m in models)), end="")
             return 0
-        if workflow_mode in MODES and (args.mode != "restore" or args.dry_run):
-            if settings.terminal_server_enabled and args.mode in ("run", "restart") and not settings.auth:
-                parser.error("The terminal server requires [webui] auth = true.")
-            timeout = args.wait_timeout if args.wait_timeout is not None else settings.wait_timeout
-            terminal = settings.terminal_server_enabled
-            # The terminal server serves both profiles, so stopping one keeps it while the other one serves.
-            other = next((profile for profile in SERVING if profile != serving), None) if serving else None
-            stop_terminal = not (args.mode in ("stop", "restart") and other and terminal and not args.dry_run
-                                 and serving_profile(Compose(project_dir, files=compose_files, namespace=namespace,
-                                                             settings=settings), other))
+        if settings.terminal_server_enabled and args.mode in ("run", "restart") and not settings.auth:
+            parser.error("The terminal server requires [webui] auth = true.")
+        timeout = args.wait_timeout if args.wait_timeout is not None else settings.wait_timeout
+        terminal = settings.terminal_server_enabled
+        if workflow_mode in MODES and (args.mode != "restore" or args.dry_run) and not ask_docker:
             steps = plan(
                 "restart" if args.mode == "restart" else workflow_mode, models, wait_timeout=timeout,
                 export_definitions=export_models, import_definitions=import_models,
-                terminal_server=terminal, remove_containers=remove_containers, cpu=args.cpu,
-                serving=serving if args.mode in ("stop", "restart") else None, stop_terminal=stop_terminal,
+                terminal_server=terminal, remove_containers=remove_containers, cpu=cpu,
+                serving=serving if args.mode in ("stop", "restart") else None,
             )
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
+    if args.mode in (*INSTALL_MODES, "restore") and not args.dry_run and not system_mode:
+        # Setup and restore create a missing project directory, but only once every check has passed.
+        project_dir.mkdir(parents=True, exist_ok=True)
     # The backup folder that setup or restore makes the project, at its location after the move.
     adopted = None
     try:
@@ -1594,7 +1646,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"Deployment  {compose.project_name}", flush=True)
                 print(f"Project     {project_dir}", flush=True)
                 print(f"WebUI URL   {settings.webui_url()}", flush=True)
-                report_settings(layer_dirs, namespace_name, config_dir)
+                report_settings(layer_dirs, namespace_name, config_dir,
+                                project_dir / ".env" if settings.docker_env_enable else None)
                 ready = readiness.check(compose, cpu=args.cpu)
                 print("\nContainers across all profiles", flush=True)
                 for step in steps:
@@ -1605,18 +1658,40 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.attach:
                 follow_logs(compose, args.mode, dry_run=args.dry_run)
             return 0
-        if serving == "offline" and args.mode in ("run", "restart") and settings.terminal_server_enabled \
-                and settings.terminal_server_network == "connected":
-            print("Note: [terminal_server] network = connected, so chat containers that models drive can reach every "
-                  "address the Docker host reaches.", flush=True)
-        execute_plan(compose, steps, lock_path=lock_path, dry_run=args.dry_run)
-        if args.dry_run and args.mode in ("stop", "restart") and serving and "terminal-server" in steps[1].arguments:
-            print(f"A real run keeps the terminal server running when the {other} profile serves.")
+        if ask_docker:
+            with project_lock(lock_path):
+                state = serving_state(compose)
+                if serving is None:
+                    if len(state.profiles) != 1:
+                        parser.error(("Both serving profiles have running containers. " if state.profiles else
+                                      f"No serving profile of {namespace} runs. ") + "Name the profile to start, for "
+                                     "example: " + next_command(project_dir, override_dir, args.namespace_name,
+                                                                "restart", "offline", system=system_mode))
+                    serving = workflow_mode = state.profiles[0]
+                cpu = args.cpu or (args.mode == "restart" and state.cpu)
+                compose = Compose(project_dir, files=(compose_file, *((cpu_file,) if cpu else ())), namespace=namespace,
+                                  settings=settings, verbose=args.verbose)
+                # The terminal server serves both profiles, so stopping one keeps it while the other one serves.
+                other = next(profile for profile in SERVING if profile != serving)
+                steps = plan(args.mode, wait_timeout=timeout, terminal_server=terminal,
+                             remove_containers=remove_containers, cpu=cpu, serving=serving,
+                             stop_terminal=other not in state.profiles)
+                note_terminal_network(settings, args.mode, serving)
+                execute_plan(compose, steps, lock_path=None)
+        else:
+            note_terminal_network(settings, args.mode, serving)
+            execute_plan(compose, steps, lock_path=lock_path, dry_run=args.dry_run)
+        if args.dry_run and args.mode in ("stop", "restart") and serving:
+            if "terminal-server" in steps[1].arguments:
+                other = next(profile for profile in SERVING if profile != serving)
+                print(f"A real run keeps the terminal server running when the {other} profile serves.")
+            if args.mode == "restart" and not cpu:
+                print("A real run serves on CPU when Ollama serves on CPU now.")
         if not args.dry_run:
             # Name the namespace in follow-up commands only when the project's settings select another one.
             followup_name = None if namespace_name == settings.namespace_name else namespace_name
             if args.mode in ("run", "restart"):
-                compute = " on CPU" if args.cpu else ""
+                compute = " on CPU" if cpu else ""
                 print(f"{serving.capitalize()} Ollama{compute} and Open WebUI are ready at {settings.webui_url()}", flush=True)
             elif args.mode in ("build", "upgrade"):
                 print("Local images are ready.", flush=True)
@@ -1633,7 +1708,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except subprocess.CalledProcessError as exc:
         return command_failure(exc)
     except (OSError, config.ConfigError, AlreadyRunningError, setup.SetupError, transfer.TransferError,
-            tarfile.TarError, EOFError, zlib.error) as exc:
+            DockerQueryError, tarfile.TarError, EOFError, zlib.error) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

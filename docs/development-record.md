@@ -7,6 +7,104 @@ Git milestones use commit timestamps. Working-tree milestones use the
 associated verification time where it was recorded.
 Earlier entries use the current names for commands, paths and artifacts.
 
+## 2026-11-28 15:30 CET — Audit of the fixes and core tasks
+
+The author asked for an independent audit after the implementation: to fill
+gaps in testing and verification and to propose resolutions for problems. The
+open problems with their proposals are in [Problems](instructions/problems.md);
+the implemented decisions and core tasks left
+[Development](instructions/development.md).
+
+- **Command wait limit.** Open WebUI's terminal proxy, which its file browser
+  uses for `git clone`, gives a request 300 seconds. A command wait of 300
+  could reach that limit for a request without a wait, so
+  `command_wait_seconds` and the published `wait` description stop at 240.
+- **System deployment.** The refusal of `setup --force` without part names
+  names `setup terminal-server-key --force` there, a part that the system
+  deployment accepts, instead of `setup config --force`.
+- **Guides.** The terminal guide said that the `run_command` description
+  names the apt update step, which the system prompt does now, and called
+  Open WebUI's Legacy mode removed instead of unsupported.
+- **Tool calls measured.** A script sent eight terminal requests and two plain
+  questions to Ollama with the published tool definitions, in the form that
+  Open WebUI gives them, with the old and the new guidance. Qwen2.5 7B
+  Instruct and Qwen3 4B called a tool for every terminal request in every
+  variant. Ministral 3B Reasoning answered 20 of 24 with a call without a
+  system prompt and 24 of 24 with the old or the new one, and Granite 4.0 H
+  350M 14 and 17 of 24. Qwen2.5-Coder 7B, the coding model of the 8 GB lists,
+  wrote every call as JSON text that Ollama does not run. The terminal and
+  model guides now say so.
+- **Tests.** A test ties the CPU marker that restart reads to
+  `compose.cpu.yml`; the live Open Terminal checks through Open WebUI now also
+  cover the system prompt, the `run_command` description and a command's
+  output in the same call.
+
+## 2026-11-28 14:55 CET — Fixes for the audit of commit efc1df5, one tool call per command and small models
+
+The author decided how to resolve the problems of the audit of commit efc1df5
+in [Problems](instructions/problems.md) in [Development](instructions/development.md),
+asked for them to be fixed with the audit's proposals where no decision was
+given, and for the three core tasks there. The numbers are those of the
+problem list.
+
+- **setup --force (1).** `--force` applies only to parts named on the command
+  line; `setup --force` without part names or with `all` is refused and names
+  `loaf setup config --force`. A replaced `config.ini` or `models.ini` stays
+  beside the new one as `NAME.old`, which replaces an earlier copy and is
+  never written through a link. `setup docs --force` still replaces the
+  guides as a whole, as decided.
+- **restart remembers --cpu (2).** Without `--cpu`, restart serves on CPU when
+  the running Ollama serves on CPU, which it reads from the container's
+  `NVIDIA_VISIBLE_DEVICES=void` that `compose.cpu.yml` sets; this also covers
+  containers of earlier releases. A dry run says so. `loaf run` without
+  `--cpu` returns to the GPU.
+- **Compose .env (3).** Compose commands pass `--env-file /dev/null`, so a
+  project's `.env` no longer overrides settings. `[launcher]
+  docker_env_enable = true`, `false` by default as decided, lets Compose read
+  it again, and `status` then lists it among the settings files.
+- **Docker errors (4).** `restart` without a profile, and `stop PROFILE` with
+  the terminal server, report Docker's own message when Docker cannot say
+  which services run, with a pointer to `docker version` and the Docker access
+  guide, and change nothing, instead of "No serving profile of loaf runs".
+- **Smaller items (5).** `restart` and `stop PROFILE` ask Docker what serves
+  while holding the project lock and plan there; one `docker compose ps`
+  answers for both profiles. Setup and restore create a missing project
+  directory only after every check, so a mistyped `--project-dir` changes
+  nothing. In the Verify workflow, the installation is its own step and the
+  Debian package and wheel checks run after a failed step, while the job still
+  fails. The comments in `cleanup.py` name 0.5.0.
+- **Architecture.** `architecture.md` now names the shell and `.env`
+  overrides, the parts that `--force` applies to, CPU inference on restart,
+  the questions to Docker under the lock, the Debian package upgrade, and the
+  terminal server's system prompt and command wait.
+- **Manual page.** Commands list their usage and the names of their options;
+  a new OPTIONS section describes each command option once, before GLOBAL
+  OPTIONS. `loaf COMMAND --help` and the manual page share the usage line.
+- **One tool call per command.** Open WebUI shows `run_command` and
+  `get_process_status` as separate entries, and Open Terminal returns a
+  command ID at once unless the call names a wait. `[terminal_server]
+  command_wait_seconds`, 120 by default and at most 300, is the wait that the
+  terminal server adds to command calls without one, as Open Terminal's own
+  `execute_timeout` does; applied by the terminal server, a change reaches
+  existing chat containers without replacing them. Merging two entries in
+  Open WebUI's chat would need a change of Open WebUI itself.
+- **Tool calls of small models.** Research and the Open WebUI v0.13.4 source
+  showed that Open WebUI fetches the terminal's system prompt with a 3-second
+  limit, which a starting chat container could miss, so the first message of a
+  chat lacked it, and that the published `run_command` description named the
+  image build host, user `unknown` and a background start. The terminal server
+  now answers `/system` itself with short instructions that name the requests
+  to act on and the tool for each, and replaces the `run_command` description
+  with one that says that it returns output and exit code. Tool names stay,
+  because Open WebUI renders the Open Terminal tools by name. A SKILL.md needs
+  a `view_skill` call before it helps, so it was not used. The strategy, with
+  the model settings an administrator can change, is in
+  [terminal-server.md](terminal-server.md#help-small-models-call-the-tools).
+- **Proposals left to the author.** Publishing fewer terminal tools to the
+  model, for example without the four search tools that `run_command` covers,
+  would follow the studies of tool selection but removes functionality for
+  larger models; it is not implemented.
+
 ## 2026-11-28 12:22 CET — Audit of commit efc1df5: test isolation and documentation layout
 
 An independent audit of commit efc1df5. The author asked for two test

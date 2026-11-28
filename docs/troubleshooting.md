@@ -157,7 +157,9 @@ ran without the terminal server needs it added in its admin settings.
 If the
 terminal works in the Files tab but the model answers with instructions,
 check the model's Terminal capability, function calling mode and selected
-terminal.
+terminal, then follow the steps for small models. If one command shows as two
+**Ran command** entries, the first still running, the command ran longer
+than `[terminal_server] command_wait_seconds`; raise it up to 240.
 
 If the Files tab shows dotfiles such as `.bashrc` but you are looking for a
 generated file, ask the model for its absolute path and open its directory
@@ -169,6 +171,7 @@ folder button next to the terminal selector below the chat input.
 [Enable and connect](terminal-server.md#enable-and-connect) ·
 [Terminal setup](terminal-server.md#enable-and-connect) ·
 [Model settings](terminal-server.md#use-the-terminal-from-a-model) ·
+[Help small models call the tools](terminal-server.md#help-small-models-call-the-tools) ·
 [Terminal workspace folders](terminal-server.md#use-the-terminal-from-a-model)
 
 ## Packages in the terminal
@@ -245,7 +248,9 @@ After interruption, completed downloads/exports remain and you can resume the
 same mode. See [failure behavior](launcher.md#failure-and-concurrency-behavior).
 
 If Debian reports a Docker socket permission error after a group membership
-change, check the session's [Docker access](debian.md#docker-access).
+change, check the session's [Docker access](debian.md#docker-access). The same
+applies when `restart` or `stop PROFILE` reports that Docker could not report
+which services run.
 
 ## Command or project not found
 

@@ -4,6 +4,123 @@
 
 Older entries use the current command and project names in examples.
 
+## 2026-11-28 15:28:56 +0100 — Audit of the fixes and core tasks
+
+- Environment: Debian 13 in WSL2, Docker Engine 26.1.5, Compose 2.26.1-4,
+  RTX 4070 Ti SUPER, Python 3.13.5, the checkout's `.venv`. Docker held the
+  author's two stopped chat containers, the default namespace's volumes and
+  networks and the four `loaf/*:latest` images; all stayed untouched. Every
+  resource that the audit created was removed again, including the image
+  `loaf/open-terminal:audit-1428` built from the working tree.
+- Open Terminal, 14:56 to 14:59: `tests.test_terminal_server` with
+  `RUN_TERMINAL_SERVER_TESTS=1` against the image built from the working
+  tree: **27 ran, all passed**, 172 s. Through a disposable Open WebUI
+  v0.13.4, the extended checks saw `features.system`, the terminal server's
+  system prompt, the new `run_command` description, and a command without a
+  wait that returned `done` with its output after two seconds.
+- Restart on real Docker in a scratch namespace, 15:00 to 15:02: after
+  `run offline --cpu`, `restart` without `--cpu` replaced the Ollama container
+  with one that had `NVIDIA_VISIBLE_DEVICES=void` and no device request, and
+  reported "Offline Ollama on CPU". After `run offline`, `restart` kept the
+  GPU device request.
+- Full suite with `loaf test -v --badges` and `RUN_DOCKER_TESTS=1
+  RUN_GPU_TESTS=1 RUN_TERMINAL_SERVER_TESTS=1 RUN_CATALOG_TESTS=1`, 15:02:34
+  to 15:06:45 (the 15:06:45 entry): **336 ran, 1 error**. The error is the
+  setup of the GPU model workflows: `.test-artifacts/` in the checkout belongs
+  to root since 13:02, before this session, so the tests could not create
+  their project there. Everything else passed, including the Debian package
+  build, its installation on Debian 12 and 13 and the manual page's `groff`
+  check. The GPU badge keeps its 11:22 run.
+- GPU model workflows from a copy of the working tree, where the test
+  directory was writable, 15:07:36 to 15:14:56: **6 ran, all passed**, 440 s.
+- Python 3.10 and 3.11 in `python:3.10-slim-bookworm` and
+  `python:3.11-slim-bookworm` with an editable installation: without Git, the
+  12 cleanup tests stopped at the missing `git`; with Git and rsync installed,
+  **342 passed** on both (73 and 65 skipped).
+- The Verify workflow's wheel steps passed with a wheel of the working tree.
+  A standalone executable built into a scratch directory refused `setup
+  --force`, wrote the new settings and passed
+  `release_handoff.py --chat-only` on CPU in 42.3 s, the check whose CPU
+  placement test changed in commit 09176ed.
+- Tool calls of small models, 15:16 to 15:27: Ollama 0.40.18 on the GPU
+  received the 14 tools that Open WebUI offers, made from Open Terminal's
+  schema, with eight terminal requests and two plain questions, three samples
+  each (two for the last two models). Calls per variant: old description with
+  Open Terminal's container prompt, old description without a system prompt,
+  new description with the terminal server's prompt.
+
+  | Model | Old, prompt | Old, none | New | Plain questions with a call |
+  | --- | ---: | ---: | ---: | --- |
+  | Granite 4.0 H 350M | 14/24 | 14/24 | 17/24 | none |
+  | Ministral 3B Reasoning 2512 | 24/24 | 20/24 | 24/24 | 1 of 6 with the new prompt |
+  | Qwen2.5-Coder 7B Instruct | 0/24 | 0/24 | 0/24 | none |
+  | Qwen2.5 7B Instruct | 16/16 | 16/16 | 16/16 | none |
+  | Qwen3 4B | 16/16 | 16/16 | 16/16 | none |
+
+  Qwen2.5-Coder 7B chose the right tool almost every time but wrote the call
+  as JSON text, which Ollama did not return as a tool call. This measures the
+  first call of a single message, not a whole chat in Open WebUI.
+- After the audit's changes: Docker-free suite **343 passed**, 49 skipped;
+  `ComposeContractTests` with `RUN_DOCKER_TESTS=1` **15 passed**.
+- Not run: the cold release handoff and its Debian package variant, the GPU
+  badge from the checkout, and a whole chat with a live model through Open
+  WebUI and the terminal server.
+
+## 2026-11-28 15:06:45 +0100 — Test badge run
+
+`loaf test --badges` failed on Linux with Python 3.13.5.
+Unittest reported 336 cases and 0 skips.
+Enabled test options were `RUN_DOCKER_TESTS=1`, `RUN_GPU_TESTS=1`, `RUN_CATALOG_TESTS=1`, `RUN_TERMINAL_SERVER_TESTS=1`.
+
+| Group | Passed / executed |
+| --- | ---: |
+| CLI baseline | 280/280 |
+| Docker | 36/36 |
+| Open Terminal | 19/19 |
+| Model catalog | 1/1 |
+
+## 2026-11-28 14:54:54 +0100 — Fixes for the audit of commit efc1df5 and the core tasks
+
+- Environment: Debian 13 in WSL2, Docker Engine 26.1.5, Compose 2.26.1-4,
+  Python 3.13.5, the checkout's `.venv`. Docker held the author's two stopped
+  chat containers of the default namespace and the four `loaf/*:latest`
+  images; neither was touched.
+- Implementation: the changes that the development record entry of 14:55
+  lists. Expected: the decided behavior for problems 1 to 5, the manual page
+  with one option section, one tool call per usual command and the terminal
+  server's own system prompt.
+- Docker-free suite: **342 tests, all passed**, 49 skipped. New or changed
+  tests cover `--force` without part names, with `all` and with named parts,
+  the `.old` copies and a link at their path, restart with CPU inference that
+  serves, with `--cpu` and on GPU, the questions to Docker under the project
+  lock for `restart`, `restart PROFILE` and `stop PROFILE`, the reply of an
+  unreachable daemon, the parsing of `docker compose ps` and `docker inspect`
+  output, `--env-file /dev/null` and the `.env` in `status`, the new settings
+  and their validation, the restore into a mistyped and into a new project
+  directory, the manual page sections, and the provisioner's `/system`, tool
+  descriptions and added wait through its HTTP proxy.
+- With `RUN_DOCKER_TESTS=1`: `ComposeContractTests` **15 passed**. Compose
+  2.26.1 resolved the `.env`'s `OLLAMA_CONTEXT_LENGTH` only with
+  `docker_env_enable`, and an exported `OLLAMA_IMAGE` won either way. A manual
+  check confirmed that `--env-file /dev/null` and `COMPOSE_DISABLE_ENV_FILE=1`
+  both disable `.env` on this Compose, and that the first also overrides
+  `COMPOSE_ENV_FILES`.
+- Observed manually in a scratch deployment: `setup --force` exited 2 with the
+  pointer to `setup config --force`, which kept the previous settings in
+  `config.ini.old`; `restart` with `DOCKER_HOST` at a missing socket exited 1
+  with Docker's message; `-v run offline --dry-run` showed `--env-file
+  /dev/null`; `restore --project-dir` with a missing directory exited 1
+  without creating it. The rendered manual page passed `groff -man -ww -z`
+  without warnings.
+- Upstream claims checked in the Open Terminal 0.17.20 image and the Open
+  WebUI v0.13.4 image: `OPEN_TERMINAL_EXECUTE_TIMEOUT` and its application to
+  `run_command` and `get_process_status`, the 3-second limit of Open WebUI's
+  `/system` request, its per-message `AGENTS.md` from the terminal home, its
+  rendering of the Open Terminal tools by name, and native tool calling as the
+  default. The research sources are linked in the terminal server guide.
+- Not run in this step: the GPU, CPU model, Open Terminal Docker and catalog
+  groups, release builds, `release_handoff.py`, and a chat with a live model.
+
 ## 2026-11-28 12:22:07 +0100 — Independent audit of commit efc1df5
 
 - Environment: Debian 13 in WSL2, Docker Engine 26.1.5, Compose 2.26.1-4,

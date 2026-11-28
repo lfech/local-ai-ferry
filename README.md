@@ -1,11 +1,11 @@
 # Local AI Ferry
 
-[![CLI baseline · 2026-11-28 11:33:05 — 276/276 passed](docs/badges/cli.svg)](docs/verification-record.md#2026-11-28-113305-0100--test-badge-run)&nbsp;&nbsp;&nbsp; This is software not production-ready - use for testing only.
+[![CLI baseline · 2026-11-28 15:06:45 — 280/280 passed](docs/badges/cli.svg)](docs/verification-record.md#2026-11-28-150645-0100--test-badge-run)&nbsp;&nbsp;&nbsp; This is software not production-ready - use for testing only.
 
-[![Docker · 2026-11-28 11:33:05 — 36/36 passed](docs/badges/docker.svg)](docs/verification-record.md#2026-11-28-113305-0100--test-badge-run)
-[![Open Terminal · 2026-11-28 11:33:05 — 15/15 passed](docs/badges/open-terminal.svg)](docs/verification-record.md#2026-11-28-113305-0100--test-badge-run)
+[![Docker · 2026-11-28 15:06:45 — 36/36 passed](docs/badges/docker.svg)](docs/verification-record.md#2026-11-28-150645-0100--test-badge-run)
+[![Open Terminal · 2026-11-28 15:06:45 — 19/19 passed](docs/badges/open-terminal.svg)](docs/verification-record.md#2026-11-28-150645-0100--test-badge-run)
 [![GPU inference · 2026-11-28 11:22:28 — 6/6 passed](docs/badges/gpu.svg)](docs/verification-record.md#2026-11-28-112228-0100--test-badge-run)
-[![Model catalog · 2026-11-28 11:22:28 — 1/1 passed](docs/badges/catalog.svg)](docs/verification-record.md#2026-11-28-112228-0100--test-badge-run)
+[![Model catalog · 2026-11-28 15:06:45 — 1/1 passed](docs/badges/catalog.svg)](docs/verification-record.md#2026-11-28-150645-0100--test-badge-run)
 
 Local AI Ferry prepares and runs local AI deployments and transfers them to
 offline or air-gapped machines (web-connected usage is also supported). 

@@ -72,9 +72,13 @@ part to them. Parts run in the order of the list below.
 | `create-file-repository` | Creates a local APT file repository for testing `apt` in chat containers. It downloads a fixed set of command-line tools with the dependencies that the terminal image lacks into `apt-test-repository/`, writes `config/apt-test-repository.list` and prints the settings that use them. It needs the built terminal image and network access. [Install packages in a chat](terminal-server.md#install-packages-in-a-chat) | No |
 
 A part keeps what already exists: settings files, guides, a key or a test
-repository. It says so and names `--force`, which replaces them. Guides of
-the same release need no replacement. The virtualenv and the installer caches
-are updated in place.
+repository. It says so and names `--force`, which replaces them for the
+parts named on the command line; `setup --force` without part names, or with
+`all`, is refused. A replaced `config.ini` or `models.ini` stays beside the
+new one as `config.ini.old` or `models.ini.old`, which replaces an earlier
+copy. Guides are replaced as a whole, files that you added to `docs/`
+included. Guides of the same release need no replacement. The virtualenv and
+the installer caches are updated in place.
 
 Every installation uses its own deployment files: the Compose file, the build
 contexts and the packaged defaults that `loaf version` locates. A project holds
@@ -89,7 +93,8 @@ that `setup config` creates make one.
   the command that creates it.
 - `--archive PATH` selects the backup folder or archive for setup outside the
   backup folder.
-- `-f`, `--force` replaces what a part would keep.
+- `-f`, `--force` replaces what the named parts would keep, for example
+  `loaf setup config --force`.
 - `--allow-root` lets source setup run as root in a checkout that another user
   owns. Without it, setup refuses, because root would own the virtualenv and
   caches. Run setup as the owner instead; the APT steps use `sudo`.
@@ -242,10 +247,18 @@ serves. Without a profile, restart restarts the profile that serves now and
 refuses when none or both have running containers; a dry run then cannot ask
 Docker and needs the profile.
 
+Restart serves on CPU when the running Ollama serves on CPU, as after
+`loaf run offline --cpu`, so it keeps a CPU-only host serving. Use
+`loaf run PROFILE` without `--cpu` to return to GPU inference. Restart asks
+Docker what serves while it holds the project lock, so another loaf command
+cannot change the answer before the steps run. When Docker cannot answer,
+restart reports Docker's error and changes nothing. A dry run cannot ask and
+says how a real run decides.
+
 Uses `--config-dir PATH`, `--namespace NAME`, `--dry-run`,
 `--wait-timeout SECONDS`, and `-a` or `--attach`.
 
-- `--cpu` starts the profile with CPU inference.
+- `--cpu` starts the profile with CPU inference, also when it serves on GPU now.
 
 [CPU serving](launcher.md#serve-on-cpu)
 
@@ -253,7 +266,8 @@ Uses `--config-dir PATH`, `--namespace NAME`, `--dry-run`,
 
 Check serving readiness and list the containers across the selected
 deployment's profiles. The report opens with the deployment name, project
-directory, WebUI URL and settings files, then checks:
+directory, WebUI URL and settings files, with the project's `.env` when
+`[launcher] docker_env_enable` lets Compose read it, then checks:
 
 - Docker and Compose: Compose 2.26.1 through 2.29.x warn and use the NVIDIA
   device reservation; older versions fail. Docker Engine 26 and 27 warn about
@@ -281,7 +295,9 @@ serves. Without a profile, `stop` stops every service, the downloader and the
 terminal server included. Named volumes, bind-mounted files, images and
 networks stay; container logs and files only in a container's writable layer
 go. Uses `--config-dir PATH`, `--namespace NAME`, `--dry-run`, and `-a` or
-`--attach`. A dry run cannot ask Docker and says how a real run decides.
+`--attach`. A real run asks Docker whether the other profile serves while it
+holds the project lock, like `restart`. A dry run cannot ask Docker and says
+how a real run decides.
 
 - `--no-remove-containers` keeps the stopped containers and their logs.
 
@@ -383,8 +399,10 @@ archive contains.
 - `source` replaces existing files with the archived ones and keeps the others.
 
 Run in a backup folder, restore makes it the project and moves the backup to
-`backup/`. A project without settings gets the default `config.ini` and model
-list, as from `setup config`. Restoring `source` over guides that standalone
+`backup/`. A missing project directory is created once the backup and the
+other checks have passed, so a mistyped `--project-dir` changes nothing. A
+project without settings gets the default `config.ini` and model list, as
+from `setup config`. Restoring `source` over guides that standalone
 setup exported replaces them with the checkout's `docs/` as a whole. Restore
 ends with the command to run next: `setup terminal-server-key`
 when the terminal server is enabled but its key is missing, else `run offline`,

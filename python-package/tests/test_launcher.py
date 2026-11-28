@@ -4,6 +4,7 @@
 
 from contextlib import redirect_stderr, redirect_stdout
 import io
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -547,45 +548,136 @@ class CliTests(unittest.TestCase):
         (self.project / 'docker/terminal-server').mkdir(parents=True)
         (self.project / 'docker/terminal-server/Dockerfile').touch()
         for other_serving, stopped in ((True, False), (False, True)):
+            state = cli.ServingState(('offline', 'online') if other_serving else ('offline',), False)
             with self.subTest(other_serving=other_serving), \
-                    patch('loaf.cli.serving_profile', return_value=other_serving) as query, \
+                    patch('loaf.cli.serving_state', return_value=state) as query, \
                     patch('loaf.cli.execute_plan') as execute, redirect_stdout(io.StringIO()) as output:
                 self.assertEqual(self.invoke('stop', 'offline'), 0)
-            self.assertEqual(query.call_args.args[1], 'online')
+            query.assert_called_once()
             self.assertEqual('terminal-server' in execute.call_args.args[1][1].arguments, stopped)
+            # The caller holds the project lock from the question to the last step.
+            self.assertIsNone(execute.call_args.kwargs['lock_path'])
             self.assertIn("The offline profile's services are stopped", output.getvalue())
         # A dry run cannot ask Docker and says what a real run decides.
-        with patch('loaf.cli.serving_profile') as query, redirect_stdout(io.StringIO()) as output:
+        with patch('loaf.cli.serving_state') as query, redirect_stdout(io.StringIO()) as output:
             self.assertEqual(self.invoke('stop', 'online', '--dry-run'), 0)
         query.assert_not_called()
         self.assertIn('keeps the terminal server running when the offline profile serves', output.getvalue())
+        # Without the terminal server, stopping one profile needs no question.
+        (self.project / 'config/config.ini').write_text('', encoding='utf-8')
+        with patch('loaf.cli.serving_state') as query, patch('loaf.cli.execute_plan') as execute, \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(self.invoke('stop', 'offline'), 0)
+        query.assert_not_called()
+        self.assertEqual(execute.call_args.kwargs['lock_path'], self.project / '.run.lock')
 
     def test_restart_without_a_profile_restarts_the_one_that_serves(self):
-        def serving(online):
-            return lambda compose, profile: (profile == 'online') == online
-
-        for online, profile in ((False, 'offline'), (True, 'online')):
-            with self.subTest(profile=profile), patch('loaf.cli.serving_profile', side_effect=serving(online)), \
+        for profile in ('offline', 'online'):
+            with self.subTest(profile=profile), \
+                    patch('loaf.cli.serving_state', return_value=cli.ServingState((profile,), False)), \
                     patch('loaf.cli.execute_plan') as execute, redirect_stdout(io.StringIO()) as output:
                 self.assertEqual(self.invoke('restart'), 0)
             self.assertEqual(execute.call_args.args[1][1].arguments[1:3], cli.SERVICES[profile])
             self.assertIn(f"{profile.capitalize()} Ollama and Open WebUI are ready", output.getvalue())
-        for running, message in ((False, 'No serving profile of loaf runs.'),
-                                 (True, 'Both serving profiles have running containers.')):
-            with self.subTest(running=running), patch('loaf.cli.serving_profile', return_value=running), \
-                    redirect_stderr(io.StringIO()) as errors, self.assertRaises(SystemExit):
+        for running, message in (((), 'No serving profile of loaf runs.'),
+                                 (('offline', 'online'), 'Both serving profiles have running containers.')):
+            with self.subTest(running=running), \
+                    patch('loaf.cli.serving_state', return_value=cli.ServingState(running, False)), \
+                    patch('loaf.cli.execute_plan') as execute, redirect_stderr(io.StringIO()) as errors, \
+                    self.assertRaises(SystemExit):
                 self.invoke('restart')
+            execute.assert_not_called()
             self.assertIn(message, errors.getvalue())
             self.assertIn('restart offline', errors.getvalue())
-        with patch('loaf.cli.serving_profile') as query, redirect_stderr(io.StringIO()) as errors, \
+        with patch('loaf.cli.serving_state') as query, redirect_stderr(io.StringIO()) as errors, \
                 self.assertRaises(SystemExit):
             self.invoke('restart', '--dry-run')
         query.assert_not_called()
         self.assertIn('A dry run cannot ask Docker which profile serves', errors.getvalue())
-        with redirect_stdout(io.StringIO()) as output:
+        with patch('loaf.cli.serving_state') as query, redirect_stdout(io.StringIO()) as output:
             self.assertEqual(self.invoke('restart', 'online', '--dry-run', '--cpu', '--wait-timeout', '30'), 0)
+        query.assert_not_called()
         self.assertIn('Stop online serving', output.getvalue())
         self.assertIn('Start Ollama on CPU and Open WebUI with internet access and wait up to 30s', output.getvalue())
+        self.assertNotIn('serves on CPU when Ollama serves on CPU now', output.getvalue())
+        with redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(self.invoke('restart', 'online', '--dry-run'), 0)
+        self.assertIn('A real run serves on CPU when Ollama serves on CPU now.', output.getvalue())
+
+    def test_restart_keeps_the_cpu_inference_that_serves(self):
+        cpu_file = cli.assets.DATA_DIR / 'compose.cpu.yml'
+        for profile, on_cpu, flags, expected in (
+            ('offline', True, (), True), ('offline', False, (), False), ('online', False, ('--cpu',), True),
+        ):
+            with self.subTest(on_cpu=on_cpu, flags=flags), \
+                    patch('loaf.cli.serving_state', return_value=cli.ServingState((profile,), on_cpu)), \
+                    patch('loaf.cli.execute_plan') as execute, redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(self.invoke('restart', *flags), 0)
+            compose, steps = execute.call_args.args
+            self.assertEqual(cpu_file in compose.files, expected)
+            self.assertEqual('on CPU' in steps[-1].description, expected)
+            self.assertEqual(f'{profile.capitalize()} Ollama on CPU and Open WebUI are ready' in output.getvalue(),
+                             expected)
+
+    def test_restart_and_stop_ask_docker_under_the_project_lock(self):
+        (self.project / 'config/config.ini').write_text('[terminal_server]\nenabled = true\n', encoding='utf-8')
+        key = self.project / 'config/terminal-server.key'
+        key.write_text('k' * 32, encoding='ascii')
+
+        def locked(compose):
+            # Another loaf command cannot take the lock while restart or stop asks Docker.
+            with self.assertRaises(cli.AlreadyRunningError), cli.project_lock(self.project / '.run.lock'):
+                pass
+            return cli.ServingState(('offline',), False)
+
+        for arguments in (('restart',), ('restart', 'offline'), ('stop', 'offline')):
+            with self.subTest(arguments=arguments), patch('loaf.cli.serving_state', side_effect=locked) as query, \
+                    patch('loaf.cli.Compose.execute') as execute, redirect_stdout(io.StringIO()):
+                self.assertEqual(self.invoke(*arguments), 0)
+            query.assert_called_once()
+            execute.assert_called()
+
+    def test_an_unreachable_docker_daemon_is_reported_as_such(self):
+        failure = subprocess.CompletedProcess([], 1, '', 'Cannot connect to the Docker daemon at '
+                                              'unix:///var/run/docker.sock. Is the docker daemon running?\n')
+        with patch('loaf.cli.subprocess.run', return_value=failure) as run, redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(self.invoke('restart'), 1)
+        self.assertEqual(run.call_count, 1)
+        message = errors.getvalue()
+        self.assertIn('Error: Docker could not report which services of loaf run: Cannot connect to the Docker '
+                      'daemon at unix:///var/run/docker.sock. Is the docker daemon running?', message)
+        self.assertIn("Check 'docker version'", message)
+        self.assertNotIn('No serving profile', message)
+        self.assertNotIn('Traceback', message)
+
+    def test_the_cpu_override_sets_the_environment_that_restart_reads(self):
+        # restart recognizes CPU inference by this variable, which compose.cpu.yml gives both Ollama services.
+        override = (cli.assets.DATA_DIR / 'compose.cpu.yml').read_text(encoding='utf-8')
+        name, value = cli.CPU_ENVIRONMENT.split('=')
+        self.assertIn(f'  {name}: {value}\n', override)
+        for service in ('ollama-offline', 'ollama-connected'):
+            self.assertIn(f'  {service}:\n', override)
+        self.assertEqual(override.count('environment: *cpu-environment'), 2)
+
+    def test_serving_state_reads_the_running_services_and_their_cpu_environment(self):
+        compose = cli.Compose(self.project, namespace='loaf-test')
+        listing = 'ollama-offline 1111\nopen-webui 2222\n'
+        for environment, cpu in (('["PATH=/bin","NVIDIA_VISIBLE_DEVICES=void"]', True), ('["PATH=/bin"]', False)):
+            replies = [subprocess.CompletedProcess([], 0, listing, ''),
+                       subprocess.CompletedProcess([], 0, environment + '\n', '')]
+            with self.subTest(cpu=cpu), patch('loaf.cli.subprocess.run', side_effect=replies) as run:
+                self.assertEqual(cli.serving_state(compose), cli.ServingState(('offline',), cpu))
+            ps, inspect = (call.args[0] for call in run.call_args_list)
+            self.assertEqual(ps[ps.index('--profile'):], ['--profile', 'offline', '--profile', 'online', 'ps',
+                                                         '--status', 'running', '--format', '{{.Service}} {{.ID}}'])
+            self.assertEqual(inspect, ['docker', 'inspect', '--format', '{{json .Config.Env}}', '1111'])
+        # Without running services, Docker is asked once.
+        with patch('loaf.cli.subprocess.run', return_value=subprocess.CompletedProcess([], 0, '', '')) as run:
+            self.assertEqual(cli.serving_state(compose), cli.ServingState((), False))
+        run.assert_called_once()
+        with patch('loaf.cli.subprocess.run', side_effect=FileNotFoundError('docker')), \
+                self.assertRaisesRegex(cli.DockerQueryError, "run: docker. Check 'docker version'"):
+            cli.serving_state(compose)
 
     def test_download_names_the_namespace_only_when_the_settings_select_another(self):
         (self.project / 'config').mkdir(exist_ok=True)
@@ -670,6 +762,23 @@ class CliTests(unittest.TestCase):
                     self.assertEqual(cli.main(['--project-dir', str(ROOT), '--config-dir', folder, 'run', mode, '--dry-run']), 0)
                 self.assertEqual('Note: [terminal_server] network = connected' in output.getvalue(), noted)
                 self.assertNotIn('Warning', output.getvalue())
+
+    def test_compose_reads_the_project_env_file_only_when_enabled(self):
+        (self.project / '.env').write_text('OLLAMA_IMAGE=other\n', encoding='utf-8')
+        settings = self.project / 'config/config.ini'
+        for content, ignored in (('', True), ('[launcher]\ndocker_env_enable = true\n', False)):
+            settings.write_text(content, encoding='utf-8')
+            with self.subTest(ignored=ignored), redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(self.invoke('-v', 'run', 'offline', '--dry-run'), 0)
+                command = cli.Compose(self.project, settings=cli.config.load(self.project / 'config')).command(cli.VALIDATE)
+                self.assertEqual(f'--env-file {os.devnull}' in output.getvalue(), ignored)
+                self.assertEqual(command[6:8] == ['--env-file', os.devnull], ignored)
+                # status lists the .env among the settings files only when Compose reads it.
+                output.truncate(0)
+                with patch.object(cli.readiness, 'check', return_value=True), patch.object(cli.Compose, 'execute'):
+                    self.assertEqual(self.invoke('status'), 0)
+                settings_line, = [line for line in output.getvalue().splitlines() if line.startswith('Settings    ')]
+                self.assertEqual(str(self.project / '.env') in settings_line, not ignored)
 
     def test_offline_does_not_require_model_list(self):
         # A transferred cache/config volume is sufficient to boot an offline host.

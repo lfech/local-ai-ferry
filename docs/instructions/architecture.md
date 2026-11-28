@@ -20,12 +20,20 @@ for settings and `/var/lib/loaf` for data, backups and the lock. The Debian
 package selects it by default, and `--system` selects it from any channel.
 Settings layer as packaged defaults, then `/etc/loaf`, then a project's
 `config/config.ini`, and later layers override earlier ones. Only a project
-can move or skip the system layer. Every channel carries the guides of its
-release for `loaf docs`.
+can move or skip the system layer. Exported `OLLAMA_IMAGE`,
+`OPEN_WEBUI_IMAGE`, `OLLAMA_CONTEXT_LENGTH`, `OLLAMA_STARTUP_TIMEOUT` and
+`CUDA_VISIBLE_DEVICES` override the settings for Compose. Compose ignores a
+project's `.env` unless `[launcher] docker_env_enable = true`, which lets its
+variables override the settings too and makes `status` list the file. Every
+channel carries the guides of its release for `loaf docs`. The Debian
+package upgrades with apt like any package: dpkg asks before it replaces a
+changed `/etc/loaf/config.ini`, and the package keeps the terminal key.
 
 [Installation](../installation.md) · [Release executable](../installation.md#standalone-executable) ·
 [Settings layers](../configuration.md#project-configuration) ·
-[Debian package](../installation.md#debian-package)
+[Overrides](../configuration.md#overrides) ·
+[Debian package](../installation.md#debian-package) ·
+[Upgrade the Debian package](../upgrade.md#upgrade-the-debian-package)
 
 ## CLI and Compose profiles
 
@@ -38,12 +46,17 @@ stays inside its context, which Compose always allows Buildx to read.
 `loaf setup` runs selectable parts like the types of `loaf backup`; `all`,
 the default, holds the parts that the installation needs, and the others run
 when named. A part keeps what exists unless `--force` replaces it, the flag
-that also confirms removals in `clean --full` and `docker rm`.
+that also confirms removals in `clean --full` and `docker rm`. `--force`
+applies only to the parts named on the command line, so setup refuses it
+without part names or with `all`. A replaced settings file stays beside the
+new one as `NAME.old`; replaced guides go as a whole.
 
 The [command reference](../cli-help.md) explains every command and option.
 `loaf run offline` and `loaf run online` start a serving profile, `loaf stop`
 stops one profile or, without one, every service, and `loaf restart` stops a
-profile and starts it again with new containers.
+profile and starts it again with new containers. Restart keeps CPU inference
+when the running Ollama serves on CPU, which a CPU-only host needs; `--cpu`
+selects it in any case, and `loaf run` without `--cpu` returns to the GPU.
 
 Both `loaf` and `python -m loaf` use the current directory by default.
 `--project-dir` selects another deployment. Every installation runs Compose
@@ -60,8 +73,11 @@ replace `[models.default]`. An optional `name` creates an Ollama alias, and down
 source name unless another entry selects the source without a name.
 
 The launcher holds a per-directory OS lock across Compose transitions and
-transfers. The serving and build plans validate Compose configuration before
-changing services or building images. Status inspects local resources and
+transfers. `restart`, and `stop PROFILE` with the terminal server, ask Docker
+what serves while they hold it, so no other launcher run changes the answer
+before their steps; when Docker cannot answer, they report its error. The
+serving and build plans validate Compose configuration before changing
+services or building images. Status inspects local resources and
 uses disposable, network-disabled probe containers. Archive verification
 runs without Docker. Execution stops at the first failure and preserves
 completed downloads and exports.
@@ -174,7 +190,11 @@ Compose mounts the Docker socket in the provisioner so it can create a
 container and internal bridge for each chat. Draft requests use one container
 per account. The account's own requests and the model's tool calls reach the
 same container, and the provisioner publishes Open Terminal's tools at their
-own paths. Containers start from the provisioner's image. Commands run as root
+own paths. It answers Open WebUI's request for the terminal's system prompt
+itself, without a container, with short instructions to act with the tools,
+and describes `run_command` for this container. It adds a wait of
+`[terminal_server] command_wait_seconds` to command calls that name none, so
+that a command's output comes in the same tool call. Containers start from the provisioner's image. Commands run as root
 with only the capabilities that `apt`, `dpkg` and `sudo` need and with
 `no-new-privileges`, so `apt` works as usual. Each container has a writable
 root filesystem, a bounded temporary filesystem at `/tmp`, CPU and memory

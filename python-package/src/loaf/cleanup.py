@@ -28,7 +28,7 @@ def local_directory(path: Path) -> bool:
     return path.is_dir() and path.resolve() == path
 
 
-# The docker-project link of releases before 0.6.0 to a loaf's deployment files; clean --full removes it.
+# The docker-project link of releases before 0.5.0 to a loaf's deployment files; clean --full removes it.
 LEGACY_LINK = "docker-project"
 
 
@@ -47,7 +47,7 @@ def project_targets(project: Path, runtime: Path, full: bool) -> set[Path]:
     link = managed_link(project, runtime)
     package = project / setup.PYTHON_PACKAGE_DIR
     source = local_directory(package) and (package / "src/loaf/__init__.py").is_file()
-    # Standalone setup leaves settings; a project from before 0.6.0 may only have the docker-project link.
+    # Standalone setup leaves settings; a project from before 0.5.0 may only have the docker-project link.
     settings = (project / "config" / config.CONFIG_NAME).is_file()
     if not (source or link or settings or transfer.is_bundle(project)):
         return set()

@@ -32,7 +32,9 @@ The examples ship with loaf. Outside a checkout, select one with
 Edit `config/models.ini` to change the default selection. Switching
 selection files changes future downloads. The models already in
 the shared Ollama volume remain available. Select the configured Ollama aliases
-in WebUI. The Coder entries use exact merged GGUF filename tags.
+in WebUI. The Coder entries use exact merged GGUF filename tags. In a check
+with the terminal server's tools, the 7B Coder wrote tool calls as JSON text,
+which Ollama does not run, so use the chat model with the terminal server.
 
 [Published GGUF](https://huggingface.co/ibm-granite/granite-4.0-h-350m-GGUF) ·
 [Qwen3 0.6B GGUF](https://huggingface.co/unsloth/Qwen3-0.6B-GGUF) ·

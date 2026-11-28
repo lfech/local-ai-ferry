@@ -1,10 +1,12 @@
 """Deployment files, settings layers, system mode and bundled guides."""
 
+import argparse
 from contextlib import redirect_stderr, redirect_stdout
 import grp
 import io
 import os
 from pathlib import Path, PurePosixPath
+import re
 import stat
 import tempfile
 import unittest
@@ -173,6 +175,10 @@ class SystemModeTests(unittest.TestCase):
         ):
             with self.subTest(arguments=arguments), self.assertRaises(SystemExit):
                 self.run_cli(*arguments)
+        # The example names a part that the system deployment accepts.
+        with redirect_stderr(io.StringIO()) as errors, self.assertRaises(SystemExit):
+            cli.main(["--system", "setup", "--force"])
+        self.assertIn("for example: loaf setup terminal-server-key --force", errors.getvalue())
         self.state.rmdir()
         status, _, _, errors = self.run_cli("--system", "status")
         self.assertEqual(status, 1)
@@ -278,14 +284,27 @@ class GuideTests(unittest.TestCase):
             self.assertTrue((project / "docs/notes.md").is_file())
             self.assertEqual(sorted(path.name for path in project.iterdir()), ["docs"])
 
-    def test_manual_page_lists_every_command_and_global_option(self):
+    def test_manual_page_lists_every_command_and_describes_each_option_once(self):
         page = docs.manual_page()
         self.assertTrue(page.startswith(".TH LOAF 1 "))
         for name in cli.COMMAND_HELP:
-            self.assertIn(f"\\fB{docs.roff(name)}\\fR", page)
-        for section in ("NAME", "SYNOPSIS", "COMMANDS", "GLOBAL OPTIONS", "FILES"):
-            self.assertIn(f".SH {section}\n", page)
-        self.assertIn("\\-\\-system", page)
+            self.assertIn(f"\\fB{docs.roff(name)}\\fR {docs.roff(cli.command_arguments(name))}", page)
+        sections = ("NAME", "SYNOPSIS", "DESCRIPTION", "COMMANDS", "OPTIONS", "GLOBAL OPTIONS", "FILES", "SEE ALSO")
+        self.assertEqual(re.findall(r"^\.SH (.+)$", page, re.MULTILINE), list(sections))
+        commands = page[page.index(".SH COMMANDS"):page.index(".SH OPTIONS")]
+        # Commands name their options; the option sections describe each one once.
+        self.assertIn("Options: \\fB\\-\\-config\\-dir\\fR, \\fB\\-\\-namespace\\fR", commands)
+        self.assertNotIn("Use PATH for settings", commands)
+        parser = argparse.ArgumentParser(add_help=False)
+        cli.add_options(parser)
+        for action in parser._actions:
+            if action.help != argparse.SUPPRESS:
+                with self.subTest(option=action.option_strings[-1]):
+                    self.assertEqual(page.count(f".TP\n\\fB{docs.roff(', '.join(action.option_strings))}\\fR"), 1)
+                    self.assertEqual(page.count(docs.roff(action.help)), 1)
+        globals_section = page[page.index(".SH GLOBAL OPTIONS"):page.index(".SH FILES")]
+        self.assertIn("\\-\\-system", globals_section)
+        self.assertNotIn("\\-\\-config\\-dir", globals_section)
 
 
 class CheckoutLauncherTests(unittest.TestCase):

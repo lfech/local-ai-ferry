@@ -336,11 +336,57 @@ class SetupTests(unittest.TestCase):
                               "defaults.", log.getvalue())
                 self.assertEqual(cli.main([*command, "config", "--force"]), 0)
             self.assertIn("# ollama_image = ", configuration.read_text(encoding="utf-8"))
+            # The replaced settings stay beside the new ones.
+            self.assertEqual((project / "config/config.ini.old").read_text(encoding="utf-8"), "# local changes\n")
+            self.assertIn(f"Replaced {configuration}. The previous file is {configuration}.old.", log.getvalue())
             self.assertFalse((project / ".venv").exists())
             self.assertFalse((project / ".git").exists())
             self.assertFalse((project / setup.PYTHON_PACKAGE_DIR).exists())
             install.assert_not_called()
             toolkit.assert_not_called()
+
+    def test_force_replaces_only_named_parts_and_keeps_replaced_settings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            config_dir = project / "config"
+            config_dir.mkdir()
+            (config_dir / "config.ini").write_text("[launcher]\nnamespace = prod\n", encoding="utf-8")
+            (config_dir / "models.ini").write_text("# my models\n", encoding="utf-8")
+            (project / "docs").mkdir()
+            (project / "docs/notes.txt").write_text("mine\n", encoding="utf-8")
+            command = ["--project-dir", directory, "setup"]
+            with patch.object(setup, "bundled_release", return_value=project / "runtime"):
+                # Without named parts, --force would replace the settings and guides of a whole deployment.
+                for parts in ((), ("all",), ("all", "terminal-server-key")):
+                    with self.subTest(parts=parts), redirect_stderr(StringIO()) as errors, \
+                            self.assertRaises(SystemExit) as raised:
+                        cli.main([*command, *parts, "--force"])
+                    self.assertEqual(raised.exception.code, 2)
+                    self.assertIn("--force replaces only what the parts named on the command line would keep",
+                                  errors.getvalue())
+                    self.assertIn("loaf setup config --force", errors.getvalue())
+                self.assertEqual((config_dir / "config.ini").read_text(encoding="utf-8"),
+                                 "[launcher]\nnamespace = prod\n")
+                self.assertTrue((project / "docs/notes.txt").is_file())
+                with redirect_stdout(StringIO()) as log:
+                    self.assertEqual(cli.main([*command, "config", "--force", "--dry-run"]), 0)
+                    self.assertIn("a replaced file stays as NAME.old", log.getvalue())
+                    self.assertFalse((config_dir / "config.ini.old").exists())
+                    (config_dir / "config.ini.old").write_text("older\n", encoding="utf-8")
+                    self.assertEqual(cli.main([*command, "config", "--force"]), 0)
+            self.assertEqual((config_dir / "config.ini.old").read_text(encoding="utf-8"), "[launcher]\nnamespace = prod\n")
+            self.assertEqual((config_dir / "models.ini.old").read_text(encoding="utf-8"), "# my models\n")
+            self.assertEqual(cli.config.load(config_dir), cli.config.Settings())
+            # The guides were not named, so they stay.
+            self.assertTrue((project / "docs/notes.txt").is_file())
+            # A link at the copy's path is never written through.
+            outside = project / "outside.ini"
+            (config_dir / "config.ini.old").unlink()
+            (config_dir / "config.ini.old").symlink_to(outside)
+            with self.assertRaisesRegex(setup.SetupError, "config.ini.old must be a file"):
+                setup.create_file(config_dir / "config.ini", "new\n", force=True)
+            self.assertFalse(outside.exists())
+            self.assertIn("# ollama_image = ", (config_dir / "config.ini").read_text(encoding="utf-8"))
 
     def test_setup_writes_the_default_configuration_into_the_selected_directory(self):
         with tempfile.TemporaryDirectory() as directory:

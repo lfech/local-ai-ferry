@@ -21,6 +21,8 @@ DEFAULT_COMPRESSION_LEVEL = 4
 ARCHIVE_VERSION = 3
 OPEN_TERMINAL_IMAGE = "ghcr.io/open-webui/open-terminal:0.17.20-slim"
 TERMINAL_SECRET = Path("config/terminal-server.key")
+# Open WebUI's terminal proxy gives a request 300 seconds; the command wait leaves time for the rest.
+COMMAND_WAIT_MAX = 240
 TERMINAL_KEY_PATTERN = re.compile(rb"[!-~]{32,512}(?:\r?\n)?")
 TEST_FLAGS = (
     "run_docker_tests", "run_gpu_tests", "run_cpu_tests", "run_catalog_tests", "run_terminal_server_tests",
@@ -37,6 +39,8 @@ class Settings:
     namespace_name: str = ""
     models_file: Path | None = None
     wait_timeout: int = DEFAULT_WAIT_TIMEOUT
+    # Whether Compose reads a .env file in the project directory, whose variables override settings.
+    docker_env_enable: bool = False
     ollama_image: str = "loaf-ollama-cuda13"
     webui_image: str = "ghcr.io/open-webui/open-webui:v0.13.4-slim"
     terminal_server_image: str = OPEN_TERMINAL_IMAGE
@@ -67,6 +71,8 @@ class Settings:
     terminal_server_max_workspaces: int = 4
     terminal_server_idle_seconds: int = 900
     terminal_server_command_seconds: int = 900
+    # Seconds a model's command may run before run_command returns without its result; 0 returns at once.
+    terminal_server_command_wait_seconds: int = 120
     terminal_server_volume_driver: str = "local"
     terminal_server_volume_options: str = "{}"
     run_docker_tests: bool = False
@@ -94,6 +100,7 @@ class Settings:
             "LOAF_TERMINAL_MAX_WORKSPACES": str(self.terminal_server_max_workspaces),
             "LOAF_TERMINAL_IDLE_SECONDS": str(self.terminal_server_idle_seconds),
             "LOAF_TERMINAL_COMMAND_SECONDS": str(self.terminal_server_command_seconds),
+            "LOAF_TERMINAL_COMMAND_WAIT_SECONDS": str(self.terminal_server_command_wait_seconds),
             "LOAF_TERMINAL_VOLUME_DRIVER": self.terminal_server_volume_driver,
             "LOAF_TERMINAL_VOLUME_OPTIONS": self.terminal_server_volume_options,
             "LOAF_TERMINAL_NETWORK": self.terminal_server_network,
@@ -144,6 +151,13 @@ def wait_timeout_value(value: str) -> int:
     number = int(value)
     if number < 0:
         raise ValueError("expected 0 to wait without a limit or a positive number of seconds")
+    return number
+
+
+def command_wait_value(value: str) -> int:
+    number = int(value)
+    if not 0 <= number <= COMMAND_WAIT_MAX:
+        raise ValueError(f"expected 0 to return at once or at most {COMMAND_WAIT_MAX} seconds")
     return number
 
 
@@ -237,7 +251,7 @@ def apt_source_file_value(value: str) -> Path | None:
 SECTIONS = {
     "launcher": {
         "namespace": namespace_value, "models_file": optional_path_value, "wait_timeout": wait_timeout_value,
-        "system_config": system_config_value,
+        "system_config": system_config_value, "docker_env_enable": boolean_value,
     },
     "images": {
         "ollama_image": image_value, "webui_image": image_value, "terminal_server_image": image_value,
@@ -265,6 +279,7 @@ SECTIONS = {
         "max_workspaces": positive_int,
         "idle_seconds": positive_int,
         "command_seconds": positive_int,
+        "command_wait_seconds": command_wait_value,
         "volume_driver": image_value,
         "volume_options": volume_options_value,
     },

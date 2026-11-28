@@ -1,5 +1,6 @@
 """Check Compose contracts, images, and disposable Docker workflows."""
 
+import dataclasses
 import json
 import os
 from pathlib import Path
@@ -246,6 +247,11 @@ class ComposeContractTests(unittest.TestCase):
                 env.update(compose.variables())
             step = cli.Step(cli.PROFILES, ("config", "--format", "json"))
             resolved = json.loads(compose_command(compose, step, env=env))
+            # The project's .env applies only with docker_env_enable; exported variables win either way.
+            enabled = cli.Compose(project, settings=dataclasses.replace(compose.settings, docker_env_enable=True))
+            dotenv = json.loads(compose_command(enabled, step, env=env))["services"]
+        self.assertEqual(dotenv["ollama-offline"]["environment"]["OLLAMA_CONTEXT_LENGTH"], "12288")
+        self.assertEqual(dotenv["ollama-offline"]["build"]["args"]["OLLAMA_IMAGE"], env["OLLAMA_IMAGE"])
         services = resolved["services"]
         self.assertEqual(Path(services["ollama-online"]["build"]["context"]), DOCKER_DIR / "ollama")
         for name in ("ollama-online", "ollama-offline"):
@@ -254,7 +260,7 @@ class ComposeContractTests(unittest.TestCase):
             self.assertEqual(args["OLLAMA_SOURCE"], env["OLLAMA_SOURCE"])
         self.assertEqual(services["open-webui"]["build"]["args"]["OPEN_WEBUI_IMAGE"], "registry.example/webui:pinned")
         offline = services["ollama-offline"]["environment"]
-        self.assertEqual(offline["OLLAMA_CONTEXT_LENGTH"], "12288")
+        self.assertEqual(offline["OLLAMA_CONTEXT_LENGTH"], "8192")
         self.assertEqual(offline["OLLAMA_STARTUP_TIMEOUT"], "75")
         self.assertEqual(offline["CUDA_VISIBLE_DEVICES"], "0")
         for name in ("open-webui", "open-webui-online"):

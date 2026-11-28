@@ -98,20 +98,34 @@ connection there: a direct connection to `http://terminal-server:8000` with
 
 ## Use the terminal from a model
 
-In **Workspace → Models**, enable **Terminal** for the model and set
-**Function Calling** to **Default** or **Native**. Select **Open Terminal**
-in the chat, or choose it as the model's **Default terminal**.
+In **Workspace → Models**, enable **Terminal** for the model and keep
+**Function Calling** at its default, native tool calling; Open WebUI v0.13.4
+treats the **Legacy** mode as unsupported. Select **Open Terminal** in the chat,
+or choose it as the model's **Default terminal**.
 
-Open WebUI describes the terminal's tools to the model. The bundled terminal
-server adds these instructions to the description of `run_command`:
+Open WebUI adds the terminal server's instructions to the system prompt of
+every chat that uses the terminal. The bundled terminal server answers this
+request itself, without a chat container, so the instructions also arrive
+with a chat's first message, while its container still starts:
 
 ```text
-Terminal: call run_command to run shell commands yourself; never tell the user to run them. You are root in this chat's own Debian container. Install packages with apt update, then apt install PACKAGE. /home/chat is deleted with the chat; keep lasting files in /home/user. Answer from the command output.
+You have a Linux terminal: this chat's own Debian container, where you are root. When the user asks you to run, check, install, build, create, read or change something on the computer, do it yourself with the terminal tools instead of describing it or asking the user to do it: run_command runs shell commands, read_file, write_file and list_files work with files, and display_file shows a file to the user. Answer from the tool results. Install packages with apt update, then apt install PACKAGE. /home/chat is deleted with the chat; keep lasting files in /home/user.
 ```
 
 With `network = isolated` and no `apt_repository_dir`, no package source is
 reachable. The apt sentence then reads `No package source is reachable; use
-the installed tools.`
+the installed programs.`
+
+`run_command` waits up to `command_wait_seconds`, 120 by default, for the
+command to finish and returns its output and exit code, so the chat shows a
+command and its result in one **Ran command** entry. A longer command returns
+its output so far with status `running`; the model then reads the rest with
+`get_process_status`, which waits as long again and appears as another entry.
+The terminal server adds this wait to calls that name none, as Open
+Terminal's own `execute_timeout` setting does, and its description of
+`run_command` names it. A change applies to existing chat containers with
+`loaf restart`. `command_wait_seconds = 0` returns at once with the command's
+ID, Open Terminal's default.
 
 If a follow-up after a terminal tool result fails with a role-order error,
 enable the optional filter for that model.
@@ -150,15 +164,67 @@ and executable in a new workspace folder. Expand the tool result in chat to
 confirm execution and check for `Hello, World!`.
 
 ```text
-Use Open Terminal's run_command once to execute this exact shell command. Wait for the result, then report its stdout.
+Use Open Terminal's run_command once to execute this exact shell command, then report its stdout.
 
 dir=$(mktemp -d "$HOME/hello-check.XXXXXX") && cd "$dir" && printf '%s\n' '#include <stdio.h>' 'int main(void) { puts("Hello, World!"); return 0; }' > world.c && gcc -Wall -Wextra world.c -o world && ./world
 ```
 
+[Help small models call the tools](#help-small-models-call-the-tools) ·
 [Open WebUI model settings](https://docs.openwebui.com/features/workspace/models/) ·
+[Open Terminal execute timeout](https://docs.openwebui.com/features/open-terminal/advanced/configuration) ·
 [Conversation roles must alternate](troubleshooting.md#conversation-roles-must-alternate) ·
 [Open WebUI working directory picker](https://docs.openwebui.com/features/open-terminal/file-browser/#working-directory) ·
 [Open WebUI file browser root](https://docs.openwebui.com/features/open-terminal/terminals/orchestration/file-browser-home-boundary/)
+
+### Help small models call the tools
+
+Small models such as Ministral 3B or Qwen2.5 7B often describe a command
+instead of calling a tool, or stop after a call that returned no output. The
+bundled terminal server addresses both, and the model settings in Open WebUI
+do the rest:
+
+1. **Instructions with every message.** The system prompt above names the
+   requests on which the model acts and the tool for each. Open WebUI waits at
+   most three seconds for it; since the terminal server answers without a
+   container, a starting container no longer drops it from a chat's first
+   message.
+2. **One call per command.** With `command_wait_seconds`, `run_command`
+   returns the output instead of a command ID, so no second call is needed
+   for a usual command.
+3. **Upstream tool names.** Open WebUI shows `run_command`, `read_file` and
+   the other Open Terminal tools in their own chat form by these names, and
+   its own instructions name `run_command`. Renamed tools would lose both, so
+   the descriptions carry the guidance instead.
+4. **Fewer tool definitions.** Every enabled tool adds a definition to each
+   request, and studies of tool selection report that small models choose
+   better among fewer tools. In the model's settings, turn off the built-in
+   tool categories that the model does not need, such as memory, notes or web
+   search, or enable Open WebUI's experimental **Tool Search** for native mode.
+5. **A model trained for tool calls.** Prefer instruction-tuned models with
+   tool support, such as Qwen2.5 Instruct, Qwen3, Ministral or Granite 4.0.
+   In a check, Qwen2.5-Coder 7B wrote its calls as JSON text, which Ollama
+   does not turn into tool calls, so use the chat models of the example lists
+   with the terminal. Open WebUI's documentation expects models under about 30B
+   parameters to fail multi-step tool chains more often, so give small models
+   one task per message. Keep `context_length` large enough for the tool
+   definitions and the command output; the default is 16384 tokens.
+6. **Your own instructions.** Open WebUI adds the account's
+   `/home/user/AGENTS.md` to every message, so lasting instructions for your
+   work belong there. A skill in `/home/user/.agents/skills` needs a
+   `view_skill` call before it helps, which small models rarely make, so the
+   basic instructions are in the system prompt instead.
+
+A check with these tool definitions and eight terminal requests, without
+Open WebUI in between, measured the first call: Qwen2.5 7B Instruct and Qwen3
+4B called a tool for every request with or without the system prompt.
+Ministral 3B Reasoning called one for 20 of 24 requests without it and for
+all 24 with it, and Granite 4.0 H 350M for 14 and 17 of 24. The
+[verification record](verification-record.md) has the details.
+
+[Open WebUI tool calling](https://docs.openwebui.com/features/extensibility/plugin/tools/) ·
+[Open Terminal model requirements](https://docs.openwebui.com/features/open-terminal/) ·
+[Fewer tools for small models](https://arxiv.org/abs/2411.15399) ·
+[Function calling with small language models](https://techcommunity.microsoft.com/blog/educatordeveloperblog/function-calling-with-small-language-models/4472720)
 
 ## Install packages in a chat
 
@@ -175,8 +241,8 @@ Model commands run without a terminal. The terminal image therefore sets
 `APT::Get::Assume-Yes` and `Dpkg::Use-Pty "0"`: `apt install` proceeds
 without `-y` and writes plain dpkg output without progress bars. This
 applies to the interactive terminal as well. The terminal image needs a
-rebuild with `loaf build` for these settings. The model's `run_command`
-description names the update step.
+rebuild with `loaf build` for these settings. The terminal server's system
+prompt names the update step.
 
 The packages stay in the chat's container while the chat exists, also while
 the container is stopped. Other chats and new chats start from the shared
@@ -239,6 +305,7 @@ All settings below belong to `[terminal_server]` in `config/config.ini`.
 | `max_workspaces` | `4` | Limit on running containers, one per chat or account draft. |
 | `idle_seconds` | `900` | Minimum time before stopping an idle container. When the limit is full, another chat can take an eligible slot immediately. |
 | `command_seconds` | `900` | Runtime limit for commands started through the tool API. Interactive shells use their terminal sessions. |
+| `command_wait_seconds` | `120` | Time from 0 to 240 seconds that `run_command` and `get_process_status` wait for a command when the model names no wait, so that its output comes in the same tool call. `0` returns at once. [Use the terminal from a model](#use-the-terminal-from-a-model) |
 | `volume_driver` and `volume_options` | `local` and `{}` | Docker volume driver and JSON object of string options for the user volume. Configure a quota-capable volume driver to enforce a hard disk limit. |
 
 The image includes Bash, Python, pytest, C/C++ tools, CMake, Ninja, Sphinx and
@@ -252,7 +319,7 @@ and gives up its bridge. Its next request starts it again with its files and
 packages. Volume and container storage follow the backing filesystem unless
 the operator configures quotas.
 
-Verification and schema discovery create no containers. For workspace
+Verification, schema discovery and the system prompt create no containers. For workspace
 requests, Open WebUI supplies its authenticated user ID and chat context. The
 provisioner authenticates HTTP requests and terminal WebSockets and routes
 both to the container of the account and chat. Idle cleanup preserves active

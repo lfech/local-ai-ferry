@@ -147,10 +147,19 @@ async def check_access(webui, accounts):
     assert await webui.request("GET", TERMINALS, denied) == []
     await webui.request("POST", WORKSPACE + "/execute", denied, status=404, json={"command": "true"})
     metadata = await webui.request("GET", WORKSPACE + "/api/config", alice)
-    assert metadata["features"]["terminal"], metadata
+    assert metadata["features"]["terminal"] and metadata["features"]["system"], metadata
     schema = await webui.request("GET", WORKSPACE + "/openapi.json", alice)
     assert "/execute" in schema["paths"] and not any(path.startswith("/agent/") for path in schema["paths"]), \
         sorted(schema["paths"])
+    description = schema["paths"]["/execute"]["post"]["description"]
+    assert "return its output and exit code" in description and "background" not in description, description
+    # The terminal server answers the system prompt, which Open WebUI adds to every chat with the terminal.
+    prompt = await webui.request("GET", WORKSPACE + "/system", alice)
+    assert "run_command runs shell commands" in prompt["prompt"], prompt
+    # A command without a wait returns its output in the same call, as a model's tool call does.
+    result = await webui.request("POST", WORKSPACE + "/execute", alice, json={"command": "sleep 2; echo inline"})
+    assert result["status"] == "done" and result["exit_code"] == 0, result
+    assert "inline" in "".join(entry.get("data", "") for entry in result.get("output", [])), result
 
 
 async def check_draft_directories(webui, account):

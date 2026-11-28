@@ -127,6 +127,8 @@ SYSTEM_CONFIG_HEADER = (
     "# config/config.ini overrides them. Uncomment a key to change it for the system deployment.\n"
 )
 SYSTEM_GROUP = "docker"
+# setup config --force keeps a replaced settings file under its name with this suffix.
+PREVIOUS_SUFFIX = ".old"
 
 
 def config_template(header: str, active: dict[tuple[str, str], str] | None = None) -> str:
@@ -149,18 +151,29 @@ def config_template(header: str, active: dict[tuple[str, str], str] | None = Non
 
 
 def create_file(target: Path, content: str, *, force: bool = False, replacement: str | None = None) -> None:
-    """Write a new file. An existing one stays unless force replaces it; a replacement names what --force writes."""
+    """Write a new settings file. An existing one stays unless force replaces it; a replacement names what --force
+    writes. A replaced file stays as NAME.old, which replaces an earlier copy.
+    """
     if target.is_symlink() or (target.exists() and not target.is_file()):
         raise SetupError(f"{target} must be a file.")
     if target.exists() and not force:
         if replacement is not None:
             print(f"Keep the existing {target}. Add --force to replace it with {replacement}.")
         return
+    previous = target.with_name(target.name + PREVIOUS_SUFFIX)
+    replaced = target.exists()
+    if replaced and (previous.is_symlink() or (previous.exists() and not previous.is_file())):
+        raise SetupError(f"{previous} must be a file: setup keeps the replaced {target.name} there.")
     with NamedTemporaryFile("w", encoding="utf-8", dir=target.parent, prefix=f".{target.name}.", delete=False) as output:
         output.write(content)
-    replaced = target.exists()
-    Path(output.name).replace(target)
-    print(f"{'Replaced' if replaced else 'Created'} {target}.")
+    try:
+        if replaced:
+            # Copy first, so that the settings file exists at every moment.
+            shutil.copy2(target, previous)
+        Path(output.name).replace(target)
+    finally:
+        Path(output.name).unlink(missing_ok=True)
+    print(f"Replaced {target}. The previous file is {previous}." if replaced else f"Created {target}.")
 
 
 def prepare_configuration(directory: Path, lower: Sequence[Path], models_name: str | None = "models.ini", *,

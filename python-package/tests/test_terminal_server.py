@@ -273,6 +273,7 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
                     self.directories = {}
                     self.leases = []
                     self.package_source = True
+                    self.command_wait = 30
 
                 @asynccontextmanager
                 async def lease(self, user, session=""):
@@ -288,8 +289,12 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
                     pass
 
             manager = Workspaces()
-            metadata = {"config": {"features": {"terminal": True}}, "schema": {"paths": {
-                "/execute": {"post": {"operationId": "run_command", "description": "Execute."}}, "/agents": {},
+            wait = {"name": "wait", "in": "query", "description": "Null returns at once.",
+                    "schema": {"description": "Null returns at once."}}
+            metadata = {"config": {"features": {"terminal": True, "system": False}}, "schema": {"paths": {
+                "/execute": {"post": {"operationId": "run_command", "description": "Execute in the background.",
+                                      "parameters": [dict(wait, schema=dict(wait["schema"]))]}}, "/agents": {},
+                "/execute/{process_id}/status": {"get": {"operationId": "get_process_status", "parameters": [wait]}},
                 "/api/terminals/user/output": {}, "/api/v1/terminals/templates": {},
             }}}
             headers = {"Authorization": "Bearer " + self.secret}
@@ -297,14 +302,23 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
             authorized = {**headers, **identity}
             async with TestClient(TestServer(module.application(manager, self.secret, metadata))) as client:
                 async with client.get("/api/config", headers=headers) as result:
-                    self.assertEqual((await result.json())["features"], {"terminal": True, "agents": False})
+                    self.assertEqual((await result.json())["features"],
+                                     {"terminal": True, "agents": False, "system": True})
                 async with client.get("/openapi.json", headers=headers) as result:
                     paths = (await result.json())["paths"]
                 # Model tools keep Open Terminal's own paths; the chat's single container serves them.
-                self.assertEqual(set(paths), {"/execute", "/api/terminals/user/output"})
+                self.assertEqual(set(paths), {"/execute", "/execute/{process_id}/status", "/api/terminals/user/output"})
                 description = paths["/execute"]["post"]["description"]
-                self.assertTrue(description.startswith("Execute.\n\nTerminal: call run_command"), description)
-                self.assertIn("apt update, then apt install PACKAGE", description)
+                self.assertEqual(description, module.command_description(30))
+                for operation in (paths["/execute"]["post"], paths["/execute/{process_id}/status"]["get"]):
+                    [parameter] = operation["parameters"]
+                    self.assertEqual(parameter["description"], parameter["schema"]["description"])
+                    self.assertTrue(parameter["description"].endswith("Leave it out to wait 30."), parameter)
+                # Open WebUI fetches the system prompt with a short timeout; it needs no container.
+                async with client.get("/system", headers=headers) as result:
+                    self.assertEqual(await result.json(), {"prompt": module.system_prompt(True)})
+                async with client.get("/system") as result:
+                    self.assertEqual(result.status, 401)
                 for path, info, status in (("/execute", {}, 401), ("/execute", headers, 403),
                                            ("/api/v1/terminals/templates", headers, 404),
                                            ("/agents", authorized, 404), ("/agent/execute", authorized, 404)):
@@ -326,12 +340,21 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
                 async with client.post("/execute", headers=authorized, json=command) as result:
                     reply = await result.json()
                 self.assertEqual((reply["path"], json.loads(reply["body"])), ("/execute", command))
-                self.assertEqual(manager.leases, [("account-a", "chat-a")] * 3)
+                # A command without a wait waits the configured time, so its output comes in the same tool call.
+                self.assertEqual(reply["query"], {"wait": "30"})
+                async with client.post("/execute", headers=authorized, json=command, params={"wait": "5"}) as result:
+                    self.assertEqual((await result.json())["query"], {"wait": "5"})
+                async with client.get("/execute/20261128-1200-abc/status", headers=authorized,
+                                      params={"offset": "2"}) as result:
+                    self.assertEqual((await result.json())["query"], {"offset": "2", "wait": "30"})
+                async with client.get("/execute", headers=authorized) as result:
+                    self.assertEqual((await result.json())["query"], {})
+                self.assertEqual(manager.leases, [("account-a", "chat-a")] * 6)
 
                 async with client.ws_connect("/api/terminals/session", headers=identity) as socket:
                     await socket.send_json({"type": "auth", "token": "bad"})
                     self.assertEqual((await socket.receive()).type, WSMsgType.CLOSE)
-                self.assertEqual(len(manager.leases), 3)
+                self.assertEqual(len(manager.leases), 6)
                 async with client.ws_connect("/api/terminals/session", headers=identity) as socket:
                     await socket.send_json({"type": "auth", "token": self.secret})
                     self.assertEqual(await socket.receive_json(), {
@@ -454,13 +477,29 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
                 policy = module.Policy("p", 1, 256, 2, 5, 1, "local", {}, network)
                 manager = module.Workspaces(policy, None, None, "provisioner", "image", None, repository=repository)
                 self.assertEqual(manager.package_source, package_source)
-        available, unavailable = module.tool_note(True), module.tool_note(False)
-        for note in (available, unavailable):
-            self.assertIn("call run_command to run shell commands yourself", note)
-            self.assertIn("/home/chat is deleted with the chat; keep lasting files in /home/user.", note)
-            self.assertLess(len(note), 400)
+        available, unavailable = module.system_prompt(True), module.system_prompt(False)
+        for prompt in (available, unavailable):
+            self.assertIn("do it yourself with the terminal tools instead of describing it", prompt)
+            self.assertIn("run_command runs shell commands", prompt)
+            self.assertIn("/home/chat is deleted with the chat; keep lasting files in /home/user.", prompt)
+            self.assertLess(len(prompt), 700)
         self.assertIn("apt update, then apt install PACKAGE", available)
-        self.assertIn("No package source is reachable; use the installed tools.", unavailable)
+        self.assertIn("No package source is reachable; use the installed programs.", unavailable)
+        for wait, text in ((120, "still running after 120 seconds returns status running"),
+                           (0, "It returns at once with the command's id")):
+            description = module.command_description(wait)
+            self.assertIn(text, description)
+            self.assertIn("never ask the user to run them", description)
+            self.assertNotIn("background", description)
+        # Only command requests without a wait get the configured one.
+        query = {"tail": "5"}
+        self.assertEqual(dict(module.default_wait("POST", "/execute", query, 60)), {"tail": "5", "wait": "60"})
+        self.assertEqual(query, {"tail": "5"})
+        for method, path, query, wait in (("POST", "/execute", {"wait": "0"}, 60), ("POST", "/execute", {}, 0),
+                                          ("GET", "/execute", {}, 60), ("POST", "/files/write", {}, 60),
+                                          ("GET", "/execute/a/b/status", {}, 60)):
+            with self.subTest(method=method, path=path, query=query, wait=wait):
+                self.assertIs(module.default_wait(method, path, query, wait), query)
 
     def test_policy_reads_the_network_access(self):
         module = self.module
@@ -472,6 +511,11 @@ class ProvisionerTests(unittest.IsolatedAsyncioTestCase):
                                             bridge_options={}).network, "connected")
         with self.assertRaisesRegex(ValueError, "isolated or connected"):
             module.Policy.load("p", {**env, "LOAF_TERMINAL_NETWORK": "open"}, bridge_options={})
+        self.assertEqual(module.Policy.load("p", env, bridge_options={}).command_wait, 0)
+        self.assertEqual(module.Policy.load("p", {**env, "LOAF_TERMINAL_COMMAND_WAIT_SECONDS": "240"},
+                                            bridge_options={}).command_wait, 240)
+        with self.assertRaisesRegex(ValueError, "0 to 240 seconds"):
+            module.Policy.load("p", {**env, "LOAF_TERMINAL_COMMAND_WAIT_SECONDS": "241"}, bridge_options={})
 
     def test_a_runtime_apt_source_hides_the_images_own_sources(self):
         with TemporaryDirectory() as folder:

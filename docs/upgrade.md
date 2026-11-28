@@ -7,6 +7,11 @@ in `/etc/loaf`, and models, accounts and terminal folders stay in the Docker
 volumes. Each upgrade ends with new images: build them while connected, or
 load them from a backup made with the new release.
 
+Compose no longer reads a `.env` file in the project unless `[launcher]
+docker_env_enable = true`. Move its variables into `config.ini`, or enable the
+setting. `loaf setup --force` now needs the parts to replace, such as
+`loaf setup docs --force`.
+
 ## Upgrade a source checkout
 
 After updating an older checkout, run the source setup command to install

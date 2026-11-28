@@ -19,6 +19,7 @@ from time import monotonic
 from urllib.parse import quote
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, DummyCookieJar, TraceConfig, UnixConnector, WSMsgType, web
+from multidict import MultiDict
 from yarl import URL
 
 
@@ -64,6 +65,9 @@ RESPONSE_HEADERS = (
     "Content-Range", "Content-Type", "ETag", "Last-Modified",
 )
 WORKSPACE_KEY = re.compile(r"[0-9a-f]{64}")
+# Open WebUI's terminal proxy gives a request 300 seconds; the default wait leaves time for the rest.
+COMMAND_WAIT_MAX = 240
+PROCESS_STATUS = re.compile(r"/execute/[^/]+/status")
 
 
 class DockerError(RuntimeError):
@@ -148,6 +152,8 @@ class Policy:
     volume_options: dict
     network: str = "isolated"
     bridge_options: dict[str, str] = field(default_factory=lambda: {GATEWAY: "isolated"})
+    # Seconds that run_command and get_process_status wait for a command when the call names no wait.
+    command_wait: int = 0
 
     @classmethod
     def load(cls, project, env, *, bridge_options):
@@ -157,13 +163,17 @@ class Policy:
         ]
         if min(numbers) < 1:
             raise ValueError("Terminal server limits must be positive.")
+        command_wait = int(env.get("LOAF_TERMINAL_COMMAND_WAIT_SECONDS") or 0)
+        if not 0 <= command_wait <= COMMAND_WAIT_MAX:
+            raise ValueError(f"The command wait must be 0 to {COMMAND_WAIT_MAX} seconds.")
         options = json.loads(env.get("LOAF_TERMINAL_VOLUME_OPTIONS") or "{}")
         if not isinstance(options, dict) or any(not isinstance(value, str) for value in options.values()):
             raise ValueError("Terminal server volume options must be an object of strings.")
         network = env.get("LOAF_TERMINAL_NETWORK") or "isolated"
         if network not in NETWORK_MODES:
             raise ValueError("The terminal server network must be isolated or connected.")
-        return cls(project, *numbers, env["LOAF_TERMINAL_VOLUME_DRIVER"], options, network, bridge_options)
+        return cls(project, *numbers, env["LOAF_TERMINAL_VOLUME_DRIVER"], options, network, bridge_options,
+                   command_wait)
 
     def asset_name(self, key):
         """Containers, networks and the user volume start with the deployment's Compose project."""
@@ -253,6 +263,7 @@ class Workspaces:
         self.repository = repository
         # Isolated containers reach only the mounted local repository.
         self.package_source = policy.network == "connected" or repository is not None
+        self.command_wait = policy.command_wait
         self.revision = hashlib.sha256(json.dumps([runtime_revision, repository, policy.network]).encode()).hexdigest()
         # Running containers by workspace key. Each occupies one of the policy's slots.
         self.active = {}
@@ -690,22 +701,59 @@ def permitted_path(path):
     return parts[0] != "api" or path == "/api/terminals" or path.startswith("/api/terminals/")
 
 
-def tool_note(package_source):
-    """Instructions for the model, appended to the run_command tool that Open WebUI describes to it."""
+def system_prompt(package_source):
+    """Instructions for the model, which Open WebUI adds to the system prompt of every chat with the terminal.
+
+    Short and explicit, so that small models act with the tools instead of describing what to do.
+    """
     install = ("Install packages with apt update, then apt install PACKAGE." if package_source
-               else "No package source is reachable; use the installed tools.")
-    return ("\n\nTerminal: call run_command to run shell commands yourself; never tell the user to run them. "
-            f"You are root in this chat's own Debian container. {install} "
-            "/home/chat is deleted with the chat; keep lasting files in /home/user. Answer from the command output.")
+               else "No package source is reachable; use the installed programs.")
+    return ("You have a Linux terminal: this chat's own Debian container, where you are root. "
+            "When the user asks you to run, check, install, build, create, read or change something on the "
+            "computer, do it yourself with the terminal tools instead of describing it or asking the user to do it: "
+            "run_command runs shell commands, read_file, write_file and list_files work with files, and "
+            "display_file shows a file to the user. Answer from the tool results. "
+            f"{install} /home/chat is deleted with the chat; keep lasting files in /home/user.")
 
 
-def tool_schema(paths, note):
+def command_description(wait):
+    """The description of run_command. Open Terminal's own describes the image build host and a background start."""
+    if wait:
+        result = (f"Without wait, a command still running after {wait} seconds returns status running and its id: "
+                  "call get_process_status with the id to wait for the rest.")
+    else:
+        result = "It returns at once with the command's id: call get_process_status with the id and a wait in seconds."
+    return ("Run a shell command in this chat's Debian container, as root, and return its output and exit code. "
+            f"{result} Run commands yourself; never ask the user to run them.")
+
+
+def tool_schema(paths, wait):
     """Publish Open Terminal's tools at its own paths, which the chat's container serves."""
     tools = {path: operations for path, operations in paths.items() if permitted_path(path)}
     run = tools.get("/execute", {}).get("post")
     if isinstance(run, dict):
-        run["description"] = run.get("description", "") + note
+        run["description"] = command_description(wait)
+    for operation in (run, tools.get("/execute/{process_id}/status", {}).get("get")):
+        for parameter in operation.get("parameters", ()) if isinstance(operation, dict) else ():
+            if isinstance(parameter, dict) and parameter.get("name") == "wait" and wait:
+                text = f"Seconds to wait for the command to finish, at most {COMMAND_WAIT_MAX}. Leave it out to wait {wait}."
+                parameter["description"] = text
+                if isinstance(parameter.get("schema"), dict):
+                    parameter["schema"]["description"] = text
     return tools
+
+
+def default_wait(method, path, query, wait):
+    """Add the configured wait to a command request without one, like Open Terminal's execute_timeout setting.
+
+    The terminal server applies it, so that a change reaches existing chat containers without replacing them.
+    """
+    command = (method == "POST" and path == "/execute") or (method == "GET" and PROCESS_STATUS.fullmatch(path))
+    if not wait or not command or "wait" in query:
+        return query
+    query = MultiDict(query)
+    query["wait"] = str(wait)
+    return query
 
 
 async def working_directory_listing(response, directory):
@@ -728,7 +776,7 @@ async def working_directory_listing(response, directory):
     return web.json_response(listing)
 
 
-async def proxy_http(request, workspace, user, client, path):
+async def proxy_http(request, workspace, user, client, path, command_wait=0):
     # Open WebUI reads the picker options as per-user, path-hashed history files.
     account = quote(user, safe="!~*'()")
     history = f"{WORKSPACE_HOME}/.open-webui/users/{account}/folders"
@@ -739,7 +787,7 @@ async def proxy_http(request, workspace, user, client, path):
         if directory == history and name in WORKING_DIRECTORY_RECORDS:
             return web.json_response({"path": target, "content": WORKING_DIRECTORY_RECORDS[name], "total_lines": 1})
 
-    upstream = workspace.url(path, request.query)
+    upstream = workspace.url(path, default_wait(request.method, path, request.query, command_wait))
     data = request.content if request.can_read_body else None
     async with client.request(
         request.method, upstream, headers=workspace.headers(user, request.headers), data=data, allow_redirects=False,
@@ -813,9 +861,11 @@ async def proxy_socket(request, downstream, workspaces, secret):
 
 def application(workspaces, secret, metadata, control_network=None):
     config = metadata["config"]
-    config["features"]["agents"] = False
+    # The terminal server answers /system itself, so Open WebUI gets the prompt without waiting for a container.
+    config["features"].update(agents=False, system=True)
     schema = metadata["schema"]
-    schema["paths"] = tool_schema(schema["paths"], tool_note(workspaces.package_source))
+    schema["paths"] = tool_schema(schema["paths"], workspaces.command_wait)
+    prompt = {"prompt": system_prompt(workspaces.package_source)}
 
     async def dispatch(request):
         if control_network is not None and (
@@ -825,9 +875,9 @@ def application(workspaces, secret, metadata, control_network=None):
         path = request.path
         if request.method == "GET" and path == "/health":
             return web.json_response({"status": "ok"})
-        if request.method == "GET" and path in ("/api/config", "/openapi.json"):
+        if request.method == "GET" and path in ("/api/config", "/openapi.json", "/system"):
             authenticate_http(request, secret)
-            return web.json_response(config if path == "/api/config" else schema)
+            return web.json_response({"/api/config": config, "/openapi.json": schema, "/system": prompt}[path])
         if not permitted_path(path):
             raise web.HTTPNotFound()
         downstream = web.WebSocketResponse(heartbeat=30, max_msg_size=4 * 1024 * 1024)
@@ -847,7 +897,7 @@ def application(workspaces, secret, metadata, control_network=None):
             async with workspaces.lease(user, session) as workspace:
                 if request.method == "POST" and path == "/files/cwd":
                     return await proxy_directory(request, workspace, user, session, workspaces)
-                return await proxy_http(request, workspace, user, workspaces.client, path)
+                return await proxy_http(request, workspace, user, workspaces.client, path, workspaces.command_wait)
         except (ClientError, DockerError, RuntimeError, TimeoutError, sqlite3.Error) as error:
             # A Docker error names the request and status; its response body stays private.
             LOG.warning("Terminal workspace request failed (%s)",

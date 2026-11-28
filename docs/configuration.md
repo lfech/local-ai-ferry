@@ -26,9 +26,10 @@ list comes from the highest layer that has `models.ini`: the project, then
 a different project directory. `loaf` validates every layer before Docker
 starts. `loaf status` lists the settings files in use.
 
-`loaf setup` creates the project's settings when they are missing and never
-replaces an existing file. It writes a `config.ini` with every key commented
-out, so system settings and later packaged defaults stay in effect, and a copy
+`loaf setup` creates the project's settings when they are missing and keeps
+an existing file; `loaf setup config --force` replaces both files and keeps
+the previous ones as `config.ini.old` and `models.ini.old`. Setup writes a
+`config.ini` with every key commented out, so system settings and later packaged defaults stay in effect, and a copy
 of the model list in effect, from `/etc/loaf` or else the packaged one. With
 `--config-dir PATH`, setup writes both into that directory. A copied
 `models.ini` keeps its selection when `/etc/loaf/models.ini` changes later. When
@@ -120,14 +121,20 @@ host that needs these features offline.
   `--no-import` to cancel configured transfer steps for one run. Backup
   still checks saved Modelfiles with either `export_models` setting. Use
   `--namespace=` to select the default namespace `loaf`.
-- The four existing Compose variables `OLLAMA_IMAGE`, `OPEN_WEBUI_IMAGE`,
-  `OLLAMA_CONTEXT_LENGTH`, and `OLLAMA_STARTUP_TIMEOUT` still work. Compose
-  checks the shell before the working project's `.env`. An empty or missing
-  effective value falls back to the INI setting.
+- The four Compose variables `OLLAMA_IMAGE`, `OPEN_WEBUI_IMAGE`,
+  `OLLAMA_CONTEXT_LENGTH`, and `OLLAMA_STARTUP_TIMEOUT` override the INI
+  settings when they are exported in the shell. An empty value falls back to
+  the INI setting.
+- Compose ignores a `.env` file in the project directory, so no file beside
+  the settings changes the deployment unnoticed. Set `[launcher]
+  docker_env_enable = true` to let Compose read it: its variables then
+  override the INI settings like exported ones, which still win over it, and
+  `loaf status` lists the `.env` among the settings files. While it is
+  ignored, `-v` shows `--env-file /dev/null` in every Compose command.
 - For GPU selection, an exported `CUDA_VISIBLE_DEVICES` takes precedence over
-  `cuda_visible_devices`. When the INI setting is blank, Compose can also read
-  `CUDA_VISIBLE_DEVICES` from `.env`. Use comma-separated NVIDIA device IDs or
-  UUIDs.
+  `cuda_visible_devices`. When the INI setting is blank and `docker_env_enable`
+  is on, Compose can also read `CUDA_VISIBLE_DEVICES` from `.env`. Use
+  comma-separated NVIDIA device IDs or UUIDs.
 - For `loaf test`, an exported `RUN_DOCKER_TESTS`, `RUN_GPU_TESTS`, `RUN_CPU_TESTS`,
   `RUN_CATALOG_TESTS`, `RUN_TERMINAL_SERVER_TESTS`, or `ALLOW_LEGACY_TERMINAL_BRIDGE`
   overrides its matching INI key. The value `1` enables the option. The

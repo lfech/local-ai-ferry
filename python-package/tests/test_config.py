@@ -38,6 +38,8 @@ class ConfigTests(unittest.TestCase):
             (assets.DATA_DIR / "compose.yml", r"LOAF_INI_OLLAMA_IMAGE:-([^}]+)\}", defaults.ollama_image),
             (assets.DATA_DIR / "compose.yml", r"LOAF_INI_WEBUI_IMAGE:-([^}]+)\}", defaults.webui_image),
             (assets.DATA_DIR / "compose.yml", r"LOAF_TERMINAL_BASE_IMAGE:-([^}]+)\}", defaults.terminal_server_image),
+            (assets.DATA_DIR / "compose.yml", r"LOAF_TERMINAL_COMMAND_WAIT_SECONDS:-([^}]+)\}",
+             str(defaults.terminal_server_command_wait_seconds)),
             (docker / "ollama/Dockerfile", r"ARG OLLAMA_IMAGE=(\S+)", defaults.ollama_image),
             (docker / "open-webui/Dockerfile", r"ARG OPEN_WEBUI_IMAGE=(\S+)", defaults.webui_image),
             (docker / "terminal-server/Dockerfile", r"ARG OPEN_TERMINAL_IMAGE=(\S+)", defaults.terminal_server_image),
@@ -47,13 +49,17 @@ class ConfigTests(unittest.TestCase):
 
     def test_ini_reads_literal_paths_and_typed_values(self):
         self.path.write_text(
-            "[launcher]\nmodels_file = lists/%demo $new.ini\nwait_timeout = 450\n"
+            "[launcher]\nmodels_file = lists/%demo $new.ini\nwait_timeout = 450\ndocker_env_enable = yes\n"
             "[webui]\nbind_address = ::1\nport = 3100\n"
             "[online]\nollama_cloud = no\n"
-            "[transfer]\ncompression_level = 0\n",
+            "[transfer]\ncompression_level = 0\n"
+            "[terminal_server]\ncommand_wait_seconds = 0\n",
             encoding="utf-8-sig",
         )
         settings = config.load(self.config_dir)
+        self.assertTrue(settings.docker_env_enable)
+        self.assertEqual(settings.terminal_server_command_wait_seconds, 0)
+        self.assertEqual(settings.compose_variables()["LOAF_TERMINAL_COMMAND_WAIT_SECONDS"], "0")
         self.assertEqual(settings.models_file, Path("lists/%demo $new.ini"))
         self.assertEqual(settings.wait_timeout, 450)
         self.assertFalse(settings.ollama_cloud)
@@ -201,6 +207,9 @@ class ConfigTests(unittest.TestCase):
             ("[launcher]\nnamespace = Invalid.1\n", "expected a lowercase Compose name"),
             ("[launcher]\nversion = v2\n", "unknown setting [launcher] version. It is now [launcher] namespace."),
             ("[launcher]\nwait_timeout = -1\n", "expected 0 to wait without a limit"),
+            ("[launcher]\ndocker_env_enable = maybe\n", "expected true or false"),
+            ("[terminal_server]\ncommand_wait_seconds = 241\n", "expected 0 to return at once or at most 240 seconds"),
+            ("[terminal_server]\ncommand_wait_seconds = -1\n", "expected 0 to return at once or at most 240 seconds"),
             ("[webui]\nprt = 3030\n", "unknown setting"),
             ("[web]\nport = 3030\n", "unknown section"),
             ("[webui]\nport = 3030\nport = 3031\n", "already exists"),

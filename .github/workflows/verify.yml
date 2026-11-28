@@ -31,7 +31,8 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
-      - name: Run the Docker-free suite
+      - name: Install the checkout
+        id: install
         env:
           # The terminal components run on Python 3.12 and 3.13; setup tests requires 3.11 or newer.
           SETUP_TESTS: ${{ matrix.python == '3.13' }}
@@ -41,15 +42,19 @@ jobs:
           if [ "$SETUP_TESTS" = true ]; then
             "$RUNNER_TEMP/test-venv/bin/loaf" setup tests
           fi
-          "$RUNNER_TEMP/test-venv/bin/loaf" test -v
+
+      # The checks below are independent: each runs after another one failed, and the job still fails.
+      - name: Run the Docker-free suite
+        run: '"$RUNNER_TEMP/test-venv/bin/loaf" test -v'
 
       - name: Build the Debian package and install it on Debian 12 and 13
-        if: matrix.python == '3.13'
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && matrix.python == '3.13' }}
         run: |
           cd python-package
           RUN_DOCKER_TESTS=1 "$RUNNER_TEMP/test-venv/bin/python" -m unittest -v tests.test_debian
 
       - name: Build and smoke-test the wheel
+        if: ${{ !cancelled() }}
         run: |
           python -m pip wheel --no-deps --wheel-dir "$RUNNER_TEMP/wheels" ./python-package
           python -m venv "$RUNNER_TEMP/wheel-venv"

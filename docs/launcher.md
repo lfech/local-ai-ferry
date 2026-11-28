@@ -79,8 +79,9 @@ loaf run offline --cpu
 Use `loaf run online --cpu` when you want the connected serving profile. CPU
 serving uses the same images, volumes, model imports, and optional terminal
 server. CPU inference uses system RAM and can take longer than GPU inference.
-Run `loaf backup` as usual and start the destination with `loaf run offline` for
-NVIDIA inference.
+`loaf restart` keeps serving on CPU without `--cpu`; `loaf run offline`
+without it returns to GPU inference. Run `loaf backup` as usual and start the
+destination with `loaf run offline` for NVIDIA inference.
 
 ### Stop and inspect the deployment
 
@@ -192,6 +193,9 @@ profile. Build and upgrade run separately from mode switches.
 A project lock in `.run.lock` rejects overlapping launcher runs in this checkout.
 The file remains after completion; the OS lock is released on exit. It does not
 control manual Docker commands or another checkout sharing the named volumes.
+`restart` and `stop PROFILE` ask Docker what serves under the same lock as
+their steps. When Docker cannot answer, they report its error and change
+nothing.
 
 A failed command ends the workflow with a nonzero status. Completed downloads
 and exports remain. A failed pull can leave the downloader running, so resume the

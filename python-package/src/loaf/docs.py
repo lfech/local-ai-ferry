@@ -149,18 +149,27 @@ def roff(text: str) -> str:
 
 
 def manual_page() -> str:
+    """Render the manual page: each command with the names of its options, then every option once."""
     from . import cli
 
     parser = argparse.ArgumentParser(add_help=False)
     cli.add_options(parser)
-    options = {flag: action for action in parser._actions for flag in action.option_strings}
+    actions = [action for action in parser._actions if action.help != argparse.SUPPRESS]
+    options = {flag: action for action in actions for flag in action.option_strings}
 
-    def option_items(flags) -> list[str]:
+    def option_items(selected) -> list[str]:
         items = []
-        for flag in flags:
-            action = options[flag]
+        for action in selected:
             metavar = f" {action.metavar}" if action.metavar else ""
             items += [".TP", f"\\fB{roff(', '.join(action.option_strings))}\\fR{roff(metavar)}", roff(action.help or "")]
+        return items
+
+    def command_items(command, subcommand, details) -> list[str]:
+        name = " ".join(part for part in (command, subcommand) if part)
+        items = [".TP", f"\\fB{roff(name)}\\fR {roff(cli.command_arguments(command, subcommand))}", roff(details.summary)]
+        if details.options:
+            names = ", ".join(f"\\fB{roff(flag)}\\fR" for flag in details.options)
+            items += [".br", f"Options: {names}."]
         return items
 
     lines = [
@@ -177,15 +186,13 @@ def manual_page() -> str:
         ".SH COMMANDS",
     ]
     for name, details in cli.COMMAND_HELP.items():
-        lines += [".TP", f"\\fB{roff(name)}\\fR", roff(details.summary)]
-        if details.options:
-            lines += [".RS", *option_items(details.options), ".RE"]
+        lines += command_items(name, None, details)
         for subcommand, sub in cli.SUBCOMMAND_HELP.get(name, {}).items():
-            lines += [".RS", ".TP", f"\\fB{roff(f'{name} {subcommand}')}\\fR", roff(sub.summary)]
-            if sub.options:
-                lines += [".RS", *option_items(sub.options), ".RE"]
-            lines += [".RE"]
-    lines += [".SH GLOBAL OPTIONS", *option_items(cli.GLOBAL_OPTIONS)]
+            lines += [".RS", *command_items(name, subcommand, sub), ".RE"]
+    global_options = [options[flag] for flag in cli.GLOBAL_OPTIONS]
+    lines += [".SH OPTIONS", roff("The commands above name the options they accept."),
+              *option_items(action for action in actions if action.option_strings and action not in global_options)]
+    lines += [".SH GLOBAL OPTIONS", *option_items(global_options)]
     lines += [
         ".SH FILES",
         ".TP", "\\fI/etc/loaf/config.ini\\fR, \\fI/etc/loaf/models.ini\\fR", "System settings and model list.",

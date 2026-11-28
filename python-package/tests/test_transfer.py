@@ -541,6 +541,15 @@ class TransferTests(unittest.TestCase):
         self.assertIn("The source type needs a Git checkout", self.progress.getvalue())
         self.assertEqual(self.invoke("restore", "--dry-run", custom=False, project=self.root / "empty"), 1)
         self.assertIn("No backup found", self.progress.getvalue())
+        # A mistyped project directory is reported, not created.
+        self.assertEqual(self.invoke("restore", custom=False, project=self.root / "typo"), 1)
+        self.assertIn("No backup found", self.progress.getvalue())
+        self.assertFalse((self.root / "typo").exists())
+        # With a backup, restore creates the missing project directory.
+        new_project = self.root / "new project"
+        self.assertEqual(self.invoke("restore", "config", "--archive", str(self.bundle), custom=False,
+                                     project=new_project), 0, self.progress.getvalue())
+        self.assertTrue((new_project / "config/config.ini").is_file())
 
     def test_restore_without_the_terminal_key_suggests_setup(self):
         self.settings.write_text("[terminal_server]\nenabled = true\n", encoding="utf-8")
