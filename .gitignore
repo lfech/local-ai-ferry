@@ -39,3 +39,5 @@ local-ai-ferry.tar.gz
 
 # Other agent related config files
 CLAUDE.md
+# Release message
+release.md
