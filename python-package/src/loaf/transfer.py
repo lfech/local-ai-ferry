@@ -22,7 +22,7 @@ from tempfile import NamedTemporaryFile, TemporaryDirectory, TemporaryFile
 from typing import Callable, Iterable
 import zlib
 
-from . import assets, config, locks
+from . import assets, config, docs, locks
 from .progress import Progress, TrackedStream
 from .setup import (
     INSTALL_CACHE, PYTHON_PACKAGE_DIR, PYTHON_RUNTIME_DIR, PYTHON_WHEEL_DIR, SYSTEM_GROUP, TEST_WHEEL_RECORD,
@@ -501,18 +501,23 @@ def check_member(name: str, stream):
     return None
 
 
-def unpack(archive: Archive, staging: Path | None, select: set[str]) -> dict:
+def unpack(archive: Archive, staging: Path | None, select: set[str], *, digest=None) -> dict:
     """Check every member against the manifest and its content checks, and stage the selected ones.
 
     Each member is read once: the same bytes are hashed, checked and staged. Nothing changes before
-    the whole archive passed. Returns the image platforms by member name.
+    the whole archive passed. Returns the image platforms by member name. A given digest receives the
+    archive file's own bytes.
     """
     expected = {member["path"]: member for item in archive.manifest["items"] for member in item["members"]}
     seen = set()
     results = {}
     try:
         with archive.path.open("rb") as raw:
-            with gzip.GzipFile(fileobj=raw, mode="rb") as compressed:
+            source = raw
+            if digest is not None:
+                source = HashingReader(raw)
+                source.digest = digest
+            with gzip.GzipFile(fileobj=source, mode="rb") as compressed:
                 with tarfile.open(fileobj=compressed, mode="r|") as members:
                     first = members.next()
                     with members.extractfile(first) as payload:
@@ -553,6 +558,9 @@ def unpack(archive: Archive, staging: Path | None, select: set[str]) -> dict:
                 # Read to EOF so gzip checks its checksum before Docker state can change.
                 while compressed.read(COPY_BUFFER):
                     pass
+            # Bytes after the gzip stream belong to the file, too.
+            while digest is not None and source.read(COPY_BUFFER):
+                pass
     except (EOFError, zlib.error, gzip.BadGzipFile, tarfile.TarError) as exc:
         raise TransferError(f"{archive.path.name} is truncated or damaged: {exc}") from exc
     if seen != set(expected):
@@ -570,19 +578,39 @@ def member_record(staging: Path, path: str) -> dict:
     return {"path": path, "size": size, "sha256": reader.digest.hexdigest()}
 
 
-def write_archive(staging: Path, pending: Path, manifest: dict, compression_level: int) -> None:
+class HashingWriter:
+    """Hash what passes to an output."""
+
+    def __init__(self, output) -> None:
+        self.output = output
+        self.digest = sha256()
+
+    def write(self, data) -> int:
+        self.digest.update(data)
+        return self.output.write(data)
+
+    def flush(self) -> None:
+        self.output.flush()
+
+
+def write_archive(staging: Path, pending: Path, manifest: dict, compression_level: int) -> str:
+    """Write the gzip-compressed archive, loaf.json first, and return the SHA-256 of the archive file."""
     data = (json.dumps(manifest, indent=2) + "\n").encode()
-    with tarfile.open(pending, "w:gz", compresslevel=compression_level, copybufsize=COPY_BUFFER) as archive:
-        # The manifest comes first so a reader learns the types before any payload.
-        entry = tarfile.TarInfo(MANIFEST)
-        entry.size, entry.mode, entry.mtime = len(data), 0o600, int(datetime.now().timestamp())
-        archive.addfile(entry, io.BytesIO(data))
-        for item in manifest["items"]:
-            for member in item["members"]:
-                entry = archive.gettarinfo(staging / member["path"], arcname=member["path"])
-                with (Progress(f"Compress {member['path']}", entry.size) as progress,
-                      (staging / member["path"]).open("rb") as payload):
-                    archive.addfile(entry, TrackedStream(payload, progress))
+    with pending.open("wb") as raw:
+        hashed = HashingWriter(raw)
+        with (gzip.GzipFile(pending.name, "wb", compression_level, hashed) as compressed,
+              tarfile.open(fileobj=compressed, mode="w", copybufsize=COPY_BUFFER) as archive):
+            # The manifest comes first so a reader learns the types before any payload.
+            entry = tarfile.TarInfo(MANIFEST)
+            entry.size, entry.mode, entry.mtime = len(data), 0o600, int(datetime.now().timestamp())
+            archive.addfile(entry, io.BytesIO(data))
+            for item in manifest["items"]:
+                for member in item["members"]:
+                    entry = archive.gettarinfo(staging / member["path"], arcname=member["path"])
+                    with (Progress(f"Compress {member['path']}", entry.size) as progress,
+                          (staging / member["path"]).open("rb") as payload):
+                        archive.addfile(entry, TrackedStream(payload, progress))
+    return hashed.digest.hexdigest()
 
 
 # --- Member checks on streams ---
@@ -731,7 +759,7 @@ def toolkit_warning(project: Path, problem: str | None) -> str:
         "The destination needs the toolkit for GPU inference; CPU inference works without it. To include its",
         "packages in the backup, cache them while connected and back up again:",
         "  Source checkout:        loaf setup",
-        "  Standalone executable:  loaf setup --with-docker-deps",
+        "  Standalone executable:  loaf setup toolkit",
         f"  Debian package:         sudo mkdir -p {cache} && cd {cache} && sudo apt-get download {packages}",
         "Or install the toolkit on the destination from NVIDIA's repository.",
     ])
@@ -912,14 +940,20 @@ def stage_checkout(source: Path, checkout: Path) -> None:
 
 
 def checkout_targets(checkout: Path, project: Path) -> list[tuple[Path, Path]]:
-    """Map the checkout onto the project. Directories merge; archived files and links replace existing ones."""
+    """Map the checkout onto the project. Directories merge; archived files and links replace existing ones.
+
+    The checkout's docs/ replaces the guides that standalone setup exported as a whole, so none of them stays behind.
+    """
+    exported = project / docs.EXPORT_DIR
+    replaced = {exported} if (exported / docs.STAMP).is_file() and not exported.is_symlink() else set()
+
     def collect(source: Path, target: Path):
         source_dir = source.is_dir() and not source.is_symlink()
-        target_dir = target.is_dir() and not target.is_symlink()
+        target_dir = target.is_dir() and not target.is_symlink() and target not in replaced
         if source_dir and target_dir:
             for entry in source.iterdir():
                 yield from collect(entry, target / entry.name)
-        elif source_dir and (target.exists() or target.is_symlink()):
+        elif source_dir and (target.exists() or target.is_symlink()) and target not in replaced:
             # Never write a directory through a link or over a file.
             raise TransferError(f"Cannot restore the source directory {target} over a file or link.")
         elif target_dir:
@@ -1493,7 +1527,7 @@ def check_backup_types(project: Path, config_dir: Path, types: tuple[str, ...], 
     if "source" in types and not checkout:
         raise TransferError("The source type needs a Git checkout. Omit source for this deployment.")
     # Settings can come entirely from the system or packaged layers, but the directory must be a deployment.
-    if "config" in types and not (config_dir.is_dir() or (project / "docker-project").is_symlink() or checkout):
+    if "config" in types and not (config_dir.is_dir() or checkout):
         raise TransferError("Backup needs a deployment prepared by loaf setup or a Git checkout.")
     if "terminal" in types:
         config.read_terminal_secret(terminal_key)
@@ -1512,11 +1546,11 @@ def backup(
     skip_terminal_server: bool = False,
     config_dir: Path | None = None,
     launcher: dict | None = None,
-) -> None:
+) -> str:
     """Write one archive: loaf.json first, then the members of each selected type.
 
     skip_terminal_server leaves out the terminal image and type and records that in loaf.json, so restore
-    disables the terminal server.
+    disables the terminal server. Returns the SHA-256 of the archive file.
     """
     if destination.is_relative_to(project / ".git"):
         raise TransferError("Choose a backup directory outside .git.")
@@ -1591,14 +1625,18 @@ def backup(
         # Publish only after all payloads are complete, preserving any old backup
         # if a command fails or the operation is interrupted.
         pending = staging / destination.name
-        write_archive(staging, pending, manifest, compression_level)
+        digest = write_archive(staging, pending, manifest, compression_level)
         pending.chmod(file_modes(destination.parent)[0])
         pending.replace(destination)
+    return digest
 
 
 def backup_bundle(project: Path, destination: Path, prepare_services: Callable[[], None], *,
-                  namespace_name: str, executable: Path | None = None, **options) -> None:
-    """Publish a backup folder with the archive and the launcher that can restore it. loaf.json records both hashes."""
+                  namespace_name: str, executable: Path | None = None, **options) -> dict[str, str]:
+    """Publish a backup folder with the archive and the launcher that can restore it. loaf.json records both hashes.
+
+    Returns the SHA-256 of the published archive and launcher by path, for a check on another channel.
+    """
     if destination.is_relative_to(project / ".git"):
         raise TransferError("Choose a backup directory outside .git.")
     if executable is None:
@@ -1615,9 +1653,11 @@ def backup_bundle(project: Path, destination: Path, prepare_services: Callable[[
         shutil.copyfile(executable, copy)
         copy.chmod(runnable)
         archive = bundle / f"{destination.name}.tar.gz"
-        backup(project, archive, prepare_services, namespace=config.namespace(namespace_name),
-               namespace_name=namespace_name, launcher=launcher_record(copy), **options)
+        launcher = launcher_record(copy)
+        digest = backup(project, archive, prepare_services, namespace=config.namespace(namespace_name),
+                        namespace_name=namespace_name, launcher=launcher, **options)
         bundle.rename(destination)
+    return {str(destination / archive.name): digest, str(destination / LAUNCHER): launcher["sha256"]}
 
 
 # --- Verify and restore ---
@@ -1636,7 +1676,8 @@ def describe(archive: Archive) -> list[str]:
 
 def verify_backup(archive: Archive, namespace: str) -> None:
     """Run restore's archive checks on the stream, without Docker or temporary copies."""
-    checked = unpack(archive, None, set())
+    digest = sha256()
+    checked = unpack(archive, None, set(), digest=digest)
     platforms = check_image_tags(checked["images.tar"], namespace) if "images.tar" in checked else {}
     print(f"Verified SHA-256 hashes and contents of all members of {archive.path}")
     if archive.launcher_matches:
@@ -1647,6 +1688,18 @@ def verify_backup(archive: Archive, namespace: str) -> None:
         print(line)
     for image, supported in sorted(platforms.items()):
         print(f"  {image}  {', '.join(sorted(supported))}")
+    hashes = {str(archive.path): digest.hexdigest()}
+    if archive.executable is not None:
+        hashes[str(archive.executable)] = launcher_record(archive.executable)["sha256"]
+    print(file_hashes(hashes))
+
+
+def file_hashes(hashes: dict[str, str], *, created: bool = False) -> str:
+    """The SHA-256 lines of a backup in sha256sum's format, with why to compare them on another channel."""
+    advice = ("Record them apart from the transfer media and compare them before a restore" if created
+              else "Compare them with the values recorded when the backup was made")
+    return (f"SHA-256 as sha256sum prints it. loaf.json reveals damage, not deliberate changes. {advice}:\n"
+            + "\n".join(f"{digest}  {path}" for path, digest in hashes.items()))
 
 
 def setup_from_archive(archive: Archive, project: Path, *, installers: bool) -> bytes | None:

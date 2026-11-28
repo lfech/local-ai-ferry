@@ -56,7 +56,7 @@ def release_url() -> str | None:
 
 
 def render(path: PurePosixPath, files: dict[PurePosixPath, Path], base_url: str | None) -> str:
-    """Rewrite repository links for the exported docs/ beside a deployment's docker-project/."""
+    """Rewrite repository links for the exported docs/; other repository files link to the release."""
     target = export_path(path)
 
     def replace(match: re.Match) -> str:
@@ -68,9 +68,6 @@ def render(path: PurePosixPath, files: dict[PurePosixPath, Path], base_url: str 
         resolved = PurePosixPath(posixpath.normpath(posixpath.join(base, link.lstrip("/"))))
         if resolved in files:
             link = posixpath.relpath(export_path(resolved), target.parent)
-        elif resolved.is_relative_to(assets.CHECKOUT_DATA.as_posix()):
-            data = PurePosixPath(assets.DOCKER_PROJECT) / resolved.relative_to(assets.CHECKOUT_DATA.as_posix())
-            link = posixpath.relpath(data, target.parent)
         elif base_url is not None:
             link = f"{base_url}/{resolved}"
         return f"{match[1]}{link}{'#' + anchor if anchor else ''}{match[3]}"
@@ -103,17 +100,24 @@ def show(name: str | None) -> None:
         print(text, end="")
 
 
-def export(project: Path) -> None:
-    """Write the guides for this release to docs/, unless the directory belongs to the user."""
+def export(project: Path, *, force: bool = False) -> None:
+    """Write the guides for this release to docs/. An existing docs/ stays unless force replaces it.
+
+    Guides that this release exported before stay as they are.
+    """
     target = project / EXPORT_DIR
     version = assets.release_version()
     stamp = target / STAMP
     if target.exists() or target.is_symlink():
-        if target.is_symlink() or not stamp.is_file():
-            print(f"Keep the existing {target}. Run 'loaf docs' to read the guides for this release.")
+        current = not target.is_symlink() and stamp.is_file() and stamp.read_text(encoding="utf-8").strip() == version
+        if current and not force:
             return
-        if stamp.read_text(encoding="utf-8").strip() == version:
+        if not force:
+            print(f"Keep the existing {target}. Add --force to replace it with the guides for loaf {version}, "
+                  "or run 'loaf docs' to read them.")
             return
+        if target.is_symlink() or not target.is_dir():
+            target.unlink()
     files = sources()
     base_url = release_url()
     staging = project / f".loaf-docs-{os.getpid()}"

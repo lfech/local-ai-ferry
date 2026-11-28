@@ -200,15 +200,9 @@ def rehearse(executable, root, compression, retain, *, chat_only, ollama_image, 
             "credentials": credentials, "account": account, "chat_id": chat_id, "messages": messages,
         }, deb)
     finally:
-        data = source / "docker-project"
-        subprocess.run([
-            "docker", "compose", "--project-name", namespace, "--file", str(data / "compose.yml"),
-            "--file", str(data / "compose.cpu.yml"), "--profile", "*",
-            "down", "--volumes", "--timeout", "5",
-        ], cwd=source, env={**env, "LOAF_NAMESPACE": version}, check=False, timeout=60)
-        subprocess.run(["docker", "image", "rm", *(
-            f"loaf/{image}:{version}" for image in ("ollama-online", "ollama-offline", "open-webui")
-        )], check=False, capture_output=True, timeout=60)
+        # The deployment's settings select its namespace: remove its containers, networks, volumes and images.
+        subprocess.run([str(loaf), "docker", "rm", "all", "--force"], cwd=source, env=env, check=False,
+                       capture_output=True, timeout=180)
 
 
 def main():

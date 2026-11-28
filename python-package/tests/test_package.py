@@ -32,8 +32,8 @@ class PackageTests(unittest.TestCase):
 
     def project(self, folder):
         root = Path(folder)
-        (root/'compose.yml').write_text('services: {}\n', encoding='utf-8')
         (root / 'config').mkdir()
+        (root / 'config/config.ini').touch()
         (root / 'config/models.ini').write_text('[models.default]\nmodel = hf.co/test/cwd-selected:Q4_K_M\n', encoding='utf-8')
         return root
 
@@ -95,7 +95,7 @@ class PackageTests(unittest.TestCase):
             # Restore previews need a backup; without one they fail like a real restore.
             for mode in (*cli.COMPOSE_COMMANDS, "backup"):
                 with self.subTest(mode=mode):
-                    result = self.invoke(folder, mode, *(('offline',) if mode == 'run' else ()), '--dry-run')
+                    result = self.invoke(folder, mode, *(('offline',) if mode in ('run', 'restart') else ()), '--dry-run')
                     self.assertEqual(result.returncode, 0, result.stderr)
                     output = result.stdout.decode('utf-8')
                     self.assertIn(str(root.resolve()), output)
@@ -171,50 +171,30 @@ class PackageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             result = self.invoke(folder, 'run', 'offline', '--dry-run')
         self.assertEqual(result.returncode, 2)
-        self.assertIn(b'No compose.yml', result.stderr)
+        self.assertIn(b'has no settings in', result.stderr)
+        self.assertIn(b'Run loaf setup there', result.stderr)
         self.assertEqual(result.stdout, b'')
 
-    def test_checkout_uses_bundled_compose_and_model_defaults_without_a_link(self):
+    def test_a_checkout_uses_the_running_loafs_compose_and_model_defaults(self):
         with tempfile.TemporaryDirectory() as folder:
-            data = Path(folder) / 'python-package/src/loaf/data'
-            shutil.copytree(DATA, data)
+            # A checkout counts as a project; its own deployment files never replace those of the running loaf.
+            (Path(folder) / 'python-package/src/loaf/data').mkdir(parents=True)
+            (Path(folder) / 'python-package/pyproject.toml').touch()
+            (Path(folder) / 'python-package/src/loaf/data/compose.yml').write_text('services: {}\n', encoding='utf-8')
+            (Path(folder) / 'compose.yml').write_text('services: {}\n', encoding='utf-8')
             result = self.invoke(folder, '-v', 'download', '--dry-run')
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(str(data / 'compose.yml').encode(), result.stdout)
+            self.assertIn(f"--file {DATA / 'compose.yml'}".encode(), result.stdout)
             self.assertIn(cli.read_models(DATA / 'config/models.ini')[0].source.encode(), result.stdout)
 
-    def test_link_docker_project_previews_and_reuses_the_link(self):
-        with tempfile.TemporaryDirectory(prefix='loaf workspace ') as folder:
-            root = Path(folder)
-            link = root / 'docker-project'
-            preview = self.invoke(folder, 'setup', '--link-docker-project', '--dry-run')
-            self.assertEqual(preview.returncode, 0, preview.stderr)
-            self.assertFalse(link.is_symlink())
-            result = self.invoke(folder, 'setup', '--link-docker-project')
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertTrue(link.is_symlink())
-            self.assertEqual(link.resolve(), DATA)
-            self.assertTrue((link / 'docker/open-webui/Dockerfile').is_file())
-            self.assertTrue((link / 'config/models.ini').is_file())
-            cpu_plan = self.invoke(folder, 'run', 'offline', '--cpu', '--dry-run', '-v')
-            self.assertEqual(cpu_plan.returncode, 0, cpu_plan.stderr)
-            self.assertIn(str(DATA / 'compose.cpu.yml').encode(), cpu_plan.stdout)
-            again = self.invoke(folder, 'install', '--link-docker-project')
-            self.assertEqual(again.returncode, 0, again.stderr)
-            self.assertIn(b'already linked', again.stdout)
-            plan = self.invoke(folder, 'download', '--dry-run')
-            self.assertEqual(plan.returncode, 0, plan.stderr)
-            self.assertIn(cli.read_models(DATA / 'config/models.ini')[0].source.encode(), plan.stdout)
-            self.assertFalse((root / '.run.lock').exists())
-
-    def test_link_docker_project_preserves_an_existing_path(self):
+    def test_there_is_no_docker_project_link_to_create(self):
         with tempfile.TemporaryDirectory() as folder:
-            link = Path(folder) / 'docker-project'
-            link.symlink_to('missing', target_is_directory=True)
-            result = self.invoke(folder, 'setup', '--link-docker-project')
-            self.assertEqual(result.returncode, 1, result.stderr)
-            self.assertIn(b'already exists', result.stderr)
-            self.assertEqual(link.readlink(), Path('missing'))
+            for arguments in (('setup', 'link-docker-project'), ('setup', '--link-docker-project')):
+                with self.subTest(arguments=arguments):
+                    result = self.invoke(folder, *arguments)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn(b"loaf docker ps", result.stderr)
+            self.assertEqual(list(Path(folder).iterdir()), [])
 
     # --- Standard unittest supplies the summary, diagnostics and failure status ---
     def test_test_command_prints_summary_and_skip_count(self):

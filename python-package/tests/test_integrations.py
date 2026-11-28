@@ -57,7 +57,8 @@ class IntegrationTests(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == "linux", "systemd integration requires Linux")
     def test_systemd_uses_project_and_pins_the_namespace_for_start_and_stop(self):
-        (self.project / "compose.yml").touch()
+        (self.project / "config").mkdir(exist_ok=True)
+        (self.project / "config/config.ini").touch()
         unit = self.generate("systemd")
         self.assertIn("Type=exec\n", unit)
         self.assertNotIn("RemainAfterExit", unit)

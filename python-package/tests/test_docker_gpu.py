@@ -11,6 +11,7 @@ import urllib.request
 from uuid import uuid4
 
 from loaf import cli, transfer
+from tests import ARTIFACTS
 from tests.docker_support import CPU_TESTS, DEFAULT_IMAGES, GPU_TESTS, command, compose_command, compose_config
 from tests.webui_chat import WebUIChat
 
@@ -65,7 +66,9 @@ class ModelWorkflowTests(unittest.TestCase):
         for kind in ("networks", "volumes"):
             for key, resource in config[kind].items():
                 resource["name"] = f"{project}-{key}"
-        folder = tempfile.TemporaryDirectory(prefix="loaf-model-")
+        # The model archive test stages the store and its archive, several GB: keep them on disk, not in a tmpfs.
+        ARTIFACTS.mkdir(exist_ok=True)
+        folder = tempfile.TemporaryDirectory(prefix="loaf-model-", dir=ARTIFACTS)
         add_cleanup(folder.cleanup)
         root = Path(folder.name)
         compose_file = root / "compose.json"

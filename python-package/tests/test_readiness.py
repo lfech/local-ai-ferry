@@ -112,10 +112,11 @@ class ReadinessTests(unittest.TestCase):
             self.assertIn("Deployment  loaf-v2", status.getvalue())
             self.assertIn("Containers across all profiles", status.getvalue())
             self.assertIn("Preflight passed.", status.getvalue())
-            self.assertIn("WARN  Docker Engine — 26.1.5", status.getvalue())
+            # Only an enabled terminal server uses the legacy bridge isolation of Docker Engine 26 and 27.
+            self.assertIn("OK    Docker Engine — 26.1.5", status.getvalue())
             self.assertIn("\nConfiguration\n  OK    Launcher configuration\n  OK    Compose configuration", status.getvalue())
             self.assertNotIn(terminal, status.getvalue())
-            for engine_version, expected in (("27.5.1", "WARN"), ("28.0.0", "OK"), ("29.0.0", "OK")):
+            for engine_version, expected in (("27.5.1", "OK"), ("28.0.0", "OK"), ("29.0.0", "OK")):
                 with self.subTest(engine_version=engine_version):
                     status.seek(0)
                     status.truncate()
@@ -182,6 +183,7 @@ class ReadinessTests(unittest.TestCase):
             webui_running = True
             services["terminal-server"] = {"image": terminal}
             (Path(config_dir) / "config.ini").write_text("[terminal_server]\nenabled = true\n", encoding="utf-8")
+            engine_version = "27.5.1"
             with patch.object(readiness.config, "read_terminal_secret", return_value="test"):
                 for terminal_built, expected, exit_code in ((True, "OK", 0), (False, "FAIL", 1)):
                     with self.subTest(terminal_built=terminal_built):
@@ -192,4 +194,9 @@ class ReadinessTests(unittest.TestCase):
                         config_section, images_section = report.split("\nLocal images and GPU\n", 1)
                         self.assertIn("OK    Terminal server key file", config_section)
                         self.assertIn(f"{expected:<4}  Local image {terminal}", images_section)
+                        self.assertIn("WARN  Docker Engine — 27.5.1 — Open Terminal uses legacy bridge isolation",
+                                      config_section)
+                        if not terminal_built:
+                            self.assertIn("No such image Run loaf build, or loaf restore images on an offline host.",
+                                          images_section)
                         self.assertNotIn("\nTerminal\n", report)

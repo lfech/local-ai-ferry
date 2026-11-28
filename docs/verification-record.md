@@ -4,6 +4,127 @@
 
 Older entries use the current command and project names in examples.
 
+## 2026-11-28 11:55:19 +0100 — Own deployment files and loaf restart
+
+- Environment: as in the entry below; images built from the cache with the
+  checkout's settings and the terminal server enabled in a scratch
+  configuration directory, removed afterwards with everything else.
+- Docker-free suite: **336 tests, all passed**, 64 skipped. New tests cover
+  the restart plan, restart with and without a profile, the refusals without
+  a serving profile, with both and in a dry run, the running installation's
+  files for a project with its own `compose.yml` and an old link, the project
+  check with settings or `--config-dir`, and the pointer from
+  `link-docker-project`.
+- With `RUN_DOCKER_TESTS=1`: `tests.test_docker` **41 ran**; three tests
+  failed while they still relied on a project-root Compose file. After their
+  rewrite, `DockerTests` **5 passed**, including the stop tests with the
+  packaged downloader and the model merge through the CLI.
+- Manual run on CPU in a new directory prepared by `loaf setup`, without a
+  link: `restart` without a running profile refused and named
+  `restart offline`; `run offline --cpu`, then `restart --cpu` replaced the
+  offline containers and reported them ready; `restart online --cpu` switched
+  profiles, WebUI answered `/health`, and `stop` removed every container.
+- Not run: the GPU, Open Terminal Docker and catalog groups, release builds
+  and `release_handoff.py`, whose cleanup changed to `loaf docker rm all`.
+
+## 2026-11-28 11:35:00 +0100 — Fixes for the audit of commit c223ab7
+
+- Environment: Debian 13 in WSL2, Docker Engine 26.1.5, Compose 2.26.1-4,
+  RTX 4070 Ti SUPER, Python 3.13.5. The checkout's `.venv` for the
+  Docker-free suite and a scratch virtualenv with the editable checkout and
+  the pinned test packages for the badge runs. Images were built from the
+  cache with the checkout's settings and the terminal server enabled in a
+  scratch configuration directory. Docker held nothing at the start and holds
+  nothing afterwards; the BuildKit cache stays.
+- Docker-free suite: **338 tests, all passed**, 64 skipped.
+- Full suite with `loaf test -v --badges` and the Docker, GPU, Open Terminal
+  and catalog opt-ins (11:22:28 entry): **338 ran, 337 passed, 1 failed**,
+  667 s. `test_docker_rm_removes_exactly_the_deployments_resources` still
+  passed the former `--yes`, which now only names `--force`; the failed run
+  left its volume and network behind, which were removed by hand. After the
+  fix, `loaf test --badges` with `RUN_DOCKER_TESTS=1` (11:33:05 entry):
+  **338 ran, all passed**, 11 skipped, among them the four Open Terminal
+  Docker tests, so the Open Terminal badge shows that run's 15 cases.
+- Manual checks: plain `setup` in an empty directory with the checkout's
+  loaf created settings and guides but no `docker-project` link, and
+  `run offline --cpu --dry-run` found the packaged Compose file. A second
+  `setup` kept both files and named `--force`; `setup docs config --force`
+  replaced them. `setup --terminal-server-key` and `docker rm all --yes` named
+  their new form. In a copy of the working tree, the source setup command
+  ended with `source .venv/bin/activate`. `run offline --dry-run` with a
+  missing key refused and named `./loaf --config-dir … setup terminal-server-key`.
+- Not run: the CPU model workflows, release builds and `release_handoff.py`,
+  the Debian package checks outside the suite, setup steps that use APT and a
+  Docker daemon restart for the new restart policy, which the Compose
+  contract test checks in the resolved configuration.
+
+## 2026-11-28 11:33:05 +0100 — Test badge run
+
+`loaf test --badges` passed on Linux with Python 3.13.5.
+Unittest reported 338 cases and 11 skips.
+Enabled test options were `RUN_DOCKER_TESTS=1`.
+
+| Group | Passed / executed |
+| --- | ---: |
+| CLI baseline | 276/276 |
+| Docker | 36/36 |
+| Open Terminal | 15/15 |
+
+## 2026-11-28 11:22:28 +0100 — Test badge run
+
+`loaf test --badges` failed on Linux with Python 3.13.5.
+Unittest reported 338 cases and 0 skips.
+Enabled test options were `RUN_DOCKER_TESTS=1`, `RUN_GPU_TESTS=1`, `RUN_CATALOG_TESTS=1`, `RUN_TERMINAL_SERVER_TESTS=1`.
+
+| Group | Passed / executed |
+| --- | ---: |
+| CLI baseline | 276/276 |
+| Docker | 35/36 |
+| Open Terminal | 19/19 |
+| GPU inference | 6/6 |
+| Model catalog | 1/1 |
+
+## 2026-11-28 10:10:02 +0100 — Independent audit of commit c223ab7
+
+- Environment: Debian 13 in WSL2, Docker Engine 26.1.5, Compose 2.26.1-4,
+  RTX 4070 Ti SUPER, Python 3.13.5. A fresh clone of commit c223ab7 in a
+  scratch directory, prepared with the README's source setup command and
+  `loaf setup tests`. Docker held no containers, images or volumes at the
+  start; everything the audit created was removed afterwards, the BuildKit
+  cache stays. Only this entry changed in the checkout.
+- Docker-free suite in the checkout's `.venv`: **334 tests, all passed**, 63
+  skipped.
+- Full suite in the clone with `RUN_DOCKER_TESTS=1 RUN_GPU_TESTS=1
+  RUN_TERMINAL_SERVER_TESTS=1 RUN_CATALOG_TESTS=1`: **334 ran, 333 passed, 1
+  error, none skipped**, 634 s. The error in
+  `test_model_archive_mirrors_the_store_without_restarting_connected_services`
+  was `No space left on device` in `/tmp`, a 7.6 GB tmpfs that the audit's
+  own backup copies half filled. Run alone after freeing them, it **passed**.
+- Real workflow on the GPU with the checkout's settings (CUDA 12 recipe,
+  terminal server enabled): `setup`, `setup --terminal-server-key`, `build`,
+  `download`, `run offline`; sign-up, a reply from Granite-4.0-H-350M and a
+  saved chat through the Open WebUI API. A full `backup` (seven types,
+  1.9 GB, 84 s) and `backup --verify` passed. After `docker rm all --yes`, the
+  backup folder was copied elsewhere and `./loaf setup`, `./loaf restore`
+  and `./loaf run offline` ran in it: the account signed in, the saved chat
+  was unchanged and a new reply arrived. `stop online` kept offline serving
+  and the terminal server; `run online` and then `stop offline` kept the
+  online services and the terminal server. Standalone setup in an empty
+  directory with the backup's launcher and `restore --dry-run` worked.
+- Observed problems, reported to the author:
+  - After `restore` brought `source` into a project that standalone setup had
+    prepared, setup by another release replaced `docs/` with its guides. The
+    checkout's tracked guides were deleted or changed and an uncommitted edit
+    in `docs/instructions/development.md` was lost. Reproduced by setting
+    `docs/.loaf-docs` to `0.4.0` before `./loaf setup`.
+  - `run offline --dry-run` succeeded with a missing terminal key; the real
+    run and `backup --dry-run` refused it.
+  - After the source setup command, the printed key command named the
+    bootstrap interpreter without `PYTHONPATH` and failed with
+    `No module named loaf`.
+- Not run: the CPU model workflows, release builds and `release_handoff.py`,
+  `upgrade`, setup steps that use APT, and a Docker daemon restart.
+
 ## 2026-11-28 04:15:50 +0100 — loaf run and profile stops
 
 - Environment: Debian 13 in WSL2, Docker Engine 26.1.5, Compose 2.26.1-4,

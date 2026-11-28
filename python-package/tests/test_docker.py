@@ -73,6 +73,13 @@ class ComposeContractTests(unittest.TestCase):
                     self.assertEqual(service["scale"], 1)
                     self.assertEqual(service["pull_policy"], "never")
 
+    def test_serving_services_and_the_terminal_server_restart_with_docker(self):
+        rendered = compose_config(profiles=(*cli.PROFILES, "terminal"))["services"]
+        for name, service in rendered.items():
+            with self.subTest(service=name):
+                # A prepared downloader must not start by itself on an offline host.
+                self.assertEqual(service["restart"], "no" if name == "ollama-online" else "unless-stopped")
+
     def test_only_core_images_have_local_build_contexts(self):
         builders = {name for name, service in self.services.items() if "build" in service}
         self.assertEqual(builders, {"ollama-online", "ollama-offline", "open-webui"})
@@ -213,7 +220,6 @@ class ComposeContractTests(unittest.TestCase):
     def test_ini_settings_reach_compose_and_environment_overrides_still_win(self):
         with tempfile.TemporaryDirectory() as folder:
             project = Path(folder)
-            (project / "docker-project").symlink_to(DATA, target_is_directory=True)
             (project / "config.ini").write_text(
                 "[images]\nollama_image = registry.example/ollama:pinned\n"
                 "webui_image = registry.example/webui:pinned\n"
@@ -419,8 +425,9 @@ class DockerTests(unittest.TestCase):
         store_shell(target_volume, "mkdir -p /ollama/models /ollama/config; printf local > /ollama/config/local.model")
         with tempfile.TemporaryDirectory(prefix="loaf-model-transfer-") as folder:
             project = Path(folder)
-            compose = {"services": {"ollama-online": {"image": DEFAULT_IMAGES[0]}}}
-            (project / "compose.yml").write_text(json.dumps(compose), encoding="utf-8")
+            # setup's settings make the directory a project with the packaged deployment files.
+            (project / "config").mkdir()
+            (project / "config/config.ini").touch()
             # Every backup folder carries a launcher; the fixture stands in for the standalone executable.
             (project / "dist").mkdir()
             (project / "dist/loaf").write_bytes(transfer.EXECUTABLE_HEADER + b"\n__LOAF_PAYLOAD__\n\x1f\x8bfixture")
@@ -435,33 +442,25 @@ class DockerTests(unittest.TestCase):
             self.assertEqual(store_shell(target_volume, "ls /ollama/config").split(), ["source.model"])
 
     def start_stop_fixture(self):
+        """A deployment with settings whose downloader runs from the packaged Compose file in its own namespace."""
         folder = tempfile.TemporaryDirectory(prefix="loaf-stop-")
         self.addCleanup(folder.cleanup)
         project = Path(folder.name)
+        (project / "config").mkdir()
+        (project / "config/config.ini").touch()
         version = f"loaf-stop-test-{uuid4().hex}"
         namespace = config.namespace(version)
-        volume = f"{namespace}-data"
-        (project / "compose.yml").write_text(json.dumps({
-            "services": {
-                "worker": {
-                    "image": DEFAULT_IMAGES[0],
-                    "pull_policy": "never",
-                    "profiles": ["offline"],
-                    "init": True,
-                    "entrypoint": ["/bin/sleep", "180"],
-                    "network_mode": "none",
-                    "volumes": ["data:/data"],
-                },
-            },
-            "volumes": {"data": {"name": volume}},
-        }), encoding="utf-8")
+        volume = f"{namespace}-ollama"
+        image = transfer.image_names(namespace)[0]
+        command(["docker", "image", "tag", DEFAULT_IMAGES[0], image])
+        self.addCleanup(command, ["docker", "image", "rm", image])
         compose = cli.Compose(project, namespace=namespace)
 
         def invoke(*args):
-            return compose_command(compose, cli.Step(("offline",), args))
+            return compose_command(compose, cli.Step(("download",), args))
 
         self.addCleanup(invoke, "down", "--volumes", "--timeout", "5")
-        invoke("up", "-d", "--no-build", "--pull", "never")
+        invoke("up", "-d", "--no-build", "--pull", "never", "ollama-online")
         stop = [sys.executable, "-m", "loaf", "--namespace", version, "stop"]
         return invoke, stop, project, volume
 
@@ -499,10 +498,10 @@ class DockerTests(unittest.TestCase):
             listing = command([*loaf, "ps"])
             for name in (f"{namespace}-ollama-offline-1", workspace, image, volume, network):
                 self.assertIn(name, listing)
-            refused = subprocess.run([*loaf, "rm", "volumes", "--yes"], capture_output=True, text=True)
+            refused = subprocess.run([*loaf, "rm", "volumes", "--force"], capture_output=True, text=True)
             self.assertEqual(refused.returncode, 1)
             self.assertIn("still has 2 containers", refused.stderr)
-            self.assertIn("Removed 7 Docker resources", command([*loaf, "rm", "all", "--yes"]))
+            self.assertIn("Removed 7 Docker resources", command([*loaf, "rm", "all", "--force"]))
             self.assertIn("Containers: none", command([*loaf, "ps"]))
         for kind, name in (("container", workspace), ("network", network), ("volume", volume), ("image", image)):
             self.assertEqual(subprocess.run(["docker", kind, "inspect", name], capture_output=True).returncode, 1, name)
@@ -510,10 +509,10 @@ class DockerTests(unittest.TestCase):
 
     def test_stop_keeps_container_when_removal_is_disabled(self):
         invoke, stop, project, _ = self.start_stop_fixture()
-        container = invoke("ps", "--quiet", "worker").strip()
+        container = invoke("ps", "--quiet", "ollama-online").strip()
         self.assertTrue(container)
         command([*stop, "--no-remove-containers"], cwd=project)
-        self.assertEqual(invoke("ps", "--all", "--quiet", "worker").strip(), container)
+        self.assertEqual(invoke("ps", "--all", "--quiet", "ollama-online").strip(), container)
         self.assertEqual(
             command(["docker", "inspect", "--format", "{{.State.Running}}", container]).strip(),
             "false",
@@ -522,17 +521,17 @@ class DockerTests(unittest.TestCase):
     def test_stop_removes_container_and_preserves_its_named_volume(self):
         invoke, stop, project, volume = self.start_stop_fixture()
         peer, _, _, _ = self.start_stop_fixture()
-        container = invoke("ps", "--quiet", "worker").strip()
-        peer_container = peer("ps", "--quiet", "worker").strip()
+        container = invoke("ps", "--quiet", "ollama-online").strip()
+        peer_container = peer("ps", "--quiet", "ollama-online").strip()
         self.assertTrue(container)
         self.assertTrue(peer_container)
-        invoke("exec", "-T", "worker", "sh", "-c", "printf persisted >/data/marker")
+        invoke("exec", "-T", "ollama-online", "sh", "-c", "printf persisted >/ollama/marker")
         command(stop, cwd=project)
-        self.assertEqual(invoke("ps", "--all", "--quiet", "worker").strip(), "")
-        self.assertEqual(peer("ps", "--quiet", "worker").strip(), peer_container)
+        self.assertEqual(invoke("ps", "--all", "--quiet", "ollama-online").strip(), "")
+        self.assertEqual(peer("ps", "--quiet", "ollama-online").strip(), peer_container)
         self.assertEqual(command(["docker", "volume", "inspect", "--format", "{{.Name}}", volume]).strip(), volume)
-        invoke("up", "-d", "--no-build", "--pull", "never")
-        replacement = invoke("ps", "--quiet", "worker").strip()
+        invoke("up", "-d", "--no-build", "--pull", "never", "ollama-online")
+        replacement = invoke("ps", "--quiet", "ollama-online").strip()
         self.assertTrue(replacement)
         self.assertNotEqual(replacement, container)
-        self.assertEqual(invoke("exec", "-T", "worker", "cat", "/data/marker"), "persisted")
+        self.assertEqual(invoke("exec", "-T", "ollama-online", "cat", "/ollama/marker"), "persisted")

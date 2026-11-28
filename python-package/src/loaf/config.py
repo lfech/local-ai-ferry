@@ -362,7 +362,7 @@ def shared_system_deployment(layer_directories: tuple[Path, ...], name: str) -> 
 def read_terminal_secret(path: Path) -> bytes:
     if not path.is_file():
         raise FileNotFoundError(f"Terminal server key file is missing: {path}. Create it with 'loaf setup "
-                                "--terminal-server-key'. Run in a backup folder, that takes the backup's key.")
+                                "terminal-server-key'. Run in a backup folder, that takes the backup's key.")
     # Read only enough to detect an overlong key file, without exposing its contents.
     with path.open("rb") as source:
         key = source.read(515)

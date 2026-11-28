@@ -73,10 +73,15 @@ class TerminalServerSettingsTests(unittest.TestCase):
         with TemporaryDirectory() as folder:
             project = Path(folder)
             (project / "config").mkdir()
-            (project / "docker-project").symlink_to(DATA, target_is_directory=True)
             (project / "config/config.ini").write_text(
                 "[terminal_server]\nenabled=true\nsecret_file=private/terminal-server.key\ncpus=3\n"
             )
+            # A dry run refuses a missing key like a real run, and names the command that creates it.
+            with redirect_stderr(io.StringIO()) as errors:
+                self.assertEqual(cli.main(["run", "offline", "--project-dir", folder, "--dry-run"]), 1)
+            self.assertIn("setup terminal-server-key", errors.getvalue())
+            (project / "private").mkdir()
+            (project / "private/terminal-server.key").write_text("k" * 64)
             settings = config.load(DATA / "config", project / "config")
             compose = cli.Compose(project, settings=settings)
             self.assertEqual(compose.variables()["LOAF_TERMINAL_SECRET_FILE"], str(project / "private/terminal-server.key"))
@@ -138,7 +143,6 @@ class TerminalServerSettingsTests(unittest.TestCase):
         with TemporaryDirectory() as folder:
             project = Path(folder)
             (project / "config").mkdir()
-            (project / "docker-project").symlink_to(DATA, target_is_directory=True)
             settings = project / "config/config.ini"
             settings.write_text("[terminal_server]\nenabled=true\n")
             with patch.object(cli.Compose, "execute") as execute, redirect_stderr(io.StringIO()) as errors:
@@ -175,7 +179,6 @@ class TerminalServerSettingsTests(unittest.TestCase):
     def test_missing_runtime_apt_source_fails_before_changing_services(self):
         with TemporaryDirectory() as folder:
             project = Path(folder)
-            (project / "docker-project").symlink_to(DATA, target_is_directory=True)
             (project / "config").mkdir()
             (project / config.TERMINAL_SECRET).write_text("a" * 32)
             (project / "config/config.ini").write_text(

@@ -21,8 +21,9 @@ tools. Ollama continues to handle inference. [Open Terminal 0.17.20 license](htt
 
 ## Enable and connect
 
-Add or update these settings in `config/config.ini`. The checkout enables the
-service. The packaged settings default to disabled. The default base image is
+Add or update these settings in `config/config.ini`. The checkout's and the
+packaged settings leave the service disabled, and loaf ignores the other
+`[terminal_server]` settings, such as `network`, until it is enabled. The default base image is
 `ghcr.io/open-webui/open-terminal:0.17.20-slim`, configured as
 `[images] terminal_server_image`. The connection and model
 settings below were verified with Open WebUI v0.13.4. Set `[images] webui_image`
@@ -37,14 +38,16 @@ enabled = true
 secret_file = config/terminal-server.key
 ```
 
-`loaf setup --terminal-server-key` creates the key at the configured path with
-owner-only permissions and keeps an existing key; plain setup creates no key.
+`loaf setup terminal-server-key` creates the key at the configured path with
+owner-only permissions and keeps an existing key unless `--force` replaces it;
+plain setup creates no key. After a replacement, update the key of the saved
+terminal connection in Open WebUI's admin settings.
 A restore of the `terminal` type brings the backup's key instead. For a new
 deployment, run these commands while connected.
 
 ```bash
 loaf setup
-loaf setup --terminal-server-key
+loaf setup terminal-server-key
 loaf build
 loaf run offline
 ```
@@ -335,7 +338,7 @@ apt_repository_dir = /media/transfer/apt-mirror
 deb [trusted=yes] file:/run/loaf-apt/repository ./
 ```
 
-To try this, run `loaf setup --create-file-repository` while connected after
+To try this, run `loaf setup create-file-repository` while connected after
 building the terminal image. [What it creates](cli-help.md#setup) Then ask the
 model to install one of the tools that it prints. The repository directory is
 not part of any backup type.

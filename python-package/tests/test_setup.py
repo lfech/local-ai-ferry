@@ -20,7 +20,6 @@ class SetupTests(unittest.TestCase):
     def quick_setup_project(self, directory):
         """A source checkout: setup prepares its virtualenv instead of a standalone deployment."""
         project = Path(directory).resolve()
-        (project / "compose.yml").touch()
         (project / setup.PYTHON_PACKAGE_DIR).mkdir()
         (project / setup.PYTHON_PACKAGE_DIR / "pyproject.toml").touch()
         return project
@@ -29,9 +28,9 @@ class SetupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             project = self.quick_setup_project(directory)
 
-            def install(path, *, with_docker_deps, allow_root):
+            def install(path, parts, *, allow_root):
                 self.assertEqual(path, project)
-                self.assertFalse(with_docker_deps)
+                self.assertEqual(parts, ["venv", "toolkit"])
                 self.assertFalse(allow_root)
                 with self.assertRaises(cli.AlreadyRunningError), cli.project_lock(project / ".run.lock"):
                     self.fail("setup released its checkout lock")
@@ -42,8 +41,8 @@ class SetupTests(unittest.TestCase):
                 patch.object(cli, "Compose") as compose,
             ):
                 self.assertEqual(cli.main(["--project-dir", directory, "setup"]), 0)
-            prepare.assert_called_once_with(project, with_docker_deps=False, allow_root=False)
-            # Only setup --terminal-server-key creates the key. The default configuration never replaces files.
+            prepare.assert_called_once_with(project, ["venv", "toolkit"], allow_root=False)
+            # Only setup terminal-server-key creates the key. The default configuration never replaces files.
             self.assertFalse((project / cli.config.TERMINAL_SECRET).exists())
             self.assertIn("# ollama_image = ", (project / "config/config.ini").read_text(encoding="utf-8"))
             self.assertEqual((project / "config/models.ini").read_bytes(),
@@ -58,10 +57,10 @@ class SetupTests(unittest.TestCase):
             config_dir.mkdir()
             (config_dir / "config.ini").write_text("[terminal_server]\nsecret_file=private/terminal.key\n")
             key = project / "private/terminal.key"
-            command = ["--project-dir", directory, "setup", "--config-dir", str(config_dir), "--terminal-server-key"]
+            command = ["--project-dir", directory, "setup", "--config-dir", str(config_dir), "terminal-server-key"]
             with (
                 patch.object(setup, "install") as install,
-                patch.object(setup, "setup_standalone") as standalone,
+                patch.object(setup, "prepare_configuration") as configuration,
                 redirect_stdout(StringIO()) as log,
             ):
                 self.assertEqual(cli.main([*command, "--dry-run"]), 0)
@@ -69,12 +68,31 @@ class SetupTests(unittest.TestCase):
                 self.assertEqual(cli.main(command), 0)
                 original = key.read_bytes()
                 self.assertEqual(cli.main(command), 0)
-            self.assertEqual(key.read_bytes(), original)
+                self.assertEqual(key.read_bytes(), original)
+                self.assertIn(f"Keep the existing terminal server key at {key}. Add --force to replace it.",
+                              log.getvalue())
+                self.assertEqual(cli.main([*command, "--force"]), 0)
+            self.assertNotEqual(key.read_bytes(), original)
+            self.assertIn("Replaced the terminal server key", log.getvalue())
             self.assertEqual(key.stat().st_mode & 0o777, 0o600)
             self.assertNotIn(original.decode(), log.getvalue())
+            self.assertEqual(list(key.parent.iterdir()), [key])
             self.assertFalse((project / "config").exists())
             install.assert_not_called()
-            standalone.assert_not_called()
+            configuration.assert_not_called()
+
+    def test_parts_that_belong_to_the_other_installation_are_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.quick_setup_project(directory)
+            for arguments, bundled, message in (
+                (("setup", "docs"), None, "A source checkout carries its own guides in docs/"),
+                (("setup", "venv"), Path(directory) / "runtime", "setup venv prepares a source checkout's virtualenv"),
+            ):
+                with (self.subTest(arguments=arguments), patch.object(setup, "bundled_release", return_value=bundled),
+                      redirect_stderr(StringIO()) as errors, self.assertRaises(SystemExit)):
+                    cli.main(["--project-dir", directory, *arguments])
+                self.assertIn(message, errors.getvalue())
+            self.assertFalse((Path(directory) / "docs").exists())
 
     def test_setup_dry_run_does_not_execute_or_lock(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -84,7 +102,7 @@ class SetupTests(unittest.TestCase):
                     self.assertEqual(cli.main(["--project-dir", directory, "setup", "--dry-run"]), 0)
             install.assert_not_called()
             run.assert_not_called()
-            self.assertIn("cache Python wheels", output.getvalue())
+            self.assertIn("cache the Python wheels", output.getvalue())
             self.assertFalse((project / ".run.lock").exists())
 
     def test_setup_preserves_installer_failure_and_links_to_guidance(self):
@@ -106,7 +124,7 @@ class SetupTests(unittest.TestCase):
             with patch.object(setup, "install") as install, redirect_stdout(StringIO()) as log:
                 self.assertEqual(cli.main(["--project-dir", directory, "install", "--dry-run"]), 0)
             self.assertIn(".venv", log.getvalue())
-            self.assertEqual(set(project.iterdir()), {project / "compose.yml", project / setup.PYTHON_PACKAGE_DIR})
+            self.assertEqual(set(project.iterdir()), {project / setup.PYTHON_PACKAGE_DIR})
         install.assert_not_called()
 
     def test_wheel_installed_setup_outside_a_checkout_prepares_a_deployment(self):
@@ -125,7 +143,7 @@ class SetupTests(unittest.TestCase):
             self.assertTrue((project / "config/config.ini").is_file())
             self.assertTrue((project / "config/models.ini").is_file())
             self.assertFalse((project / cli.config.TERMINAL_SECRET).exists())
-            self.assertTrue((project / "docker-project/compose.yml").is_file())
+            self.assertFalse((project / "docker-project").exists())
 
     def test_source_setup_as_root_needs_allow_root_for_another_owners_checkout(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -271,12 +289,14 @@ class SetupTests(unittest.TestCase):
                 patch.object(setup, "install_toolkit"),
                 redirect_stdout(StringIO()) as output,
             ):
-                command = ["--project-dir", directory, "setup", "--with-docker-deps"]
+                command = ["--project-dir", directory, "setup", "docker-deps"]
                 self.assertEqual(cli.main([*command, "--dry-run"]), 0)
                 docker.assert_not_called()
                 self.assertIn("Debian Docker", output.getvalue())
                 self.assertEqual(cli.main(command), 0)
             docker.assert_called_once_with(project)
+            # Only the named part runs.
+            self.assertFalse((project / "config/config.ini").exists())
 
     def test_release_setup_creates_a_project_and_reuses_it(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -302,12 +322,20 @@ class SetupTests(unittest.TestCase):
                 self.assertEqual((project / "config/models.ini").read_bytes(),
                                  (cli.assets.DATA_DIR / "config/models.ini").read_bytes())
                 self.assertFalse((project / cli.config.TERMINAL_SECRET).exists())
-                self.assertTrue((project / "docker-project/compose.yml").is_file())
+                # The project uses this loaf's Docker project without a docker-project link.
+                self.assertFalse((project / "docker-project").exists())
+                with redirect_stdout(StringIO()) as plan:
+                    self.assertEqual(cli.main(["--project-dir", str(project), "-v", "run", "offline", "--dry-run"]), 0)
+                self.assertIn(f"--file {cli.assets.DATA_DIR / 'compose.yml'}", plan.getvalue())
                 self.assertEqual((project / "docs/.loaf-docs").read_text().strip(), cli.assets.release_version())
                 self.assertTrue((project / "docs/README.md").is_file())
                 configuration.write_text("# local changes\n", encoding="utf-8")
                 self.assertEqual(cli.main(command), 0)
-            self.assertEqual(configuration.read_text(encoding="utf-8"), "# local changes\n")
+                self.assertEqual(configuration.read_text(encoding="utf-8"), "# local changes\n")
+                self.assertIn(f"Keep the existing {configuration}. Add --force to replace it with the commented "
+                              "defaults.", log.getvalue())
+                self.assertEqual(cli.main([*command, "config", "--force"]), 0)
+            self.assertIn("# ollama_image = ", configuration.read_text(encoding="utf-8"))
             self.assertFalse((project / ".venv").exists())
             self.assertFalse((project / ".git").exists())
             self.assertFalse((project / setup.PYTHON_PACKAGE_DIR).exists())
@@ -351,7 +379,7 @@ class SetupTests(unittest.TestCase):
             outside.mkdir()
             (project / "config").symlink_to(outside, target_is_directory=True)
             with self.assertRaisesRegex(setup.SetupError, "local configuration directory"):
-                setup.setup_standalone(project)
+                setup.prepare_configuration(project / "config", (cli.assets.DATA_DIR / "config",))
             self.assertEqual(list(outside.iterdir()), [])
             self.assertFalse((project / "docker-project").is_symlink())
 

@@ -1,4 +1,4 @@
-"""Deployment resolution, settings layers, the docker-project link and bundled guides."""
+"""Deployment files, settings layers, system mode and bundled guides."""
 
 from contextlib import redirect_stderr, redirect_stdout
 import grp
@@ -13,54 +13,39 @@ from unittest.mock import patch
 from loaf import assets, cli, config, docs, locks, setup
 
 
-class DockerProjectLinkTests(unittest.TestCase):
+class DeploymentFilesTests(unittest.TestCase):
+    """Every installation uses its own deployment files; a project holds settings and data."""
+
     def setUp(self):
-        folder = tempfile.TemporaryDirectory(prefix="loaf-link-")
+        folder = tempfile.TemporaryDirectory(prefix="loaf-files-")
         self.addCleanup(folder.cleanup)
-        self.root = Path(folder.name).resolve()
-        self.project = self.root / "project"
-        self.project.mkdir()
-        self.link = self.project / assets.DOCKER_PROJECT
+        self.project = Path(folder.name).resolve()
 
-    def earlier_release(self):
-        data = self.root / "runtime/old/python/lib/python3.13/site-packages/loaf/data"
-        data.mkdir(parents=True)
-        (data.parent / "cli.py").touch()
-        (data / "compose.yml").write_text("services: {}\n", encoding="utf-8")
-        self.link.symlink_to(data, target_is_directory=True)
-        return data
+    def plan(self, *arguments):
+        with redirect_stdout(io.StringIO()) as output, redirect_stderr(io.StringIO()) as errors:
+            code = cli.main(["--project-dir", str(self.project), "-v", *arguments, "run", "offline", "--dry-run"])
+        return code, output.getvalue(), errors.getvalue()
 
-    def test_an_earlier_release_link_uses_and_updates_to_this_launcher(self):
-        data = self.earlier_release()
-        self.assertEqual(assets.compose_path(self.project), assets.DATA_DIR / "compose.yml")
-        with redirect_stdout(io.StringIO()) as output:
-            assets.link_docker_project(self.project, dry_run=True)
-            self.assertEqual(Path(os.path.realpath(self.link)), data)
-            assets.link_docker_project(self.project, dry_run=False)
-        self.assertTrue(self.link.samefile(assets.DATA_DIR))
-        self.assertIn("Update", output.getvalue())
-        self.assertFalse([path for path in self.project.iterdir() if path.name.startswith(".loaf-link-")])
+    def test_a_project_with_settings_uses_this_loafs_files_and_ignores_its_own(self):
+        (self.project / "config").mkdir()
+        (self.project / "config/config.ini").touch()
+        # Neither a Compose file in the project nor a docker-project link from an earlier release changes them.
+        (self.project / "compose.yml").write_text("services: {}\n", encoding="utf-8")
+        (self.project / "docker-project").symlink_to(self.project, target_is_directory=True)
+        code, output, _ = self.plan()
+        self.assertEqual(code, 0)
+        self.assertIn(f"--file {assets.DATA_DIR / 'compose.yml'}", output)
+        self.assertNotIn(f"--file {self.project / 'compose.yml'}", output)
 
-    def test_a_removed_runtime_still_resolves_and_setup_repairs_the_link(self):
-        data = self.earlier_release()
-        for path in sorted(data.parent.rglob("*"), reverse=True):
-            path.unlink() if path.is_file() else path.rmdir()
-        data.parent.rmdir()
-        self.assertFalse(self.link.exists())
-        self.assertEqual(assets.compose_path(self.project), assets.DATA_DIR / "compose.yml")
-        with redirect_stdout(io.StringIO()):
-            setup.setup_standalone(self.project)
-        self.assertTrue(self.link.samefile(assets.DATA_DIR))
-
-    def test_custom_directories_stay_in_use_and_are_never_replaced(self):
-        custom = self.root / "custom"
-        custom.mkdir()
-        (custom / "compose.yml").write_text("services: {}\n", encoding="utf-8")
-        self.link.symlink_to(custom, target_is_directory=True)
-        self.assertEqual(assets.compose_path(self.project), self.link / "compose.yml")
-        with self.assertRaisesRegex(FileExistsError, "already exists"):
-            assets.link_docker_project(self.project, dry_run=False)
-        self.assertEqual(Path(os.path.realpath(self.link)), custom)
+    def test_a_directory_without_settings_is_no_project(self):
+        (self.project / "compose.yml").write_text("services: {}\n", encoding="utf-8")
+        with self.assertRaises(SystemExit):
+            self.plan()
+        settings = self.project / "settings"
+        settings.mkdir()
+        (settings / "config.ini").touch()
+        # The settings of --config-dir count as well.
+        self.assertEqual(self.plan("--config-dir", str(settings))[0], 0)
 
 
 class SettingsLayerTests(unittest.TestCase):
@@ -72,7 +57,7 @@ class SettingsLayerTests(unittest.TestCase):
         self.system.mkdir()
         self.project = self.root / "project"
         (self.project / "config").mkdir(parents=True)
-        (self.project / "compose.yml").touch()
+        (self.project / "config/config.ini").touch()
         environment = patch.dict(os.environ, {"LOAF_SYSTEM_CONFIG_DIR": str(self.system)})
         environment.start()
         self.addCleanup(environment.stop)
@@ -200,12 +185,12 @@ class SystemModeTests(unittest.TestCase):
         )
         key = self.system_config / "terminal-server.key"
         with patch.object(setup, "SYSTEM_GROUP", group):
-            # Plain setup leaves the key to setup --terminal-server-key, which the Debian package runs.
+            # Plain setup leaves the key to setup terminal-server-key, which the Debian package runs.
             status, _, output, _ = self.run_cli("--system", "setup")
             self.assertEqual(status, 0)
             self.assertFalse(key.exists())
             self.assertIn("prepared the system deployment", output)
-            status, _, output, _ = self.run_cli("--system", "setup", "--terminal-server-key")
+            status, _, output, _ = self.run_cli("--system", "setup", "terminal-server-key")
         self.assertEqual(status, 0)
         self.assertEqual(stat.S_IMODE(key.stat().st_mode), 0o640)
         self.assertEqual(key.stat().st_gid, os.getgid())
@@ -247,7 +232,7 @@ class GuideTests(unittest.TestCase):
             self.assertEqual(cli.main(["docs", "missing"]), 1)
         self.assertIn("No guide named 'missing'", errors.getvalue())
 
-    def test_links_point_into_the_exported_docs_the_deployment_data_or_the_release(self):
+    def test_links_point_into_the_exported_docs_or_the_release(self):
         files = {
             PurePosixPath("README.md"): None,
             PurePosixPath("docs/launcher.md"): None,
@@ -263,7 +248,8 @@ class GuideTests(unittest.TestCase):
             files[PurePosixPath("docs/guide.md")] = guide
             rendered = docs.render(PurePosixPath("docs/guide.md"), files, "https://git.example/loaf/blob/v1")
         self.assertEqual(rendered, (
-            "[R](README.md) [S](launcher.md#select-models) [C](../docker-project/compose.yml) "
+            "[R](README.md) [S](launcher.md#select-models) "
+            "[C](https://git.example/loaf/blob/v1/python-package/src/loaf/data/compose.yml) "
             "[W](https://git.example/loaf/blob/v1/.github/workflows/verify.yml) [U](https://example.invalid/x) "
             "[A](#local)\n"
             "[RR](README.md) [RS](launcher.md#L2) [RW](https://git.example/loaf/blob/v1/.github/workflows/verify.yml#L3)\n"
@@ -279,9 +265,12 @@ class GuideTests(unittest.TestCase):
                 self.assertTrue((project / "docs/examples").is_dir())
                 self.assertTrue((project / "docs/loaf.1").is_file())
                 self.assertFalse(list(project.glob("docs/*-record.md")))
+                # Guides of another release and directories without a stamp stay unless force replaces them.
                 stamp.write_text("0.0.1\n", encoding="utf-8")
                 (project / "docs/obsolete.md").touch()
                 docs.export(project)
+                self.assertTrue((project / "docs/obsolete.md").exists())
+                docs.export(project, force=True)
                 self.assertFalse((project / "docs/obsolete.md").exists())
                 stamp.unlink()
                 (project / "docs/notes.md").touch()

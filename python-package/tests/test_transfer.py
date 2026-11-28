@@ -21,7 +21,7 @@ from time import sleep
 import unittest
 from unittest.mock import patch
 
-from loaf import assets, cli, config, setup, transfer
+from loaf import assets, cli, config, docs, setup, transfer
 from loaf.progress import Progress, wait_status
 from tests import DATA, ROOT
 
@@ -282,7 +282,7 @@ class TransferTests(unittest.TestCase):
                              b"fixture deb")
             self.assertIn(f"{self.docker_cache.relative_to(self.project)}/Packages", names)
             self.assertNotIn(f"{setup.INSTALL_CACHE}/scratch.txt", names)
-        stop = cli.Compose(self.project).command(cli.STOP_ALL)
+        stop = cli.Compose(self.project).command(cli.STOP_WITH_TERMINAL)
         self.assertLess(self.docker_calls.index(stop), next(
             index for index, call in enumerate(self.docker_calls) if transfer.SNAPSHOT_MODELS in call))
         progress = self.progress.getvalue()
@@ -434,8 +434,9 @@ class TransferTests(unittest.TestCase):
         restored = self.destination / "config/models.ini"
         self.assertEqual(os.readlink(restored), "model-examples/models.8gb.ini")
         self.assertEqual(restored.read_text(encoding="utf-8"), "[models.chat]\nmodel = hf.co/a/b:Q4_K_M\n")
-        # A deployment without a Compose file gets the packaged project, as standalone setup links it.
-        self.assertTrue((self.destination / assets.DOCKER_PROJECT).is_symlink())
+        # The restored settings make the directory a project that uses this loaf's Docker project, without a link.
+        self.assertFalse((self.destination / "docker-project").exists())
+        self.assertTrue((self.destination / "config/config.ini").is_file())
 
     def test_links_that_leave_their_backup_scope_are_refused(self):
         outside = self.root / "outside.ini"
@@ -547,7 +548,7 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(self.invoke("restore", "--archive", str(self.bundle), custom=False, project=self.destination),
                          0, self.progress.getvalue())
         next_line, = [line for line in self.output.getvalue().splitlines() if line.startswith("Next: ")]
-        self.assertTrue(next_line.endswith(" setup --terminal-server-key"), next_line)
+        self.assertTrue(next_line.endswith(" setup terminal-server-key"), next_line)
 
     def test_a_release_download_folder_is_no_backup_folder(self):
         # A release download holds loaf and the release's SHA256SUMS, but no archive that begins with loaf.json.
@@ -566,7 +567,7 @@ class TransferTests(unittest.TestCase):
         with patch.dict(os.environ, LOAF_RELEASE_EXECUTABLE=str(download / "loaf")):
             self.assertIsNone(transfer.find_bundle(project, None))
             with (patch.object(setup, "bundled_release", return_value=download / "runtime"),
-                  patch.object(setup, "setup_standalone") as prepared):
+                  patch.object(setup, "prepare_configuration") as prepared):
                 self.assertEqual(self.invoke("setup", custom=False, project=project), 0, self.progress.getvalue())
         prepared.assert_called_once()
         self.assertNotIn("restore", self.output.getvalue())
@@ -615,7 +616,7 @@ class TransferTests(unittest.TestCase):
                 self.assertEqual(cli.main(options), 0, progress.getvalue())
         warning = progress.getvalue()
         self.assertIn("holds no NVIDIA Container Toolkit packages: packages are missing", warning)
-        for command in ("loaf setup\n", "loaf setup --with-docker-deps\n", "apt-get download nvidia-container-toolkit"):
+        for command in ("loaf setup\n", "loaf setup toolkit\n", "apt-get download nvidia-container-toolkit"):
             self.assertIn(command, warning)
         with tarfile.open(fileobj=io.BytesIO(read_members(self.archive)["installers.tar"])) as installers:
             self.assertFalse([name for name in installers.getnames() if "/deb/nvidia/" in name])
@@ -708,8 +709,9 @@ class TransferTests(unittest.TestCase):
         with (
             patch.object(Path, "cwd", return_value=folder),
             patch.object(setup, "bundled_release", return_value=folder / "runtime"),
-            patch.object(setup, "setup_standalone") as prepared,
-            patch.object(setup, "install_backup_host_packages") as host_packages,
+            patch.object(setup, "prepare_configuration") as prepared,
+            patch.object(setup, "prepare_docker") as docker,
+            patch.object(setup, "install_toolkit") as toolkit,
             patch("loaf.cli.assets.system_deployment_installed", return_value=False),
         ):
             for arguments in (("status",), (None,)):
@@ -725,7 +727,7 @@ class TransferTests(unittest.TestCase):
             self.assertIn(f"Move the backup to {folder / 'backup'} and make {folder} the project.", self.output.getvalue())
             self.assertEqual({path.name: path.read_bytes() for path in folder.iterdir()}, before)
 
-            self.assertEqual(self.invoke("setup", "--with-docker-deps", custom=False, project=None), 0,
+            self.assertEqual(self.invoke("setup", "all", "docker-deps", "toolkit", custom=False, project=None), 0,
                              self.progress.getvalue())
             self.assertIn(f"{folder} is the project now", self.progress.getvalue())
             # The project finds the moved backup as its newest one, so the hint needs no --archive.
@@ -736,41 +738,19 @@ class TransferTests(unittest.TestCase):
         self.assertEqual({path.name: path.read_bytes() for path in moved.iterdir()}, before)
         self.assertTrue(transfer.is_bundle(moved))
         self.assertFalse(transfer.is_bundle(folder))
-        self.assertEqual(prepared.call_args.args[:2], (folder, folder / "config"))
-        host_packages.assert_called_once_with(folder)
+        self.assertEqual(prepared.call_args.args[0], folder / "config")
+        # The backup's installers supply the host packages without downloads.
+        docker.assert_called_once_with(folder, allow_downloads=False)
+        toolkit.assert_called_once_with(folder, allow_downloads=False)
         self.assertEqual((folder / self.docker_cache.relative_to(self.project) / "Packages").read_bytes(),
                          b"fixture package index")
         self.assertEqual((folder / "loaf").read_bytes(), self.executable.read_bytes())
         self.assertTrue(os.access(folder / "loaf", os.X_OK))
         self.assertEqual(config.load(folder / "config").port, 8818)
-        # Only setup --terminal-server-key creates a key, and this backup has none.
+        # Only setup terminal-server-key creates a key, and this backup has none.
         self.assertFalse((folder / config.TERMINAL_SECRET).exists())
         self.assertFalse(list(folder.glob(".loaf-*")))
         self.assertEqual([call for call in self.docker_calls if call[:2] != ["docker", "compose"]], [])
-
-    def test_link_docker_project_inside_a_backup_folder_makes_it_the_project_and_only_links(self):
-        self.assertEqual(self.invoke("backup", "config"), 0, self.progress.getvalue())
-        folder, before = self.copied_bundle("linked backup")
-        link = folder / assets.DOCKER_PROJECT
-        with (
-            patch.object(Path, "cwd", return_value=folder),
-            patch.object(setup, "bundled_release", return_value=folder / "runtime"),
-            patch.object(setup, "setup_standalone") as prepared,
-            patch("loaf.cli.assets.system_deployment_installed", return_value=False),
-        ):
-            self.assertEqual(self.invoke("setup", "--link-docker-project", "--dry-run", custom=False, project=None), 0,
-                             self.progress.getvalue())
-            self.assertIn(f"Move the backup to {folder / 'backup'} and make {folder} the project.\n"
-                          f"Link {link} to {assets.DATA_DIR}.\n", self.output.getvalue())
-            self.assertEqual({path.name: path.read_bytes() for path in folder.iterdir()}, before)
-            self.assertEqual(self.invoke("setup", "--link-docker-project", custom=False, project=None), 0,
-                             self.progress.getvalue())
-        self.assertIn(f"{folder} is the project now", self.progress.getvalue())
-        self.assertTrue(transfer.is_bundle(folder / "backup" / self.bundle.name))
-        self.assertTrue(link.is_symlink() and link.samefile(assets.DATA_DIR))
-        prepared.assert_not_called()
-        self.assertFalse((folder / "config").exists())
-        self.assertEqual(self.docker_calls, [])
 
     def test_system_restore_shares_files_with_the_group_and_keeps_the_terminal_key(self):
         self.add_terminal_volume()
@@ -830,7 +810,7 @@ class TransferTests(unittest.TestCase):
         with (
             patch.object(Path, "cwd", return_value=folder),
             patch.object(setup, "bundled_release", return_value=folder / "runtime"),
-            patch.object(setup, "setup_standalone"),
+            patch.object(setup, "prepare_configuration"),
             patch("loaf.cli.assets.system_deployment_installed", return_value=False),
         ):
             self.assertEqual(self.invoke("setup", custom=False, project=None), 0, self.progress.getvalue())
@@ -897,6 +877,15 @@ class TransferTests(unittest.TestCase):
         self.assertEqual((self.destination / ".git/HEAD").read_bytes(), (self.project / ".git/HEAD").read_bytes())
         self.assertFalse(list(self.destination.glob(".loaf-restore-*")))
 
+        # The checkout's guides replace those that standalone setup exported as a whole.
+        shutil.rmtree(self.destination / "docs")
+        (self.destination / "docs").mkdir()
+        for name in (docs.STAMP, "README.md", "loaf.1", "guide.md"):
+            (self.destination / "docs" / name).write_text("exported\n", encoding="utf-8")
+        self.assertEqual(self.invoke(*restore, custom=False, project=self.destination), 0, self.progress.getvalue())
+        self.assertEqual(sorted(path.name for path in (self.destination / "docs").iterdir()), ["guide-link.md", "guide.md"])
+        self.assertEqual((self.destination / "docs/guide.md").read_bytes(), b"Source documentation\n")
+
         # A file where the checkout has a directory stops the restore before any change.
         (self.destination / "compose.yml").write_text("old\n", encoding="utf-8")
         shutil.rmtree(self.destination / "docs")
@@ -925,7 +914,7 @@ class TransferTests(unittest.TestCase):
         self.add_terminal_volume()
         self.assertEqual(self.invoke("backup", "terminal"), 0, self.progress.getvalue())
         with patch.object(Path, "cwd", return_value=self.bundle):
-            self.assertEqual(self.invoke("setup", "--terminal-server-key", custom=False, project=self.destination),
+            self.assertEqual(self.invoke("setup", "terminal-server-key", custom=False, project=self.destination),
                              0, self.progress.getvalue())
         self.assertEqual((self.destination / config.TERMINAL_SECRET).read_bytes(), KEY)
 
@@ -934,11 +923,19 @@ class TransferTests(unittest.TestCase):
         self.assertIn("Save source, config, installers, images, models, webui to", self.output.getvalue())
         self.assertFalse(self.backup_dir.exists())
         self.assertEqual(self.invoke("backup", "project", "images"), 0, self.progress.getvalue())
+        created = self.output.getvalue()
         self.docker_calls.clear()
         self.assertEqual(self.invoke("backup", "--verify", "--archive", str(self.bundle), custom=False), 0)
         output = self.output.getvalue()
         for line in ("Archive format 3", "config", "installers", "images", "loaf/open-webui:latest  linux/amd64"):
             self.assertIn(line, output)
+        # Backup and verify print the hashes of the archive and the launcher to compare on another channel.
+        hashes = [f"{setup.file_digest(path)}  {path}" for path in (self.archive, self.bundle / "loaf")]
+        for line in hashes:
+            self.assertIn(f"\n{line}\n", created)
+            self.assertIn(f"\n{line}\n", output)
+        self.assertIn("Record them apart from the transfer media", created)
+        self.assertIn("Compare them with the values recorded when the backup was made", output)
         self.assertEqual(self.invoke("restore", "--dry-run", "--archive", str(self.bundle), custom=False,
                                      project=self.destination), 0)
         self.assertIn(f"Restore config, installers, images from {self.archive}", self.output.getvalue())

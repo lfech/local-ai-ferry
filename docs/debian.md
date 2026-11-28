@@ -101,7 +101,9 @@ If you select Python with pyenv, run the first command with that interpreter.
 The bootstrap uses APT for missing venv support only when APT owns that
 Python. It prepares `install-cache/wheels/`, installs the editable launcher
 in `.venv` from the local wheels, and prepares the NVIDIA Toolkit installers
-in `install-cache/deb/nvidia/`. Setup uses a complete local set for the host
+in `install-cache/deb/nvidia/`. It ends with the command that activates the
+virtualenv, `source .venv/bin/activate`; afterwards `loaf` works in that
+shell, and `./loaf` from the checkout root works in any shell. Setup uses a complete local set for the host
 architecture or fetches the missing installers on a connected host. Set up the
 runtime on a GPU serving host if its Docker daemon has never been configured
 for the toolkit.
@@ -119,10 +121,10 @@ For offline recovery, see [Disconnected installation](installation.md#disconnect
 
 ### Install Docker and cache its packages
 
-On a connected Debian 12 or 13 host, run setup with the Docker flag:
+On a connected Debian 12 or 13 host, add the `docker-deps` part to setup:
 
 ```bash
-PYTHONPATH=python-package/src python3 -m loaf setup --with-docker-deps
+PYTHONPATH=python-package/src python3 -m loaf setup all docker-deps
 ```
 
 On Debian 13, setup caches Debian's `docker.io`, `docker-cli`,

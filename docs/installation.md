@@ -8,7 +8,7 @@ brings its own Python. For a fresh deployment, use the
 [release executable](releases.md#run-the-executable) instead.
 
 The destination needs Docker access for your login and, for GPU inference, a
-compatible NVIDIA driver. On Debian 12 or 13, `./loaf setup --with-docker-deps`
+compatible NVIDIA driver. On Debian 12 or 13, `./loaf setup all docker-deps toolkit`
 installs Docker and the NVIDIA toolkit from a backup that holds their
 installers for the same release and architecture. After a fresh Docker
 install, enable it; register the NVIDIA runtime once, when it is safe to
@@ -86,11 +86,11 @@ containers.
 [Docker access](debian.md#docker-access) · [systemd service options](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html)
 
 ```bash
-./loaf integration systemd > open-webui.service
-systemd-analyze verify ./open-webui.service
-sudo install -m 0644 open-webui.service /etc/systemd/system/open-webui.service
+./loaf integration systemd > local-ai-ferry.service
+systemd-analyze verify ./local-ai-ferry.service
+sudo install -m 0644 local-ai-ferry.service /etc/systemd/system/local-ai-ferry.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now open-webui.service
+sudo systemctl enable --now local-ai-ferry.service
 ```
 
 ### Continue for VS Code

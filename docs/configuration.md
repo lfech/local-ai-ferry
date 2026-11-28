@@ -61,8 +61,9 @@ about this. Set `[launcher] namespace` in the project for a separate
 deployment. A `[launcher] version` line from an earlier release fails with a
 pointer to its new name. Tests replace the system directory with `LOAF_SYSTEM_CONFIG_DIR`.
 
-In a workspace that has only the `docker-project` link, run `loaf setup` to
-create the settings files.
+A workspace from an earlier release with only a `docker-project` link has no
+settings: run `loaf setup config` to create them, and `loaf clean --full` to
+remove the unused link.
 
 This example selects a separate deployment, a different model list and port,
 and an external backup directory.
@@ -152,9 +153,7 @@ host that needs these features offline.
 - The four existing Compose variables `OLLAMA_IMAGE`, `OPEN_WEBUI_IMAGE`,
   `OLLAMA_CONTEXT_LENGTH`, and `OLLAMA_STARTUP_TIMEOUT` still work. Compose
   checks the shell before the working project's `.env`. An empty or missing
-  effective value falls back to the INI setting. Direct Compose commands run
-  from `docker-project/` use the shell environment, `.env` in that directory,
-  and Compose defaults. [Compose interpolation](https://docs.docker.com/reference/compose-file/interpolation/)
+  effective value falls back to the INI setting. [Compose interpolation](https://docs.docker.com/reference/compose-file/interpolation/)
 - For GPU selection, an exported `CUDA_VISIBLE_DEVICES` takes precedence over
   `cuda_visible_devices`. When the INI setting is blank, Compose can also read
   `CUDA_VISIBLE_DEVICES` from `.env`. Use comma-separated NVIDIA device IDs or

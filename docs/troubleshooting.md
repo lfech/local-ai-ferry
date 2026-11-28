@@ -2,9 +2,9 @@
 
 [Project overview](../README.md)
 
-Run commands from the project directory unless a step says otherwise.
-Create the [`docker-project` link](launcher.md#link-the-docker-project) before
-running the direct Compose examples.
+Run commands from the project directory unless a step says otherwise. The
+Docker examples use the container names of the default namespace `loaf`;
+`loaf docker ps` lists those of yours. [Inspect the containers](launcher.md#inspect-the-containers)
 
 ## Context limits
 
@@ -19,7 +19,7 @@ The Qwen3 examples need an explicit 16384 setting to override their 40960 preset
 Inspect the loaded model after making a request:
 
 ```bash
-(cd docker-project && docker compose --profile offline exec ollama-offline ollama ps)
+docker exec loaf-ollama-offline-1 ollama ps
 ```
 
 The `CONTEXT` column shows the active context. A larger value uses more memory.
@@ -79,11 +79,8 @@ The default `loaf-ollama-cuda13` build needs NVIDIA driver 580 or newer.
 connected. [Ollama build selection](configuration.md#select-an-ollama-build-recipe)
 
 ```bash
-(
-    cd docker-project
-    docker compose --profile offline exec ollama-offline nvidia-smi
-    docker compose --profile offline exec ollama-offline ollama ps
-)
+docker exec loaf-ollama-offline-1 nvidia-smi
+docker exec loaf-ollama-offline-1 ollama ps
 ```
 
 `100% GPU` indicates full placement while the model is loaded. An empty list can
@@ -94,7 +91,7 @@ see [the hardware estimates](models.md).
 ## Imports and startup
 
 ```bash
-(cd docker-project && docker compose --profile offline logs --tail 100 ollama-offline)
+docker logs --tail 100 loaf-ollama-offline-1
 ```
 
 Check for the imported filename and `Ollama is ready for inference.`.
@@ -236,8 +233,9 @@ change, check the session's [Docker access](debian.md#docker-access).
 
 ## Command or project not found
 
-Run `loaf` from the checkout or from the directory containing your
-`docker-project` link. Use `--project-dir PATH` to select either location.
+Run `loaf` from the checkout or from the deployment directory that
+`loaf setup` prepared, which holds `config/config.ini`. Use
+`--project-dir PATH` to select either location.
 Use `./loaf` or activate `.venv` with `source .venv/bin/activate`.
 If the project moved, run the [installer](debian.md#install-the-loaf-command)
 again.

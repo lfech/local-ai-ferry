@@ -193,8 +193,8 @@ On Debian, run `loaf setup` while connected to fill `install-cache/deb/nvidia/`.
 Backup includes packages matching the installed NVIDIA toolkit or a complete
 prepared set for the host architecture. Without them, backup warns that the
 destination needs the toolkit for GPU inference and names the command that
-caches its packages for each installation type. On Debian 13, add
-`--with-docker-deps` to include Docker's cached `.deb` files and local APT
+caches its packages for each installation type. On Debian 12 or 13, run
+`loaf setup docker-deps` to include Docker's cached `.deb` files and local APT
 index under `install-cache/deb/docker/`. Use compatible wheels and Debian
 packages on the destination. [Disconnected installation](installation.md#disconnected-debian-installation)
 
@@ -229,6 +229,24 @@ space: it reads the archive once as a stream and keeps only small manifest
 files in memory. Without `--archive`, it checks the newest backup in the
 configured directory. Select the backup's namespace with `--namespace` when
 applicable.
+
+### Check a copied backup
+
+`loaf.json` and the hashes it records travel with the archive. They reveal a
+damaged or truncated copy, but not a deliberate change: whoever can change the
+transfer media can replace the archive, `loaf.json` and the launcher together.
+`loaf backup` therefore ends with the SHA-256 of the archive and the launcher,
+in the format of `sha256sum`. Record these lines apart from the media, for
+example on paper or in a separate message, and compare them on the destination
+before the first restore. `backup --verify` prints the same lines.
+
+```bash
+cd /media/transfer/YYYYMMDD-HHMM_local-ai-ferry
+sha256sum loaf YYYYMMDD-HHMM_local-ai-ferry.tar.gz
+```
+
+Check a release executable or package against the release's `SHA256SUMS` in
+the same way. [Release downloads](releases.md#run-the-executable)
 
 ## Transfers between namespaces
 
@@ -283,9 +301,11 @@ readable and writable by their owner on filesystems that enforce Unix permission
 ## Debian restore
 
 Copy the complete trusted backup folder to the destination, where it
-becomes the project. Use a login with Docker access. On Debian 12 or 13, use
-`./loaf setup --with-docker-deps` in place of the first setup command when
-installing Docker from the backup's matching Debian package cache.
+becomes the project, and [check its hashes](#check-a-copied-backup). Use a
+login with Docker access. On Debian 12 or 13, use
+`./loaf setup all docker-deps toolkit` in place of the first setup command
+when installing Docker and the NVIDIA toolkit from the backup's matching
+Debian package cache.
 [Docker access](debian.md#docker-access) · [Disconnected Debian installation](installation.md#disconnected-debian-installation)
 
 ```bash
@@ -368,14 +388,16 @@ the system restore with `sudo`. In every deployment, restore refuses a
 settings file at the key's path.
 
 Restore starts services only when Modelfile replay is enabled. A project
-without a Compose file gets the `docker-project` link to the packaged
-deployment, as standalone setup creates it. On a recovered host, run the
+without settings gets the default `config.ini` and model list, as from
+`loaf setup config`. Restoring `source` into a project whose `docs/` holds
+the guides that standalone setup exported replaces them with the checkout's
+guides as a whole. On a recovered host, run the
 printed next command, normally `loaf run offline`, and open the printed address
 to sign in or create the first account. When the restored settings enable the
 terminal server but its key is missing, the next command is
-`loaf setup --terminal-server-key`. A restored `apt_repository_dir` setting
+`loaf setup terminal-server-key`. A restored `apt_repository_dir` setting
 needs its repository directory, which no archive type carries; copy it or
-create it again with `loaf setup --create-file-repository`.
+create it again with `loaf setup create-file-repository`.
 
 Add `--import` or set `import_models = true` under `[transfer]` to start offline
 Ollama and import all saved Modelfiles after restoring `models`.

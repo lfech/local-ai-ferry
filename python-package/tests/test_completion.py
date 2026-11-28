@@ -55,7 +55,7 @@ class CompletionScriptTests(unittest.TestCase):
             (("completion", ""), ["install", "remove", "print"]),
             (("docs", "rea"), ["readme"]),
             (("package", ""), ["binary", "debian"]),
-            (("setup", ""), ["tests"]),
+            (("setup", "t"), ["toolkit", "terminal-server-key", "tests"]),
             (("backup", "models", "vo"), ["volumes"]),
         ):
             with self.subTest(words=words):
@@ -64,7 +64,7 @@ class CompletionScriptTests(unittest.TestCase):
     def test_options_follow_the_command_and_skip_option_values(self):
         self.assertEqual(self.complete("--"), ["--help", "--project-dir", "--system", "--verbose"])
         self.assertEqual(self.complete("docker", "rm", "--"),
-                         ["--config-dir", "--namespace", "--dry-run", "--yes", "--help", "--project-dir", "--system",
+                         ["--config-dir", "--namespace", "--dry-run", "--force", "--help", "--project-dir", "--system",
                           "--verbose"])
         self.assertIn("--no-remove-containers", self.complete("stop", "-"))
         self.assertNotIn("-n", self.complete("stop", "-"))
@@ -72,6 +72,7 @@ class CompletionScriptTests(unittest.TestCase):
         self.assertIn("--wait-timeout", self.complete("download", ""))
         self.assertEqual(self.complete("run", ""), ["offline", "online"])
         self.assertEqual(self.complete("stop", "on"), ["online"])
+        self.assertEqual(self.complete("restart", ""), ["offline", "online"])
         self.assertIn("--cpu", self.complete("run", "offline", "--c"))
         self.assertEqual(self.complete("--project-dir", "/tmp", "restore", "mo"), ["models"])
         self.assertEqual(self.complete("backup", "--namespace", "=", "v1", "vol"), ["volumes"])

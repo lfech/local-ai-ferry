@@ -1,11 +1,11 @@
 # Local AI Ferry
 
-[![CLI baseline · 2026-11-26 20:22:57 — 212/212 passed](docs/badges/cli.svg)](docs/verification-record.md#2026-11-26-202257-0100--test-badge-run)&nbsp;&nbsp;&nbsp; This is software not production-ready - use for testing only.
+[![CLI baseline · 2026-11-28 11:33:05 — 276/276 passed](docs/badges/cli.svg)](docs/verification-record.md#2026-11-28-113305-0100--test-badge-run)&nbsp;&nbsp;&nbsp; This is software not production-ready - use for testing only.
 
-[![Docker · 2026-11-26 20:22:57 — 33/33 passed](docs/badges/docker.svg)](docs/verification-record.md#2026-11-26-202257-0100--test-badge-run)
-[![Open Terminal · 2026-11-26 20:22:57 — 16/16 passed](docs/badges/open-terminal.svg)](docs/verification-record.md#2026-11-26-202257-0100--test-badge-run)
-[![GPU inference · 2026-11-26 20:22:57 — 6/6 passed](docs/badges/gpu.svg)](docs/verification-record.md#2026-11-26-202257-0100--test-badge-run)
-[![Model catalog · 2026-11-26 20:22:57 — 1/1 passed](docs/badges/catalog.svg)](docs/verification-record.md#2026-11-26-202257-0100--test-badge-run)
+[![Docker · 2026-11-28 11:33:05 — 36/36 passed](docs/badges/docker.svg)](docs/verification-record.md#2026-11-28-113305-0100--test-badge-run)
+[![Open Terminal · 2026-11-28 11:33:05 — 15/15 passed](docs/badges/open-terminal.svg)](docs/verification-record.md#2026-11-28-113305-0100--test-badge-run)
+[![GPU inference · 2026-11-28 11:22:28 — 6/6 passed](docs/badges/gpu.svg)](docs/verification-record.md#2026-11-28-112228-0100--test-badge-run)
+[![Model catalog · 2026-11-28 11:22:28 — 1/1 passed](docs/badges/catalog.svg)](docs/verification-record.md#2026-11-28-112228-0100--test-badge-run)
 
 Local AI Ferry prepares and runs local AI deployments and transfers them to
 offline or air-gapped machines (web-connected usage is also supported). 
@@ -57,13 +57,17 @@ PYTHONPATH=python-package/src python3 -m loaf setup
 ```
 
 Setup installs `loaf` into `.venv`, caches Python wheels and prepares the NVIDIA
-Toolkit installers under the Git-ignored `install-cache/` directory. On Debian
-13, add `--with-docker-deps` to prepare and install Docker Engine, its CLI,
+Toolkit installers under the Git-ignored `install-cache/` directory. Then
+activate the virtualenv with `source .venv/bin/activate`, or run `./loaf` from
+the checkout root as below. On Debian 12 or 13, add the `docker-deps` part,
+`setup all docker-deps`, to prepare and install Docker Engine, its CLI,
 Compose, and Buildx. Configure the NVIDIA container runtime before starting GPU
-inference. [Debian setup](docs/debian.md#install-the-loaf-command)
+inference. [Setup parts](docs/cli-help.md#setup) ·
+[Debian setup](docs/debian.md#install-the-loaf-command)
 
-The checkout enables the terminal server, which needs a bearer key. Create it
-with `./loaf setup --terminal-server-key`.
+The optional terminal server gives models a terminal in a container per chat.
+It stays off until `[terminal_server] enabled = true` and needs a bearer key
+from `./loaf setup terminal-server-key`.
 [Terminal server setup](docs/terminal-server.md#enable-and-connect)
 
 Build the images, download the selected models, and start offline serving.
@@ -124,7 +128,7 @@ when starting from a prepared archive.
 [clean](docs/cli-help.md#clean), [version](docs/cli-help.md#version),
 [docs](docs/cli-help.md#docs), [completion](docs/cli-help.md#completion),
 [build and upgrade](docs/cli-help.md#build), [download](docs/cli-help.md#download),
-[run](docs/cli-help.md#run), [status](docs/cli-help.md#status),
+[run](docs/cli-help.md#run), [restart](docs/cli-help.md#restart), [status](docs/cli-help.md#status),
 [stop](docs/cli-help.md#stop), [docker](docs/cli-help.md#docker),
 [backup](docs/cli-help.md#backup), [restore](docs/cli-help.md#restore),
 [integration](docs/cli-help.md#integration) and [test](docs/cli-help.md#test).

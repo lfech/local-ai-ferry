@@ -18,7 +18,7 @@ loaf docs readme | head -1 | grep -q '^# Local AI Ferry' || fail "README guide"
 [ "$(stat -c %a /etc/loaf/terminal-server.key)" = 640 ] || fail "terminal key permissions"
 grep -qx 'secret_file = /etc/loaf/terminal-server.key' /etc/loaf/config.ini || fail "system key setting"
 grep -qx '# ollama_image = loaf-ollama-cuda13' /etc/loaf/config.ini || fail "commented defaults"
-loaf --system setup --terminal-server-key --dry-run | grep -q '/etc/loaf/terminal-server.key' || fail "key setup preview"
+loaf --system setup terminal-server-key --dry-run | grep -q '/etc/loaf/terminal-server.key' || fail "key setup preview"
 # Backups of the system deployment carry the packaged standalone executable.
 standalone=/usr/lib/python3/dist-packages/loaf/data/standalone/loaf
 [ -x "$standalone" ] || fail "standalone executable"

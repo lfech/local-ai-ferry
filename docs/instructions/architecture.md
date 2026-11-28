@@ -35,16 +35,24 @@ the bundled CPU, CUDA 12 and CUDA 13 recipes. Each Dockerfile and default build 
 stays inside its context, which Compose always allows Buildx to read.
 [Ollama build selection](../configuration.md#select-an-ollama-build-recipe) ·
 [Terminal server](../terminal-server.md)
-`loaf setup --link-docker-project` exposes the deployment tree for direct Compose calls.
-[Direct Compose commands](../launcher.md#link-the-docker-project)
+`loaf setup` runs selectable parts like the types of `loaf backup`; `all`,
+the default, holds the parts that the installation needs, and the others run
+when named. A part keeps what exists unless `--force` replaces it, the flag
+that also confirms removals in `clean --full` and `docker rm`.
+[Setup parts](../cli-help.md#setup)
 
 The [command reference](../cli-help.md) explains every command and option.
-`loaf run offline` and `loaf run online` start a serving profile, and
-`loaf stop` stops one profile or, without one, every service.
+`loaf run offline` and `loaf run online` start a serving profile, `loaf stop`
+stops one profile or, without one, every service, and `loaf restart` stops a
+profile and starts it again with new containers.
 
 Both `loaf` and `python -m loaf` use the current directory by default.
-`--project-dir` selects another deployment. The launcher looks for Compose
-in the project root, the checkout's deployment tree, then `docker-project/`.
+`--project-dir` selects another deployment. Every installation runs Compose
+with its own deployment files: the source checkout's, the standalone
+executable's runtime, the wheel's or the Debian package's. A project holds
+only settings and data: a source checkout is one, and elsewhere the settings
+that `setup` creates make one. Users reach the containers by their fixed
+names with plain Docker commands. [Inspect the containers](../launcher.md#inspect-the-containers)
 Local configuration overrides individual packaged keys. A local model INI
 supplies the entire selected list. Use `--config-dir` to select a different
 override directory.
@@ -76,7 +84,9 @@ seconds; `0` waits without a limit. Option names are not abbreviated.
 
 The launcher stops services from competing profiles before switching the
 shared volumes to the next profile. Startup uses local images with
-`--no-build --pull never`. Each Compose service has `scale: 1`.
+`--no-build --pull never`. Each Compose service has `scale: 1`. The serving
+services and the terminal server restart with Docker unless loaf stopped
+them; the downloader never starts by itself.
 [Compose definition](../../python-package/src/loaf/data/compose.yml)
 
 Every Docker resource name starts with the deployment namespace, which is
@@ -136,8 +146,11 @@ networks. [Networking and offline operation](../configuration.md#networking-and-
 
 ## Open Terminal workspaces
 
-When `[terminal_server] enabled = true`, the launcher requires WebUI
-authentication and validates the configured bearer key before serving.
+Only `[terminal_server] enabled = true` turns the terminal server on; the
+packaged and the checkout's settings leave it off, and the other
+`[terminal_server]` settings, such as `network`, have no effect until then.
+When enabled, the launcher requires WebUI authentication and validates the
+configured bearer key before serving, also in dry runs.
 Open WebUI reaches the provisioner at `http://terminal-server:8000` over
 the internal `terminal-control` network. A Compose override mounts the bearer
 key in both WebUI services, and the WebUI image's start script presets this
@@ -212,7 +225,9 @@ tar. `loaf.json` records the archive format, the namespace name, the
 launcher's size and SHA-256 hash, and one item per type with each member's
 path, size and SHA-256 hash. Each type adds one
 plain tar member; `terminal` adds its volume and the bearer key as separate
-members. A backup made with `--no-terminal-server` records that in
+members. These hashes reveal damage, not deliberate changes, so backup and
+`backup --verify` print the SHA-256 of the archive and the launcher for a
+comparison over another channel. A backup made with `--no-terminal-server` records that in
 `loaf.json`. Readers learn the types from `loaf.json` before any payload.
 
 | Type | Contents | Restore |
@@ -272,25 +287,28 @@ that group, reads it. A settings file is never restored at the key's path.
 Setup and restore run in a backup folder make it the project. They move the
 archive and its launcher unchanged to
 `backup/<archive name>/`, where later restores find it, and keep a copy of
-the launcher at the root. Restore links the packaged deployment into a
-project without a Compose file. Both end with the command to run next. Other
+the launcher at the root. Restore creates the default settings in a project
+without them. Both end with the command to run next. Other
 commands, and a missing command, refuse a backup folder as the project and
 print the typical next steps with a pointer to `loaf docs`. With the loaf
 Debian package installed, setup and restore still use the folder and also
 print the `--system` restore command; loaf never selects the system
 deployment by itself. To keep the backup on its media, run its launcher from
-the project directory. Only `setup --terminal-server-key` creates a bearer
+the project directory. Only `setup terminal-server-key` creates a bearer
 key, from the backup when run in its folder; restore brings the key of the
-`terminal` type. Standalone setup recovers `installers` with
-`--with-docker-deps` and copies the launcher into the project. Restoring `source` replaces existing files with the archived
-ones and puts them back if publishing fails.
+`terminal` type. Standalone setup recovers `installers` for its
+`docker-deps` and `toolkit` parts and copies the launcher into the project.
+Restoring `source` replaces existing files with the archived ones and puts
+them back if publishing fails; guides that standalone setup exported give way
+to the checkout's `docs/` as a whole. Standalone setup exports guides only
+outside a source checkout.
 [Backup recovery](../transfer.md#debian-restore)
 
 Source setup caches Python wheels in `install-cache/wheels/` and matching
 NVIDIA Toolkit installers in `install-cache/deb/nvidia/`. On Debian 12 or 13,
-`--with-docker-deps` also prepares Engine, CLI, Compose, Buildx and their
+the `docker-deps` part prepares Engine, CLI, Compose, Buildx and their
 required packages with a local APT index under `install-cache/deb/docker/`.
 Debian 13 uses its own Docker packages. Debian 12 uses Docker's repository,
 trusted through a pinned key, with a private APT state. Each Docker cache targets one Debian release and
 package architecture. Standalone setup can install matching packages from
-the backup with the same flag. [Debian installation](../installation.md#disconnected-debian-installation)
+the backup with the same parts. [Debian installation](../installation.md#disconnected-debian-installation)

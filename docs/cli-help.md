@@ -55,48 +55,51 @@ and Ollama visible. Transfers report bytes and throughput.
 
 ### setup
 
-Prepare a deployment. Every option below does only its own step.
+Prepare a deployment in parts. Name one or more parts, or omit them for
+`all`, the default parts of the installation. `loaf setup all PART` adds a
+part to them. Parts run in the order of the list below.
 
-- Without options, setup creates the project's missing settings: a
-  `config.ini` with every key commented out and a copy of the model list in
-  effect. It never replaces an existing file. [Settings files](configuration.md#project-configuration)
-  - From a source checkout, it also installs `loaf` into the checkout's
-    `.venv`, caches the Python wheels and prepares the NVIDIA Container
-    Toolkit packages in `install-cache/`. [Debian host setup](debian.md#install-the-loaf-command)
-  - With the standalone executable, or a wheel-installed `loaf` outside a
-    checkout, it links the packaged Docker project and writes the guides of
-    the release to `docs/`.
-  - Run in a backup folder, setup makes the folder the project, moves the
-    backup to `backup/` and prints the restore command to run next. It copies
-    the backup's launcher into the project. [Debian restore](transfer.md#debian-restore)
-  - When the terminal server is enabled but its key is missing, setup prints
-    the command that creates it.
-- `--terminal-server-key` only creates the configured terminal server key, with
-  owner-only permissions. It keeps an existing key. Run in or with a backup
-  folder, it takes the backup's key, which the backup's Open WebUI data uses.
-  [Terminal server key](terminal-server.md#enable-and-connect)
-- `--create-file-repository` only creates a local APT file repository for
-  testing `apt` in chat containers. It downloads a fixed set of command-line
-  tools with the dependencies that the terminal image lacks into
-  `apt-test-repository/`, writes `config/apt-test-repository.list` and prints
-  the settings that use them. It needs the built terminal image and network
-  access. [Install packages in a chat](terminal-server.md#install-packages-in-a-chat)
-- `--link-docker-project` only links the packaged Docker project as
-  `docker-project` for direct Compose use. [Direct Compose use](launcher.md#link-the-docker-project)
-- `--with-docker-deps` caches Docker Engine, Compose and Buildx packages on
-  Debian 12 or 13 and installs them as needed. The standalone executable also
-  prepares the NVIDIA toolkit packages with it. In a backup folder, it uses the
-  backup's `installers`. [Docker packages](debian.md#install-docker-and-cache-its-packages)
+| Part | Effect | In `all` |
+| --- | --- | --- |
+| `docker-deps` | Caches Docker Engine, Compose and Buildx packages on Debian 12 or 13 and installs them as needed. [Docker packages](debian.md#install-docker-and-cache-its-packages) | No |
+| `venv` | Source checkout: installs `loaf` into the checkout's `.venv`, caches the Python wheels and links `./loaf`. It then prints the command that activates the virtualenv. [Debian host setup](debian.md#install-the-loaf-command) | Checkout |
+| `toolkit` | Caches the NVIDIA Container Toolkit packages in `install-cache/` and installs them as needed. | Checkout |
+| `config` | Creates the project's settings: a `config.ini` with every key commented out and a copy of the model list in effect. [Settings files](configuration.md#project-configuration) | Yes |
+| `docs` | Outside a source checkout: writes the guides of the release to `docs/`. A source checkout carries its own guides. | Outside a checkout |
+| `terminal-server-key` | Creates the configured terminal server key with owner-only permissions. Run in or with a backup folder, it takes the backup's key, which the backup's Open WebUI data uses. [Terminal server key](terminal-server.md#enable-and-connect) | No |
+| `create-file-repository` | Creates a local APT file repository for testing `apt` in chat containers. It downloads a fixed set of command-line tools with the dependencies that the terminal image lacks into `apt-test-repository/`, writes `config/apt-test-repository.list` and prints the settings that use them. It needs the built terminal image and network access. [Install packages in a chat](terminal-server.md#install-packages-in-a-chat) | No |
+
+A part keeps what already exists: settings files, guides, a key or a test
+repository. It says so and names `--force`, which replaces them. Guides of
+the same release need no replacement. The virtualenv and the installer caches
+are updated in place.
+
+Every installation uses its own deployment files: the Compose file, the build
+contexts and the packaged defaults that `loaf version` locates. A project holds
+only settings and data. A source checkout is a project; elsewhere, the settings
+that `setup config` creates make one. [Inspect the containers](launcher.md#inspect-the-containers)
+
+- Run in a backup folder, setup makes the folder the project, moves the
+  backup to `backup/`, copies the backup's launcher into the project and
+  prints the restore command to run next. There, `docker-deps` and `toolkit`
+  install from the backup's `installers`. [Debian restore](transfer.md#debian-restore)
+- When the terminal server is enabled but its key is missing, setup prints
+  the command that creates it.
 - `--archive PATH` selects the backup folder or archive for setup outside the
   backup folder.
+- `-f`, `--force` replaces what a part would keep.
 - `--allow-root` lets source setup run as root in a checkout that another user
   owns. Without it, setup refuses, because root would own the virtualenv and
   caches. Run setup as the owner instead; the APT steps use `sudo`.
 
 Uses `--config-dir PATH` and `--dry-run`. In the system deployment, the Debian
-package prepares the directories and key; `--terminal-server-key` there makes
-the key readable by root and the `docker` group. `tests`,
-`--create-file-repository`, `--with-docker-deps` and `--archive` need a project.
+package prepares the settings, directories and key: setup accepts `all`,
+which only reports this, and `terminal-server-key`, which makes the key
+readable by root and the `docker` group. `--archive` needs a project. The
+former options `--with-docker-deps`, `--terminal-server-key` and
+`--create-file-repository` name the part that replaced them;
+`link-docker-project` and `--link-docker-project` explain that loaf needs no
+`docker-project` link.
 
 `loaf setup tests` caches the pinned test packages as wheels and installs
 them into the virtualenv that runs `loaf`. It needs Python 3.11 or newer and
@@ -127,7 +130,7 @@ the selected project. Uses `--dry-run`.
   files and the packaged Docker link. It asks before it removes
   `install-cache/`, whose installers an offline host cannot download again,
   and keeps it without a terminal.
-- `-y`, `--yes` with `--full` removes `install-cache/` without asking.
+- `-f`, `--force` with `--full` removes `install-cache/` without asking. The former `--yes` names it.
 
 Both modes keep Git history and working files, saved backups, settings,
 credentials and Docker data. A generated directory that holds Git work, a
@@ -147,9 +150,10 @@ deployment data directory and the default deployment. Takes the global options.
 List the guides bundled with this release, or print one with
 `loaf docs NAME`. `loaf docs loaf.1` prints the manual page, for example
 `loaf docs loaf.1 | man -l -`. Standalone setup writes the guides to `docs/`
-in the deployment, with links into `docker-project/`, and keeps a `docs/`
-directory that it did not create. The Debian package also installs the manual
-page for `man loaf`.
+in the deployment. Their links to deployment files and other repository files
+open the release in the repository; `loaf version` names the local copy of the
+deployment files. The Debian package also installs the manual page for
+`man loaf`.
 
 ### completion
 
@@ -215,6 +219,22 @@ Uses `--config-dir PATH`, `--namespace NAME`, `--dry-run`,
 `loaf offline` and `loaf online` point to this one.
 
 - `--cpu` selects CPU inference. The default uses NVIDIA GPU acceleration. [CPU serving](launcher.md#serve-on-cpu)
+
+### restart
+
+`loaf restart offline` or `loaf restart online` stops that profile and
+removes its containers like `loaf stop PROFILE`, then starts it like
+`loaf run PROFILE`, under one project lock. Every service of the profile
+starts with a new container, while `run` replaces only containers whose
+settings changed. The terminal server restarts too, unless the other profile
+serves. Without a profile, restart restarts the profile that serves now and
+refuses when none or both have running containers; a dry run then cannot ask
+Docker and needs the profile.
+
+Uses `--config-dir PATH`, `--namespace NAME`, `--dry-run`,
+`--wait-timeout SECONDS`, and `-a` or `--attach`.
+
+- `--cpu` starts the profile with CPU inference. [CPU serving](launcher.md#serve-on-cpu)
 
 ### status
 
@@ -282,7 +302,7 @@ prints the command that includes `containers`. A removed image tag that
 another deployment also uses keeps the image for that deployment. Base
 images, build cache and other projects' resources stay. Uses `--dry-run`.
 
-- `-y`, `--yes` removes without asking. Without a terminal, `rm` requires it.
+- `-f`, `--force` removes without asking. Without a terminal, `rm` requires it. The former `--yes` names it.
 
 Removed volumes cannot be recovered; save them first with `loaf backup volumes`.
 An offline host cannot rebuild removed images; `loaf restore images` brings
@@ -292,8 +312,10 @@ them back.
 
 Create a dated backup folder with the archive and the standalone `loaf`
 executable that can restore it. The archive's first member, `loaf.json`,
-records the hash of every member and of the executable.
-[Archive contents](transfer.md#archive-contents)
+records the hash of every member and of the executable. At the end, backup
+prints the SHA-256 of the archive and the executable to record apart from the
+transfer media. [Archive contents](transfer.md#archive-contents) ·
+[Check a copied backup](transfer.md#check-a-copied-backup)
 
 Name the types `source`, `config`, `installers`, `images`, `models`, `webui`
 and `terminal`, or the aliases `project` and `volumes`, or omit them to save
@@ -316,7 +338,9 @@ and `-a` or `--attach`.
 - `--verify` runs restore's checks on every member against the hashes in
   `loaf.json`, without Docker or temporary copies, lists the types and reports
   the image platforms. A launcher with another hash than `loaf.json` records
-  only gets a warning. `--archive PATH` selects the backup to verify.
+  only gets a warning. It ends with the SHA-256 of the archive and the
+  launcher to compare with the recorded values. `--archive PATH` selects the
+  backup to verify.
 - `--no-terminal-server` leaves out the terminal server: the Open Terminal
   image, the `terminal` type with its user volume and bearer key. Restoring
   such a backup disables the terminal server in the restored settings and
@@ -342,8 +366,10 @@ archive contains. [Restore behavior](transfer.md#restore-behavior)
 - `source` replaces existing files with the archived ones and keeps the others.
 
 Run in a backup folder, restore makes it the project and moves the backup to
-`backup/`. A project without a Compose file gets the packaged Docker project
-link. Restore ends with the command to run next: `setup --terminal-server-key`
+`backup/`. A project without settings gets the default `config.ini` and model
+list, as from `setup config`. Restoring `source` over guides that standalone
+setup exported replaces them with the checkout's `docs/` as a whole. Restore
+ends with the command to run next: `setup terminal-server-key`
 when the terminal server is enabled but its key is missing, else `run offline`,
 with `--cpu` after a CPU replay. A selected backup supplies its saved
 namespace. Only `source`, `installers` and `models` restore into another

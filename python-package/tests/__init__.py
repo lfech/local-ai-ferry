@@ -12,3 +12,5 @@ os.environ["LOAF_SYSTEM_CONFIG_DIR"] = ""
 TESTS_DIR = Path(__file__).resolve().parent
 ROOT = TESTS_DIR.parent.parent
 DATA = ROOT / "python-package/src/loaf/data"
+# Large temporary files of the Docker tests stay on disk; loaf clean removes the directory.
+ARTIFACTS = ROOT / ".test-artifacts"

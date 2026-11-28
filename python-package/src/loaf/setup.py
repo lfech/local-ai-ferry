@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import sys
 import sysconfig
-from tempfile import NamedTemporaryFile, TemporaryDirectory, mkdtemp
+from tempfile import NamedTemporaryFile, TemporaryDirectory, mkdtemp, mkstemp
 from typing import Iterable, Iterator, Sequence
 from urllib.request import urlopen
 
@@ -148,71 +148,72 @@ def config_template(header: str, active: dict[tuple[str, str], str] | None = Non
     return "\n".join(lines) + "\n"
 
 
-def link_packaged_project(project: Path, *, dry_run: bool = False) -> bool:
-    """Link the packaged Docker project unless the project has its own Compose file or another docker-project.
-
-    Returns whether the link is, or in a dry run would be, created or refreshed.
-    """
-    link = project / assets.DOCKER_PROJECT
-    custom = any((path / "compose.yml").is_file() for path in (project, project / assets.CHECKOUT_DATA))
-    if custom or not (assets.loaf_data_link(link) or not (link.exists() or link.is_symlink())):
-        return False
-    assets.link_docker_project(project, dry_run=dry_run)
-    return True
-
-
-def create_file(target: Path, content: str) -> None:
-    """Write a new file; an existing one stays as it is."""
-    try:
-        with target.open("x", encoding="utf-8") as output:
-            output.write(content)
-    except FileExistsError:
-        if not target.is_file():
-            raise SetupError(f"{target} must be a file.") from None
-    else:
-        print(f"Created {target}.")
+def create_file(target: Path, content: str, *, force: bool = False, replacement: str | None = None) -> None:
+    """Write a new file. An existing one stays unless force replaces it; a replacement names what --force writes."""
+    if target.is_symlink() or (target.exists() and not target.is_file()):
+        raise SetupError(f"{target} must be a file.")
+    if target.exists() and not force:
+        if replacement is not None:
+            print(f"Keep the existing {target}. Add --force to replace it with {replacement}.")
+        return
+    with NamedTemporaryFile("w", encoding="utf-8", dir=target.parent, prefix=f".{target.name}.", delete=False) as output:
+        output.write(content)
+    replaced = target.exists()
+    Path(output.name).replace(target)
+    print(f"{'Replaced' if replaced else 'Created'} {target}.")
 
 
-def prepare_configuration(directory: Path, lower: Sequence[Path], models_name: str | None = "models.ini") -> None:
-    """Create config.ini with every default commented out and the model list in effect, never replacing files.
+def prepare_configuration(directory: Path, lower: Sequence[Path], models_name: str | None = "models.ini", *,
+                          force: bool = False, hint: bool = True) -> None:
+    """Create config.ini with every default commented out and the model list in effect.
 
     The model list is a copy of the highest lower layer's, so the deployment starts with the same selection.
+    Existing files stay unless force replaces them.
     """
     if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
         raise SetupError(f"{directory} must be a local configuration directory.")
     directory.mkdir(parents=True, exist_ok=True)
-    create_file(directory / config.CONFIG_NAME, config_template(LOCAL_CONFIG_HEADER))
+    create_file(directory / config.CONFIG_NAME, config_template(LOCAL_CONFIG_HEADER), force=force,
+                replacement="the commented defaults" if hint else None)
     if models_name is not None:
         source = next((layer / models_name for layer in reversed(lower) if (layer / models_name).is_file()), None)
         if source is not None:
-            create_file(directory / models_name, source.read_text(encoding="utf-8"))
+            create_file(directory / models_name, source.read_text(encoding="utf-8"), force=force,
+                        replacement=f"a copy of {source}" if hint else None)
 
 
-def setup_standalone(project: Path, directory: Path | None = None, lower: Sequence[Path] = (),
-                     models_name: str | None = "models.ini") -> None:
-    """Link the packaged Docker project, create the default configuration and export the guides."""
-    directory = directory or project / "config"
-    if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
-        raise SetupError(f"{directory} must be a local configuration directory.")
-    link_packaged_project(project)
-    prepare_configuration(directory, lower or (assets.DATA_DIR / "config",), models_name)
-    docs.export(project)
-
-
-def ensure_terminal_key(path: Path, archived_key: bytes | None = None, *, group: str | None = None) -> None:
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with NamedTemporaryFile(dir=path.parent, prefix=".loaf-terminal-key-") as pending:
-            pending.write(archived_key if archived_key is not None else new_terminal_key())
-            pending.flush()
-            protect_terminal_key(pending.name, group)
+def ensure_terminal_key(path: Path, archived_key: bytes | None = None, *, group: str | None = None,
+                        force: bool = False) -> None:
+    """Create the terminal server key, from a backup when given. An existing key stays unless force replaces it."""
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise SetupError(f"{path} must be a file.")
+    existed = path.exists()
+    if existed and not force:
+        config.read_terminal_secret(path)
+        print(f"Keep the existing terminal server key at {path}. Add --force to replace it.")
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, pending = mkstemp(dir=path.parent, prefix=".loaf-terminal-key-")
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(archived_key if archived_key is not None else new_terminal_key())
+        protect_terminal_key(pending, group)
+        if existed:
+            os.replace(pending, path)
+        else:
             try:
-                os.link(pending.name, path)
+                os.link(pending, path)
             except FileExistsError:
-                pass
-            else:
-                print(f"Created terminal server key at {path}.")
+                # Another process created the key meanwhile; it stays.
+                existed = None
+    finally:
+        Path(pending).unlink(missing_ok=True)
     config.read_terminal_secret(path)
+    if existed:
+        print(f"Replaced the terminal server key at {path}. Open WebUI keeps the previous key in its saved terminal "
+              "connection: update the key of that connection in Open WebUI's admin settings.")
+    elif existed is not None:
+        print(f"Created terminal server key at {path}.")
 
 
 def protect_terminal_key(path: str | Path, group: str | None) -> None:
@@ -229,12 +230,6 @@ def protect_terminal_key(path: str | Path, group: str | None) -> None:
 
 def new_terminal_key() -> bytes:
     return secrets.token_hex(32).encode("ascii")
-
-
-def install_backup_host_packages(project: Path) -> None:
-    prepare_docker(project, allow_downloads=False)
-    if any((project / TOOLKIT_DIR).glob("*.deb")):
-        install_toolkit(project, allow_downloads=False)
 
 
 def installed_toolkit() -> dict[str, tuple[str, str]]:
@@ -392,7 +387,7 @@ def docker_release() -> str:
     release = freedesktop_os_release()
     suite = release.get("VERSION_CODENAME", "")
     if release.get("ID") != "debian" or suite not in DOCKER_PACKAGES:
-        raise SetupError("--with-docker-deps requires Debian 12 (bookworm) or 13 (trixie). "
+        raise SetupError("setup docker-deps requires Debian 12 (bookworm) or 13 (trixie). "
                          "See docs/debian.md for other Docker installations.")
     return suite
 
@@ -822,7 +817,12 @@ def link_checkout_launcher(project: Path) -> Path:
     return launcher
 
 
-def install(project: Path, *, with_docker_deps: bool = False, allow_root: bool = False) -> None:
+# The setup parts that prepare host packages and a source checkout's virtualenv, in their order.
+HOST_PARTS = ("docker-deps", "venv", "toolkit")
+
+
+def install(project: Path, parts: Sequence[str] = ("venv", "toolkit"), *, allow_root: bool = False) -> None:
+    """Prepare the selected host parts of a source checkout: Docker packages, the virtualenv and the toolkit."""
     if sys.platform != "linux" or not shutil.which("apt-get"):
         raise SetupError("loaf install requires Debian with APT (native or WSL2).")
     if not (project / PYTHON_PACKAGE_DIR / "pyproject.toml").is_file():
@@ -832,21 +832,29 @@ def install(project: Path, *, with_docker_deps: bool = False, allow_root: bool =
         # Root would own the virtualenv and caches and link them to its own Python.
         raise SetupError(f"{project} belongs to UID {owner}. Run setup as that user, which uses sudo for the APT "
                          "steps, or add --allow-root to prepare the checkout as root anyway.")
-    if with_docker_deps:
+    if "docker-deps" in parts:
         prepare_docker(project)
-    print("Prepare the Python environment and wheel cache…", file=sys.stderr, flush=True)
-    install_python(project)
-    print("Prepare the NVIDIA Container Toolkit…", file=sys.stderr, flush=True)
-    install_toolkit(project)
+    if "venv" in parts:
+        print("Prepare the Python environment and wheel cache…", file=sys.stderr, flush=True)
+        install_python(project)
+    if "toolkit" in parts:
+        print("Prepare the NVIDIA Container Toolkit…", file=sys.stderr, flush=True)
+        install_toolkit(project)
 
 
-def create_test_repository(project: Path, image: str) -> None:
-    """Download the test packages and the dependencies that the terminal image lacks into a flat APT repository."""
+def create_test_repository(project: Path, image: str, *, force: bool = False) -> None:
+    """Download the test packages and the dependencies that the terminal image lacks into a flat APT repository.
+
+    An existing test repository stays unless force downloads it again.
+    """
     target = project / TEST_REPOSITORY_DIR
     if (target.exists() or target.is_symlink()) and not (
         target.is_dir() and not target.is_symlink() and (target / TEST_REPOSITORY_LIST).is_file()
     ):
         raise SetupError(f"{target} exists and is not a loaf test repository. Move it away first.")
+    if target.exists() and not force:
+        print(f"Keep the existing {target}. Add --force to download it again.")
+        return
     if subprocess.run(["docker", "image", "inspect", image], stdout=subprocess.DEVNULL,
                       stderr=subprocess.DEVNULL).returncode:
         raise SetupError(f"The terminal image {image} is missing. Enable [terminal_server] and run loaf build first.")

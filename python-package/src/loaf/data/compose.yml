@@ -170,6 +170,8 @@ services:
       timeout: 3s
       retries: 5
     stop_grace_period: 45s
+    # Like Ollama and Open WebUI, come back when Docker restarts unless loaf stopped the service.
+    restart: unless-stopped
 
 secrets:
   terminal-server-key:

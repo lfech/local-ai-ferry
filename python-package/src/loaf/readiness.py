@@ -187,7 +187,8 @@ def check(compose: Compose, *, cpu: bool = False) -> bool:
     engine = report("Docker Engine version check", engine_version, status=None)
     if engine is not None:
         major, version = engine
-        warning = 26 <= major <= 27
+        # Only an enabled terminal server uses the bridge isolation.
+        warning = 26 <= major <= 27 and compose.settings.terminal_server_enabled
         detail = f"{version} — Open Terminal uses legacy bridge isolation" if warning else version
         print_result("WARN" if warning else "OK", "Docker Engine", detail)
     compose_release = report("Docker Compose", compose_version, status=None)
@@ -225,10 +226,15 @@ def check(compose: Compose, *, cpu: bool = False) -> bool:
         return False
     print("\nLocal images" if cpu else "\nLocal images and GPU", flush=True)
     available = set()
+    def local_image(image):
+        try:
+            return docker_output(compose, ["docker", "image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", image])
+        except subprocess.CalledProcessError as exc:
+            problem = (exc.stderr or "").strip() or str(exc)
+            raise ValueError(f"{problem} Run loaf build, or loaf restore images on an offline host.") from exc
+
     for image in sorted(images):
-        platform = report(f"Local image {image}", lambda: docker_output(compose, [
-            "docker", "image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", image,
-        ]))
+        platform = report(f"Local image {image}", lambda: local_image(image))
         if platform is not None:
             available.add(image)
     if not cpu:

@@ -177,13 +177,28 @@ class PlanTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             cli.plan('stop', serving='download')
 
+    def test_restart_stops_the_profile_and_starts_it_like_run(self):
+        steps = cli.plan('restart', serving='offline', terminal_server=True, wait_timeout=60)
+        self.assertEqual([step.arguments for step in steps[:3]], [
+            ('config', '--quiet'),
+            ('stop', 'ollama-offline', 'open-webui', 'terminal-server'),
+            ('rm', '--force', 'ollama-offline', 'open-webui', 'terminal-server'),
+        ])
+        # The rest is run's plan without its second validation.
+        self.assertEqual(steps[3:], cli.plan('offline', terminal_server=True, wait_timeout=60)[1:])
+        kept = cli.plan('restart', serving='online', terminal_server=True, stop_terminal=False, cpu=True)
+        self.assertNotIn('terminal-server', kept[1].arguments)
+        self.assertIn('Ollama on CPU', kept[-2].description)
+        with self.assertRaises(ValueError):
+            cli.plan('restart', serving=None)
+
     def test_compose_paths_are_absolute_and_not_dependent_on_shell_cwd(self):
         # Spaces catch accidental shell splitting; absolute paths catch cwd leaks.
         with tempfile.TemporaryDirectory(prefix='project with spaces ') as folder:
             compose = cli.Compose(Path(folder))
             command = compose.command(cli.plan('offline')[0])
             self.assertEqual(command[command.index('--project-directory')+1], str(Path(folder).resolve()))
-            self.assertEqual(command[command.index('--file')+1], str((Path(folder)/'compose.yml').resolve()))
+            self.assertEqual(command[command.index('--file')+1], str(cli.assets.DATA_DIR / 'compose.yml'))
             self.assertEqual(command[command.index('--project-name')+1], 'loaf')
 
     def test_subprocess_uses_argument_list_without_shell(self):
@@ -270,6 +285,26 @@ class CommandDisplayTests(unittest.TestCase):
         with patch('loaf.cli.sys.platform','linux'):
             self.assertEqual(shlex.split(cli.display_command(arguments)),arguments)
 
+    def test_follow_up_commands_use_the_checkout_launcher_or_the_active_virtualenv(self):
+        with tempfile.TemporaryDirectory() as folder:
+            project = Path(folder).resolve()
+            (project / ".venv/bin").mkdir(parents=True)
+            (project / ".venv/bin/loaf").touch()
+            long_form = shlex.join([sys.executable, "-m", "loaf", "--project-dir", str(project), "run", "offline"])
+            with patch("loaf.cli.sys.platform", "linux"), patch.dict("os.environ", {"VIRTUAL_ENV": ""}):
+                with patch.object(Path, "cwd", return_value=project):
+                    self.assertEqual(cli.next_command(project, None, None, "run", "offline"), long_form)
+                    (project / "loaf").symlink_to(".venv/bin/loaf")
+                    self.assertEqual(cli.next_command(project, None, None, "run", "offline"), "./loaf run offline")
+                    config_dir = project / "settings"
+                    self.assertEqual(cli.next_command(project, config_dir, None, "setup", "terminal-server-key"),
+                                     f"./loaf --config-dir {config_dir} setup terminal-server-key")
+                # Elsewhere, the activated virtualenv's loaf is on PATH.
+                self.assertEqual(cli.next_command(project, None, None, "run", "offline"), long_form)
+                with patch.dict("os.environ", {"VIRTUAL_ENV": sys.prefix}):
+                    self.assertEqual(cli.next_command(project, None, None, "run", "offline"),
+                                     f"loaf --project-dir {project} run offline")
+
 
 # --- Real OS locking: contention, exceptions and a separate interpreter ---
 class LockTests(unittest.TestCase):
@@ -340,8 +375,8 @@ class HelpTests(unittest.TestCase):
 
     def test_command_help_shows_relevant_flags_and_aliases(self):
         flags = {
-            "install": ("--with-docker-deps", "--archive PATH"),
-            "clean": ("--full", "--dry-run", "--yes"),
+            "install": ("--force", "--archive PATH", "docker-deps", "create-file-repository"),
+            "clean": ("--full", "--dry-run", "--force"),
             "setup": ("--allow-root",),
             "run": ("--cpu", "--wait-timeout SECONDS"),
             "backup": ("--verify", "--no-terminal-server", "--export", "--no-export"),
@@ -351,9 +386,10 @@ class HelpTests(unittest.TestCase):
         }
         for command, expected in flags.items():
             with self.subTest(command=command):
-                options = self.read_help(command, "--help").split("\nGlobal options:\n", 1)[0]
+                output = self.read_help(command, "--help")
+                options = output.split("\nGlobal options:\n", 1)[0]
                 for flag in expected:
-                    self.assertIn(flag, options)
+                    self.assertIn(flag, output if not flag.startswith("-") else options)
                 for flag in ("--cpu", "--full", "--verify", "--no-terminal-server", "--no-import", "--badges"):
                     self.assertEqual(flag in options, flag in expected, flag)
 
@@ -379,13 +415,14 @@ class CliTests(unittest.TestCase):
         folder = tempfile.TemporaryDirectory(prefix="loaf-cli-test-")
         self.addCleanup(folder.cleanup)
         self.project = Path(folder.name).resolve()
-        (self.project / "compose.yml").touch()
+        # setup's settings make a directory a project.
+        (self.project / "config").mkdir(exist_ok=True)
+        (self.project / "config/config.ini").touch()
 
     def invoke(self, *arguments):
         return cli.main(["--project-dir", str(self.project), *arguments])
 
     def make_source_directory(self):
-        (self.project / "compose.yml").unlink()
         (self.project / "scripts").mkdir()
         for script in cli.PACKAGE_SCRIPTS.values():
             (self.project / script).touch()
@@ -492,8 +529,8 @@ class CliTests(unittest.TestCase):
         # standalone executable that its folder carries.
         (self.project / 'config').mkdir(exist_ok=True)
         (self.project / 'loaf').write_bytes(transfer.EXECUTABLE_HEADER + b"\n__LOAF_PAYLOAD__\n\x1f\x8bfixture")
-        forms = [(mode,) for mode in cli.COMPOSE_COMMANDS if mode != "run"]
-        for form in (*forms, ("run", "offline"), ("run", "online"), ("backup",)):
+        forms = [(mode,) for mode in cli.COMPOSE_COMMANDS if mode not in ("run", "restart")]
+        for form in (*forms, ("run", "offline"), ("run", "online"), ("restart", "online"), ("backup",)):
             with (
                 self.subTest(form=form), patch('loaf.cli.subprocess.run') as run,
                 redirect_stdout(io.StringIO()) as output,
@@ -505,7 +542,7 @@ class CliTests(unittest.TestCase):
         self.assertFalse((self.project / '.run.lock').exists())
 
     def test_stopping_one_profile_keeps_the_terminal_server_while_the_other_serves(self):
-        (self.project / 'config').mkdir()
+        (self.project / 'config').mkdir(exist_ok=True)
         (self.project / 'config/config.ini').write_text('[terminal_server]\nenabled = true\n', encoding='utf-8')
         (self.project / 'docker/terminal-server').mkdir(parents=True)
         (self.project / 'docker/terminal-server/Dockerfile').touch()
@@ -523,8 +560,35 @@ class CliTests(unittest.TestCase):
         query.assert_not_called()
         self.assertIn('keeps the terminal server running when the offline profile serves', output.getvalue())
 
+    def test_restart_without_a_profile_restarts_the_one_that_serves(self):
+        def serving(online):
+            return lambda compose, profile: (profile == 'online') == online
+
+        for online, profile in ((False, 'offline'), (True, 'online')):
+            with self.subTest(profile=profile), patch('loaf.cli.serving_profile', side_effect=serving(online)), \
+                    patch('loaf.cli.execute_plan') as execute, redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(self.invoke('restart'), 0)
+            self.assertEqual(execute.call_args.args[1][1].arguments[1:3], cli.SERVICES[profile])
+            self.assertIn(f"{profile.capitalize()} Ollama and Open WebUI are ready", output.getvalue())
+        for running, message in ((False, 'No serving profile of loaf runs.'),
+                                 (True, 'Both serving profiles have running containers.')):
+            with self.subTest(running=running), patch('loaf.cli.serving_profile', return_value=running), \
+                    redirect_stderr(io.StringIO()) as errors, self.assertRaises(SystemExit):
+                self.invoke('restart')
+            self.assertIn(message, errors.getvalue())
+            self.assertIn('restart offline', errors.getvalue())
+        with patch('loaf.cli.serving_profile') as query, redirect_stderr(io.StringIO()) as errors, \
+                self.assertRaises(SystemExit):
+            self.invoke('restart', '--dry-run')
+        query.assert_not_called()
+        self.assertIn('A dry run cannot ask Docker which profile serves', errors.getvalue())
+        with redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(self.invoke('restart', 'online', '--dry-run', '--cpu', '--wait-timeout', '30'), 0)
+        self.assertIn('Stop online serving', output.getvalue())
+        self.assertIn('Start Ollama on CPU and Open WebUI with internet access and wait up to 30s', output.getvalue())
+
     def test_download_names_the_namespace_only_when_the_settings_select_another(self):
-        (self.project / 'config').mkdir()
+        (self.project / 'config').mkdir(exist_ok=True)
         (self.project / 'config/config.ini').write_text('[launcher]\nnamespace = v3\n', encoding='utf-8')
         (self.project / 'config/models.ini').write_text('[models.example]\nmodel = hf.co/owner/example:Q4_K_M\n',
                                                          encoding='utf-8')
@@ -608,7 +672,7 @@ class CliTests(unittest.TestCase):
         # A transferred cache/config volume is sufficient to boot an offline host.
         with patch('loaf.cli.execute_plan') as mocked, redirect_stdout(io.StringIO()):
             self.assertEqual(self.invoke('run', 'offline', '--dry-run'), 0)
-        self.assertEqual(mocked.call_args.args[1], cli.plan('offline'))
+        self.assertEqual(mocked.call_args.args[1], cli.plan('offline', terminal_server=False))
         # offline reads no model list, so it refuses the option instead of ignoring it.
         with patch('loaf.cli.execute_plan') as mocked, redirect_stderr(io.StringIO()) as errors, \
                 self.assertRaises(SystemExit):
@@ -641,7 +705,7 @@ class CliTests(unittest.TestCase):
                     options = ["--cpu"] if cpu else []
                     self.assertEqual(self.invoke("run", mode, "--dry-run", *options), 0)
                 compose, steps = execute.call_args.args
-                files = (self.project / "compose.yml",)
+                files = (cli.assets.DATA_DIR / "compose.yml",)
                 self.assertEqual(compose.files, files + ((DATA / "compose.cpu.yml",) if cpu else ()))
                 self.assertEqual("Ollama on CPU" in steps[-1].description, cpu)
 
@@ -667,23 +731,24 @@ class CliTests(unittest.TestCase):
             (("backup", "terminal", "--no-terminal-server"), "--no-terminal-server leaves out the terminal type"),
             (("restore", "--no-terminal-server"), "only supported when creating a backup"),
             (("run", "offline", "--allow-root"), "--allow-root is only supported by setup and install"),
-            (("clean", "--yes"), "--yes is only supported by docker rm and clean --full"),
+            (("clean", "--force"), "--force is only supported by setup, docker rm and clean --full"),
+            (("clean", "--full", "-y"), "--yes is now --force"),
             (("run", "offline", "--wait-timeout", "-5"), "expected 0 to wait without a limit"),
             (("backup", "--delete"), "--delete is only supported by restore"),
             (("restore", "config", "--delete"), "--delete applies to the models type"),
             (("build", "--cpu"), "--cpu is only supported by"),
             (("restore", "--models-only"), "unrecognized arguments: --models-only"),
             (("setup", "--all"), "unrecognized arguments: --all"),
-            (("run", "offline", "--with-docker-deps"), "--with-docker-deps is only supported by setup"),
-            (("run", "offline", "--create-file-repository"), "only supported by setup and install"),
-            (("setup", "--terminal-server-key", "--create-file-repository"), "--terminal-server-key is for key setup only"),
-            (("setup", "--create-file-repository", "--with-docker-deps"), "only creates the test repository"),
+            (("run", "offline", "--with-docker-deps"), "--with-docker-deps is now loaf setup docker-deps"),
+            (("setup", "--create-file-repository"), "--create-file-repository is now loaf setup create-file-repository"),
+            (("setup", "--terminal-server-key"), "--terminal-server-key is now loaf setup terminal-server-key"),
+            (("setup", "--link-docker-project"), "there is no docker-project link anymore"),
+            (("setup", "link-docker-project"), "List the containers with 'loaf docker ps'"),
             (("link-docker-project",), "invalid choice: 'link-docker-project'"),
-            (("run", "offline", "--link-docker-project"), "only supported by setup and install"),
-            (("setup", "--link-docker-project", "--terminal-server-key"), "only links the Docker project"),
-            (("setup", "tests", "--link-docker-project"), "only links the Docker project"),
-            (("setup", "--link-docker-project", "--config-dir", "config"), "only links the Docker project"),
-            (("setup", "--link-docker-project", "--namespace", "v2"), "Omit --namespace"),
+            (("setup", "config", "config"), "Specify each setup part once"),
+            (("setup", "tests", "config"), "setup tests installs only the test packages. Name it alone"),
+            (("setup", "tests", "--force"), "setup tests installs only the test packages. Omit --archive and --force"),
+            (("setup", "config", "--namespace", "v2"), "Omit --namespace"),
             (("run", "offline", "--badges"), "--badges is only supported by test"),
             (("run", "offline", "--full"), "--full is only supported by clean"),
             (("run", "offline", "--backup-dir", "backup"), "--backup-dir is only supported by backup"),
@@ -695,8 +760,7 @@ class CliTests(unittest.TestCase):
             (("restore", "images", "--import"), "--import requires the models type"),
             (("backup", "images", "--export"), "--export requires the models type"),
             (("build", "--wait-timeout", "5"), "--wait-timeout is only supported by commands that start services"),
-            (("setup", "extra"), "setup accepts only the tests argument"),
-            (("setup", "tests", "--create-file-repository"), "setup tests installs only the test packages"),
+            (("setup", "extra"), "invalid setup part. Use all, docker-deps, venv"),
             (("install", "tests", "--archive", "backup"), "setup tests installs only the test packages"),
             (("setup", "tests", "--namespace", "v2"), "Unexpected option for setup"),
         ):
@@ -746,7 +810,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(self.invoke('run', 'offline'), 7)
 
     def test_help_and_dry_run_work_from_another_directory(self):
-        (self.project / "config").mkdir()
+        (self.project / "config").mkdir(exist_ok=True)
         (self.project / "config/models.ini").write_text("[models.default]\nmodel = hf.co/example/default:Q4_K_M\n", encoding="utf-8")
         with tempfile.TemporaryDirectory() as folder:
             child = subprocess.run([

@@ -35,7 +35,7 @@ def systemd_unit(project: Path, launcher: Sequence[str], uid: int, *, cpu: bool 
 WantedBy=multi-user.target
 
 [Unit]
-Description=OpenWebUI Server
+Description=Local AI Ferry offline deployment
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target

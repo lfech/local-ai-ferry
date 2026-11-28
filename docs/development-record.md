@@ -7,6 +7,100 @@ Git milestones use commit timestamps. Working-tree milestones use the
 associated verification time where it was recorded.
 Earlier entries use the current names for commands, paths and artifacts.
 
+## 2026-11-28 11:55 CET — Own deployment files and loaf restart
+
+The author asked whether users need access to the Docker project at all, and
+decided that loaf works only with the deployment files of its installation,
+without the project-root Compose file either. The author also asked for
+`loaf restart`, restarting the profile that serves when none is named.
+
+- **Own deployment files.** Every installation runs Compose with its own
+  `loaf/data`: the source checkout's, the standalone executable's runtime, the
+  wheel's or the Debian package's. A project holds only settings and data: a
+  source checkout is one, and elsewhere the settings in the configuration
+  directory make one; other directories get a pointer to `loaf setup`. A
+  `compose.yml` in the project, a checkout of another release and a
+  `docker-project` link no longer change the files, so the warning for mixed
+  releases and the terminal check for custom Compose projects are gone.
+- **No docker-project link.** The `link-docker-project` part and
+  `--link-docker-project` explain that loaf needs no link and how to reach the
+  containers. `clean --full` still removes a link of an earlier release. The
+  guides reach containers by their fixed names with `docker logs` and
+  `docker exec`, and exported guides link deployment files to the release in
+  the repository. The release handoff test cleans up with `loaf docker rm all`;
+  the Verify workflow checks the packaged files after `loaf setup`.
+- **loaf restart.** `loaf restart PROFILE` is `loaf stop PROFILE` followed by
+  `loaf run PROFILE` in one plan under one lock, so every service of the
+  profile starts with a new container. The terminal server follows the
+  `stop PROFILE` rule. Without a profile, restart asks Compose which profile
+  serves and refuses when none or both do, and in a dry run. It takes the
+  options of `run`, and completion offers the profiles.
+- **Tests.** The Docker stop tests run the packaged downloader in their own
+  namespace instead of a custom Compose file, and the fixtures that used a
+  project-root `compose.yml` as a project marker use settings.
+
+## 2026-11-28 11:35 CET — Fixes for the audit of commit c223ab7
+
+The author decided how to resolve the problems of the audit of commit c223ab7
+in [Problems](instructions/problems.md) in [Development](instructions/development.md)
+and asked for them to be fixed, with the audit's proposals where no decision
+was given. The numbers are those of the problem list; both lists are cleared.
+
+- **Setup parts (1).** `loaf setup [PART ...]` selects parts like the types of
+  `loaf backup`: `docker-deps`, `venv`, `toolkit`, `config`, `docs`,
+  `link-docker-project`, `terminal-server-key`, `create-file-repository` and,
+  alone, `tests`. `all`, the default, is `venv`, `toolkit` and `config` in a
+  source checkout and `config` and `docs` elsewhere; the others run only when
+  named. The four former setup options name their part. A part keeps existing
+  settings, guides, a key, a link to another release or a test repository and
+  names `--force`, which replaces them. `--force` also replaces `--yes` in
+  `clean --full` and `docker rm`; `--yes` names it. A custom `docker-project`
+  path stays even with `--force`.
+- **Guides (1, 8).** `docs` refuses a source checkout, which has its own
+  guides, so setup by a standalone executable no longer replaces them; another
+  release's exported guides stay until `--force`. Restoring `source` over
+  exported guides replaces them with the checkout's `docs/` as a whole, so no
+  exported file stays behind untracked.
+- **No default link.** Since plain setup creates no `docker-project` link, a
+  project with `config/config.ini`, or the `--config-dir` one, uses the
+  running loaf's deployment files. Restore creates the default settings in a
+  project without them instead of linking. `loaf clean` recognizes such a
+  project. Exported guides still link into `docker-project/`, which
+  `setup link-docker-project` creates.
+- **Backup hashes (2).** `backup` and `backup --verify` end with the SHA-256
+  of the archive and the launcher in `sha256sum` format and say that
+  `loaf.json` reveals damage, not deliberate changes. The archive's hash is
+  computed while it is written or read, without another pass.
+  [transfer.md](transfer.md#check-a-copied-backup) describes the check.
+- **Terminal server (3, 6).** The checkout's `config/config.ini` leaves the
+  terminal server disabled; `network = connected` stays and has no effect
+  until it is enabled. `status` warns about Docker Engine 26 and 27's legacy
+  bridge isolation only for an enabled terminal server. The terminal server
+  restarts with Docker unless loaf stopped it, like Ollama and Open WebUI.
+- **Dry runs and hints (4, 5).** `run --dry-run` refuses a missing terminal
+  key and APT files like a real run. The missing-key error names
+  `setup terminal-server-key` with `--config-dir`. Follow-up commands use
+  `./loaf` in a checkout whose `./loaf` links to its virtualenv and `loaf` in
+  an activated virtualenv. Source setup ends with the command that activates
+  the virtualenv.
+- **Mixed releases (7).** When a checkout of another release supplies the
+  Compose file, loaf warns that it supplies the overrides and terminal
+  scripts itself.
+- **Smaller items (8).** `status` names `loaf build` and `loaf restore images`
+  for a missing image. The generated systemd unit's description is "Local AI
+  Ferry offline deployment"; the guide names its file `local-ai-ferry.service`.
+  `docker-deps` works on Debian 12 and 13, as `DOCKER_PACKAGES` holds both
+  suites; the README says so. The verification guide names the Verify
+  workflow's Python 3.11 and Debian package jobs. The backup resume hint and
+  the pinned GitHub source archive stay as they are.
+- **GPU test space.** The question was what the GPU transfer test keeps in
+  `/tmp`: its Compose project, where backup stages the uncompressed 2.8 GB
+  model store beside its compressed archive and restore stages the store
+  again, about 6 GB at the peak. Less data would need a second, smaller model
+  for that test, or a backup without staging, which the manifest-first format
+  rules out. The test projects now live in `.test-artifacts/` on disk, which
+  `loaf clean` removes.
+
 ## 2026-11-28 04:15 CET — loaf run, profile stops and compressed documentation
 
 The author asked for the core task in [Development](instructions/development.md),
@@ -1270,7 +1364,7 @@ The author's decisions D1 to D5 replace the terminal design.
 
 - Packaged Compose, the Docker build contexts and default configuration in
   `loaf/data`. Added `loaf link-docker-project` for direct Compose use from an
-  editable or wheel installation. [Direct Compose commands](launcher.md#link-the-docker-project)
+  editable or wheel installation. [Inspect the containers](launcher.md#inspect-the-containers)
 
 ## 2026-11-21 17:32 CET — Docker build context relocation
 

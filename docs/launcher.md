@@ -49,8 +49,8 @@ output when the step fails. Backup bundles the wheels and their cache record
 for recovery. [Backup and transfer](transfer.md)
 
 After updating an older checkout, run the source setup command to install
-`loaf`. Run `loaf setup --link-docker-project` to refresh a link created by an
-earlier release. Existing Compose project names, image tags and volume names carry
+`loaf`. A `docker-project` link from an earlier release is no longer used;
+`loaf clean --full` removes it. Existing Compose project names, image tags and volume names carry
 over to the new launcher.
 
 After recovering a Debian checkout, run the same bootstrap command. A
@@ -99,10 +99,11 @@ platform can install them offline. Some wheels are platform-specific.
 
 ## Upgrade the standalone executable
 
-Replace the `loaf` file, then run `./loaf setup` in the deployment. Setup
-updates `docker-project` and the exported guides to the new release and keeps
-your settings. Build the images while connected with `./loaf build`, or load
-newer images from a backup. `./loaf version` shows the release in use.
+Replace the `loaf` file, then run `./loaf setup docs --force` in the
+deployment to replace the exported guides with those of the new release.
+Setup keeps your settings, and the new `loaf` brings its own deployment files.
+Build the images while connected with `./loaf build`, or load newer images
+from a backup. `./loaf version` shows the release in use.
 
 ## Upgrade from the local-inference names
 
@@ -200,33 +201,24 @@ first time you press Tab after `loaf` or `./loaf`. Debian's default
 Run `install` again after updating a local installation.
 [completion commands](cli-help.md#completion)
 
-## Link the Docker project
+## Inspect the containers
 
-Run this from the directory where you want the link.
+`loaf` runs Docker Compose with the deployment files of its own installation:
+the source checkout, the standalone executable's runtime, the wheel or the
+Debian package. `loaf version` names their directory. A project holds only
+settings and data, so there is no Compose project to enter. Every container
+has a fixed name, `NAMESPACE-SERVICE-1`, which `loaf docker ps` lists, and
+plain Docker commands reach it by that name.
 
 ```bash
-loaf setup --link-docker-project
-(cd docker-project && docker compose --profile offline config)
+loaf docker ps
+docker logs --tail 100 loaf-ollama-offline-1
+docker exec loaf-ollama-offline-1 ollama ps
 ```
 
-From a fresh checkout, you can create the link before setup with
-`PYTHONPATH=python-package/src python3 -m loaf setup --link-docker-project`.
-
-`docker-project` is a symlink to the installed package's data directory. It
-exposes `compose.yml`, `docker/`, and the [packaged configuration](../python-package/src/loaf/data/config/).
-Repeating the command reuses the same link. A link to another loaf release
-is updated in place. `loaf` always uses its own deployment files, even
-before that update. Any other existing path is reported as a conflict.
-
-From a source checkout, `loaf build` and the other launcher commands find the
-deployment files automatically. From a wheel installation, use the directory
-containing the link for those commands. For manual Compose commands, enter
-the link directory. Direct Compose reads its environment and Compose defaults.
-Without further settings, it uses the default deployment `loaf`, and Open
-WebUI starts without the terminal connection that `loaf` presets. For a
-separate namespace, set `LOAF_NAMESPACE` and the matching project name, for
-example `LOAF_NAMESPACE=v1-2-3 docker compose --project-name loaf-v1-2-3`.
-[Configuration overrides](configuration.md#overrides)
+In the namespace `loaf-v1-2-3`, the same container is `loaf-v1-2-3-ollama-offline-1`.
+`loaf -v run offline --dry-run` prints the complete Compose commands with
+their settings. [Container names](cli-help.md#docker)
 
 ## Select models
 
@@ -276,7 +268,8 @@ loaf run offline
 
 The downloader pulls each selected model. Both serving modes apply saved
 `.model` files under `/ollama/config` at backend startup. To apply manually
-edited definitions, run `loaf stop` and then start the desired serving mode.
+edited definitions, run `loaf restart`, which stops the serving profile and
+starts it with new containers.
 Removing a model from the selection leaves its weights, manifests and
 Modelfiles in the store.
 
@@ -303,7 +296,8 @@ NVIDIA inference.
 
 ### Stop and inspect the deployment
 
-[`loaf stop`](cli-help.md#stop) stops the deployment, [`loaf status`](cli-help.md#status)
+[`loaf stop`](cli-help.md#stop) stops the deployment, [`loaf restart`](cli-help.md#restart)
+starts a profile again with new containers, [`loaf status`](cli-help.md#status)
 checks its readiness, and [`loaf docker`](cli-help.md#docker) lists or removes
 its containers, images, volumes and networks.
 
@@ -392,8 +386,7 @@ on both hosts and transfer the model blobs/manifests along with these files.
 To export all installed models manually while the downloader is running:
 
 ```bash
-loaf setup --link-docker-project
-(cd docker-project && docker compose --profile download exec ollama-online export-modelfiles)
+docker exec loaf-ollama-online-1 export-modelfiles
 ```
 
 Re-export after model updates. Removing an old export prevents its startup

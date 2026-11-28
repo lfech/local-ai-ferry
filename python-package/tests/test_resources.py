@@ -193,13 +193,13 @@ Networks (3)
                 self.assertEqual(self.docker.removals(), [])
         code, _, errors = self.invoke("rm", "containers", tty=False)
         self.assertEqual(code, 1)
-        self.assertIn("Confirm the removal in a terminal, or add --yes.", errors)
+        self.assertIn("Confirm the removal in a terminal, or add --force.", errors)
         self.assertEqual(self.docker.removals(), [])
 
     def test_rm_refuses_networks_volumes_and_images_while_containers_remain(self):
         for kind in ("volumes", "networks", "images"):
             with self.subTest(kind=kind):
-                code, output, errors = self.invoke("rm", kind, "--yes")
+                code, output, errors = self.invoke("rm", kind, "--force")
                 self.assertEqual(code, 1)
                 self.assertIn("Deployment loaf still has 4 containers", errors)
                 self.assertIn(f"docker rm containers {kind}", errors)
@@ -210,13 +210,13 @@ Networks (3)
     def test_rm_with_yes_removes_only_the_selected_type(self):
         self.docker.containers = {name: record for name, record in self.docker.containers.items()
                                   if name in ("c5", "c6")}
-        code, output, errors = self.invoke("rm", "volumes", "--yes", "-v")
+        code, output, errors = self.invoke("rm", "volumes", "--force", "-v")
         self.assertEqual(code, 0, errors)
         self.prompt.assert_not_called()
         self.assertEqual(self.docker.removals(), [["volume", "rm"]])
         self.assertIn("+ docker volume rm loaf-ollama loaf-terminal-users", output)
         self.assertIn("Removed 2 Docker resources of deployment loaf.", output)
-        self.assertEqual(self.invoke("rm", "volumes", "--yes")[1].splitlines()[-1], "Nothing to remove.")
+        self.assertEqual(self.invoke("rm", "volumes", "--force")[1].splitlines()[-1], "Nothing to remove.")
 
     def test_dry_run_needs_no_docker(self):
         code, output, _ = self.invoke("rm", "images", "volumes", "--dry-run", "--namespace", "v2")
@@ -238,15 +238,16 @@ Plan for deployment loaf-v2
             (("rm",), "docker rm requires one or more types"),
             (("rm", "container"), "invalid resource type. Use all, containers, images, volumes or networks."),
             (("rm", "images", "images"), "Specify each resource type once."),
-            (("ps", "--yes"), "--yes is only supported by docker rm."),
+            (("ps", "--force"), "--force is only supported by setup, docker rm and clean --full."),
+            (("rm", "all", "--yes"), "--yes is now --force."),
             (("rm", "all", "--attach"), "--attach is available for Compose and transfer commands."),
         ):
             with self.subTest(arguments=arguments), self.assertRaises(SystemExit):
                 self.invoke(*arguments)
             self.assertEqual(self.docker.calls, [])
         with redirect_stderr(io.StringIO()) as errors, self.assertRaises(SystemExit):
-            cli.main(["stop", "--yes"])
-        self.assertIn("--yes is only supported by docker rm and clean --full.", errors.getvalue())
+            cli.main(["stop", "--force"])
+        self.assertIn("--force is only supported by setup, docker rm and clean --full.", errors.getvalue())
 
     def test_all_selects_every_type(self):
         self.assertEqual(resources.plan("loaf", resources.KINDS)[0],

@@ -11,7 +11,7 @@ if [ "$1" = configure ]; then
     chmod 0750 /etc/loaf
     install -d -m 2770 -o root -g "$group" /var/lib/loaf /var/lib/loaf/backup
     if [ ! -e /etc/loaf/terminal-server.key ]; then
-        loaf --system setup --terminal-server-key >/dev/null
+        loaf --system setup terminal-server-key >/dev/null
         chgrp "$group" /etc/loaf/terminal-server.key
         chmod 0640 /etc/loaf/terminal-server.key
     fi

@@ -22,7 +22,7 @@ class ConfigTests(unittest.TestCase):
         self.config_dir = self.project / "config"
         self.config_dir.mkdir()
         self.path = self.config_dir / "config.ini"
-        (self.project / "compose.yml").touch()
+        self.path.touch()
 
     def test_missing_file_uses_built_in_defaults(self):
         settings = config.load(self.config_dir)
@@ -149,11 +149,14 @@ class ConfigTests(unittest.TestCase):
                             compose.variables(start)["LOAF_TERMINAL_APT_SOURCE_HASH"])
 
     def test_local_model_selection_uses_packaged_files_only_when_missing_locally(self):
-        data = self.project / "python-package/src/loaf/data"
+        # The running loaf's packaged files: its defaults and model lists.
+        data = self.project / "packaged-data"
         defaults = data / "config"
         defaults.mkdir(parents=True)
         (data / "compose.yml").touch()
-        (self.project / "compose.yml").unlink()
+        packaged = patch.object(cli.assets, "DATA_DIR", data)
+        packaged.start()
+        self.addCleanup(packaged.stop)
         (defaults / "config.ini").write_text("[launcher]\nwait_timeout = 480\n", encoding="utf-8")
         (defaults / "models.ini").write_text("[models.default]\nmodel = hf.co/example/bundled\n", encoding="utf-8")
         (defaults / "example.ini").write_text("[models.example]\nmodel = hf.co/example/example\n", encoding="utf-8")
