@@ -4,6 +4,34 @@
 
 Older entries use the current command and project names in examples.
 
+## 2026-11-28 18:46:25 +0100 — Test badge run
+
+`loaf test --badges` passed on Linux with Python 3.13.2.
+Unittest reported 354 cases and 0 skips.
+Enabled test options were `RUN_DOCKER_TESTS=1`, `RUN_GPU_TESTS=1`, `RUN_CATALOG_TESTS=1`, `RUN_TERMINAL_SERVER_TESTS=1`.
+
+| Group | Passed / executed |
+| --- | ---: |
+| CLI baseline | 289/289 |
+| Docker | 36/36 |
+| Open Terminal | 22/22 |
+| GPU inference | 6/6 |
+| Model catalog | 1/1 |
+
+## 2026-11-28 18:37:46 +0100 — Test badge run
+
+`loaf test --badges` failed on Linux with Python 3.13.2.
+Unittest reported 354 cases and 0 skips.
+Enabled test options were `RUN_DOCKER_TESTS=1`, `RUN_GPU_TESTS=1`, `RUN_CATALOG_TESTS=1`, `RUN_TERMINAL_SERVER_TESTS=1`.
+
+| Group | Passed / executed |
+| --- | ---: |
+| CLI baseline | 289/289 |
+| Docker | 36/36 |
+| Open Terminal | 21/22 |
+| GPU inference | 6/6 |
+| Model catalog | 1/1 |
+
 ## 2026-11-28 18:18:19 +0100 — Reconcile the audit backlog
 
 - Scope covered the ToDo list, problems register, and their links to the
